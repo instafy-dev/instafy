@@ -411,6 +411,7 @@ printf '{"previewId":"preview-1","description":"Livraria Lello","takenAt":%s}' "
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
     job.proxy = Some(job_grant(
@@ -811,6 +812,7 @@ async fn run_stopped_as_leased(first: FirstModelCall) -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
     let mut registration = registration_for_live(Uuid::new_v4());
     registration.heartbeat_url = controller_url.join("/agent/heartbeat")?;

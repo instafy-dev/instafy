@@ -26,6 +26,13 @@ export interface ControllerAgentProfile {
   model: string | null;
   reasoningEffort: string | null;
   credentialId: string | null;
+  /**
+   * The owner's Claude Code login the agent's turns run on, for an agent whose
+   * `provider` is `claude-code` (docs/Local-Engine-Turns.md 11.19); null when
+   * it names none and runs on the owner's first login. Absent from older
+   * controllers.
+   */
+  claudeCodeLoginId?: string | null;
   runtimeId: string | null;
   deletedAt?: string | null;
   createdAt: string;
@@ -34,6 +41,8 @@ export interface ControllerAgentProfile {
 
 export interface CreateMyAgentInput {
   credentialId?: string | null;
+  /** One of the caller's own Claude Code logins, with `provider: "claude-code"` (11.19); null or absent for the first login. */
+  claudeCodeLoginId?: string | null;
   handle?: string;
   displayName?: string | null;
   description?: string | null;
@@ -60,6 +69,13 @@ export interface UpdateMyAgentInput {
   /** As on create (Octo takes only a picture), or the agent's own id or its unchanged seed; anything else is rejected with a 400. Omit it, or send null or a blank string, to keep the saved seed. */
   avatarSeed?: string | null;
   credentialId?: string | null;
+  /**
+   * The Claude Code login the agent's turns run on, for an agent whose
+   * provider is, or becomes, `claude-code` (11.19): omit it to keep the saved
+   * one, send null for the owner's first login. Choosing a connection or
+   * Instafy AI clears it.
+   */
+  claudeCodeLoginId?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
   projectId?: string;

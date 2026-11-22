@@ -36,6 +36,8 @@ export async function getPublicAgentProfile(projectId: string, agentId: string, 
   }
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface ListMyAgentsResult {
   success: boolean;
   agents: ControllerAgentProfile[];
@@ -87,6 +89,12 @@ function mapAgentPayload(payload: Record<string, unknown>): ControllerAgentProfi
     model: typeof payload.model === "string" ? payload.model : null,
     reasoningEffort: typeof payload.reasoningEffort === "string" ? payload.reasoningEffort : null,
     credentialId: typeof payload.credentialId === "string" ? payload.credentialId : null,
+    // The Claude Code login an agent names (docs/Local-Engine-Turns.md
+    // 11.19), only as a UUID; null for none, which runs on the first login.
+    claudeCodeLoginId:
+      typeof payload.claudeCodeLoginId === "string" && UUID_PATTERN.test(payload.claudeCodeLoginId)
+        ? payload.claudeCodeLoginId.toLowerCase()
+        : null,
     runtimeId: typeof payload.runtimeId === "string" ? payload.runtimeId : null,
     createdAt: typeof payload.createdAt === "string" ? payload.createdAt : "",
     updatedAt: typeof payload.updatedAt === "string" ? payload.updatedAt : "",

@@ -1159,6 +1159,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
     let registration = registration_for_live(Uuid::new_v4());
     // Where a write turn records how its folder began, until its job ends.
@@ -1515,6 +1516,7 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1772,6 +1774,7 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
 
     let execution = tokio::time::timeout(
@@ -1967,6 +1970,7 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
 
     let execution = tokio::time::timeout(
@@ -2205,6 +2209,7 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
 
     let execution = tokio::time::timeout(

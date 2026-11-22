@@ -15,8 +15,9 @@
 //!
 //! It runs `INSTAFY_CLAUDE_CODE_BIN` (an absolute path, as Desktop grants it) or, without it, the
 //! first `claude` on `PATH`, through the same checks, probe, command and environment as a lane
-//! turn (3.2-3.4), and grants it this shell's `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`, `HTTP_PROXY`,
-//! `NO_PROXY` and `NODE_EXTRA_CA_CERTS`, as Desktop grants the login shell's (D26). It sends about
+//! turn (3.2-3.4), and grants it this shell's `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and
+//! `NODE_EXTRA_CA_CERTS`, as Desktop grants the login shell's (D26), with one login: this shell's
+//! `CLAUDE_CONFIG_DIR`, or Claude Code's usual folder without one (11.19). It sends about
 //! a dozen short prompts, each a real request on the person's own account, a `plan_only` turn and
 //! a resume of a session this computer does not have among them (11.17). It writes only in a
 //! temporary folder, apart from one file in the home folder for item 12's `@~/` import, which it
@@ -279,6 +280,15 @@ fn granted_env_json() -> String {
     Value::Object(granted).to_string()
 }
 
+/// The one login the suite grants (11.19), as `INSTAFY_CLAUDE_CODE_LOGINS_JSON` carries it: this
+/// shell's `CLAUDE_CONFIG_DIR`, or Claude Code's usual folder when it sets none.
+fn granted_login_json(login: Uuid) -> String {
+    let folder = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|folder| !folder.is_empty());
+    serde_json::json!([{ "id": login.to_string(), "configDir": folder }]).to_string()
+}
+
 fn sh_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
 }
@@ -317,12 +327,14 @@ impl Live {
         let root = std::fs::canonicalize(temp.path()).map_err(|error| error.to_string())?;
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let login = Uuid::new_v4();
         let grant = LaunchGrant::parse(
             RawLaunchGrant {
                 bin: Some(bin.clone().into_os_string()),
                 path: std::env::var_os("PATH"),
                 user_id: Some(OsString::from(Uuid::new_v4().to_string())),
                 env_json: Some(OsString::from(granted_env_json())),
+                logins_json: Some(OsString::from(granted_login_json(login))),
             },
             LaunchEnvSnapshot::from_process(),
             Confinement::new([workspace]),
@@ -331,7 +343,7 @@ impl Live {
         .map_err(|reason| format!("{} cannot be granted: {reason}", bin.display()))?
         .ok_or_else(|| "nothing was granted".to_string())?;
         let lane = Lane::new(grant);
-        let readiness = lane.probe().await;
+        let readiness = lane.probe(login).await;
         let ready = match readiness.ready() {
             Some(ready) => ready.clone(),
             None => {
@@ -367,7 +379,11 @@ impl Live {
         command
             .arg("--help")
             .env_clear()
-            .envs(lane_environment(self.lane.grant(), self.ready.launch()))
+            .envs(lane_environment(
+                self.lane.grant(),
+                self.ready.launch(),
+                self.ready.login(),
+            ))
             .current_dir(folder.path())
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);

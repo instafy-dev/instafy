@@ -12,6 +12,12 @@
 #   FAKE_CLAUDE_HELP        the `--help` answer: help/<name>.txt (default: full)
 #   FAKE_CLAUDE_AUTH        the `auth status` answer: auth/<name>.json (default: claude-ai)
 #   FAKE_CLAUDE_PROBE_DELAY seconds each of those three answers waits first (default: none)
+#
+# A Claude Code login is a CLAUDE_CONFIG_DIR, so `auth status` can answer for each login apart:
+# with CLAUDE_CONFIG_DIR set, a file fake-claude-auth in that folder names that login's answer in
+# place of FAKE_CLAUDE_AUTH, and a file fake-claude-auth-delay there holds the seconds its answer
+# waits first, in place of FAKE_CLAUDE_PROBE_DELAY. Without CLAUDE_CONFIG_DIR (Claude Code's usual
+# folder) the variables answer; the fake never looks in a usual folder.
 #   FAKE_CLAUDE_SCENARIO    the `--print` run: scenarios/<name>.jsonl (default: record-only,
 #                           which only records the call)
 #   FAKE_CLAUDE_RESUME_SCENARIO
@@ -83,8 +89,9 @@ respond() {
   kind="$1"
   name="$2"
   extension="$3"
-  if [ -n "${FAKE_CLAUDE_PROBE_DELAY:-}" ]; then
-    /bin/sleep "$FAKE_CLAUDE_PROBE_DELAY" </dev/null >/dev/null 2>&1
+  delay="${4:-${FAKE_CLAUDE_PROBE_DELAY:-}}"
+  if [ -n "$delay" ]; then
+    /bin/sleep "$delay" </dev/null >/dev/null 2>&1
   fi
   case "$name" in
     hang) exec /bin/sleep 60 ;;
@@ -247,7 +254,16 @@ case "${1:-}" in
     ;;
   auth)
     [ "$#" -eq 2 ] && [ "$2" = status ] || fail "the only auth command is auth status"
-    respond auth "${FAKE_CLAUDE_AUTH:-claude-ai}" json
+    answer="${FAKE_CLAUDE_AUTH:-claude-ai}"
+    delay=''
+    login="${CLAUDE_CONFIG_DIR:-}"
+    if [ -n "$login" ] && [ -f "$login/fake-claude-auth" ]; then
+      answer=$(/bin/cat "$login/fake-claude-auth")
+    fi
+    if [ -n "$login" ] && [ -f "$login/fake-claude-auth-delay" ]; then
+      delay=$(/bin/cat "$login/fake-claude-auth-delay")
+    fi
+    respond auth "$answer" json "$delay"
     ;;
   --print)
     # Like `claude -p`, read the prompt to its end first (recording read it already).

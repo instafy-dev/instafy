@@ -52,6 +52,8 @@ type AgentProfileModalProps = {
    * connection, such as a turn engine (docs/Local-Engine-Turns.md 11.3).
    */
   aiNote?: ReactNode;
+  /** After that note: more of the chosen AI to choose, such as a turn engine's own fields. */
+  aiFields?: ReactNode;
   modelId?: string | null;
   modelOptions?: AiModelOption[];
   onModelChange?: (modelId: string | null) => void;
@@ -99,6 +101,7 @@ export function AgentProfileModal({
   providerOptions,
   onProviderChange,
   aiNote = null,
+  aiFields = null,
   modelId = null,
   modelOptions,
   onModelChange,
@@ -265,6 +268,7 @@ export function AgentProfileModal({
                 {aiNote}
               </div>
             ) : null}
+            {aiFields}
 
             {showCredentialPicker ? (
               <Field label="Credential" labelId="agent-profile-credential-label" htmlFor="agent-profile-credential">

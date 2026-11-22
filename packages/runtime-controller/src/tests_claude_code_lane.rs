@@ -7,10 +7,12 @@
 // it, whoever or whatever started them, is checked before anything is
 // written (`claude_code_lane::check_target`). An admitted turn's job waits,
 // unpinned, until one of its person's own computers in the space with Claude
-// Code ready leases it, one at a time for each person. The space and harness
-// are `tests_provider_space.rs`'s, seeded here with a Claude Code agent,
-// `@claude`, for the owner and the member, and with their lane-ready
-// computers. Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
+// Code ready on the turn's Claude Code login leases it, one at a time on each
+// login (11.19). The space and harness are `tests_provider_space.rs`'s,
+// seeded here with a Claude Code agent, `@claude`, and a first Claude Code
+// login ([`first_login_of`]) for the owner and the member, and with their
+// computers, ready on that login. Requires `TEST_DATABASE_URL` like the tests
+// in `tests.rs`.
 
 use axum::http::StatusCode;
 use axum::Json;
@@ -132,14 +134,40 @@ fn capabilities(owner: Option<Uuid>, extra: JsonValue) -> JsonValue {
     with(capabilities, extra)
 }
 
-/// The capability registration attests for a lane-ready computer.
-fn lane_ready() -> JsonValue {
-    json!({ "claudeCode": { "version": 1, "ready": true } })
+/// The first Claude Code login the harness gives `person`, the owner and the
+/// member alike: their only one, unless a test adds more.
+fn first_login_of(person: Uuid) -> Uuid {
+    Uuid::new_v5(&person, b"claude-code-first-login")
 }
 
-/// The capability of a computer whose Claude Code is not ready.
-fn lane_not_ready() -> JsonValue {
-    json!({ "claudeCode": { "version": 1, "ready": false } })
+/// The capability registration attests for a computer whose Claude Code is
+/// ready on each of `logins`, and on no other (11.19).
+fn lane_ready_on(logins: &[Uuid]) -> JsonValue {
+    let logins: serde_json::Map<String, JsonValue> = logins
+        .iter()
+        .map(|login| (login.to_string(), json!({ "ready": true })))
+        .collect();
+    json!({ "claudeCode": { "version": 2, "ready": true, "logins": logins } })
+}
+
+/// The capability registration attests for `person`'s lane-ready computer:
+/// ready on their first login.
+fn lane_ready(person: Uuid) -> JsonValue {
+    lane_ready_on(&[first_login_of(person)])
+}
+
+/// The capability of `person`'s computer whose Claude Code is not ready:
+/// nor is their first login, for the program's reason.
+fn lane_not_ready(person: Uuid) -> JsonValue {
+    json!({ "claudeCode": {
+        "version": 2,
+        "ready": false,
+        "reason": "binary_missing",
+        "logins": { first_login_of(person).to_string(): {
+            "ready": false,
+            "reason": "binary_missing",
+        } },
+    } })
 }
 
 fn person_context(user: Uuid) -> RequestContext {
@@ -167,6 +195,10 @@ struct Written {
 #[derive(Debug)]
 struct Job {
     engine: Option<String>,
+    /// The Claude Code logins dispatch queued a lane job to run on, and the
+    /// one its lease took (11.19).
+    claude_code_login_ids: Option<Vec<Uuid>>,
+    claude_code_login_id: Option<Uuid>,
     credential_id: Option<Uuid>,
     grant_ids: Option<Vec<Uuid>>,
     target_runtime_id: Option<Uuid>,
@@ -251,6 +283,7 @@ where
         .merge(crate::send_intents::router())
         .merge(crate::agent::router())
         .merge(crate::ai_agents::router())
+        .merge(crate::claude_code_logins::router())
         .merge(crate::automations::router())
         .merge(crate::device_grants::router())
         .merge(crate::secrets::router())
@@ -362,8 +395,18 @@ impl Lane {
                 owner_credential = Some(credential_id);
             }
         }
-        // The owner's and the member's own @claude: Claude Code as its AI, so
-        // no connection.
+        // The owner's and the member's first Claude Code login, and their own
+        // @claude: Claude Code as its AI, so no connection, and no login of
+        // its own, so their first.
+        for user in [space.owner, space.member] {
+            connection
+                .execute(
+                    "insert into claude_code_logins (id, user_id, label, created_at)
+                     values ($1, $2, 'Claude Code', now() - interval '1 day')",
+                    &[&first_login_of(user), &user],
+                )
+                .await?;
+        }
         let mut claude_agents = Vec::new();
         for user in [space.owner, space.member] {
             let agent = Uuid::new_v4();
@@ -419,7 +462,7 @@ impl Lane {
                 id,
                 space.project_id,
                 "self-hosted",
-                capabilities(Some(owner), lane_ready()),
+                capabilities(Some(owner), lane_ready(owner)),
                 "ready",
                 600,
             )
@@ -634,15 +677,17 @@ impl Lane {
             .get()
             .await?
             .query_one(
-                "select engine, credential_id, grant_ids, target_runtime_id,
-                        trigger_received_at, parent_job_id, plan_group_id, agent_role,
-                        status, lease_attempts, run_id, payload
+                "select engine, claude_code_login_ids, claude_code_login_id, credential_id,
+                        grant_ids, target_runtime_id, trigger_received_at, parent_job_id,
+                        plan_group_id, agent_role, status, lease_attempts, run_id, payload
                    from agent_jobs where id = $1",
                 &[&id],
             )
             .await?;
         Ok(Job {
             engine: row.get("engine"),
+            claude_code_login_ids: row.get("claude_code_login_ids"),
+            claude_code_login_id: row.get("claude_code_login_id"),
             credential_id: row.get("credential_id"),
             grant_ids: row.get("grant_ids"),
             target_runtime_id: row.get("target_runtime_id"),
@@ -699,6 +744,20 @@ impl Lane {
             &[&user, &handle],
         )
         .await
+    }
+
+    /// A new Claude Code agent of `user`'s, `@handle`, that names no login.
+    async fn claude_code_agent(&self, user: Uuid, handle: &str) -> anyhow::Result<Uuid> {
+        let agent = Uuid::new_v4();
+        sql(
+            self.pool(),
+            "insert into user_agents (
+                 id, user_id, credential_id, provider, handle, display_name, avatar_seed
+             ) values ($1, $2, null, $3, $4, $4, 'hatchling:2')",
+            &[&agent, &user, &claude_code_lane::PROVIDER, &handle],
+        )
+        .await?;
+        Ok(agent)
     }
 
     /// `agent`'s AI as stored: its provider and its connection.
@@ -1251,9 +1310,10 @@ fn stopped_turn_events(
 /// A failure message of a lane turn the controller ended as `code`: Studio
 /// words it by `aiAccessMode` and `claudeCodeFailure`, and shows it as a
 /// lane failure only with the controller's own stamps, which no recorded
-/// message keeps (docs/Local-Engine-Turns.md 5.5).
-fn assert_lane_failure(metadata: &JsonValue, code: &str, what: &str) {
-    assert_lane_stamps(metadata, what);
+/// message keeps (docs/Local-Engine-Turns.md 5.5), naming `login`, the
+/// Claude Code login the turn's lease took (11.19).
+fn assert_lane_failure(metadata: &JsonValue, code: &str, login: Option<Uuid>, what: &str) {
+    assert_lane_stamps(metadata, login, what);
     assert_eq!(
         metadata["claudeCodeFailure"],
         json!(code),
@@ -1296,13 +1356,14 @@ fn reason_of(error: &ApiError) -> Option<&str> {
         .and_then(JsonValue::as_str)
 }
 
-/// The controller's lane stamps, where `metadata` keeps them.
-fn assert_lane_stamps(metadata: &JsonValue, what: &str) {
-    assert_eq!(
-        metadata["claudeCode"],
-        json!({ "version": 1 }),
-        "{what}: {metadata}"
-    );
+/// The controller's lane stamps, where `metadata` keeps them, naming
+/// `login` as the turn's Claude Code login, or none (11.19).
+fn assert_lane_stamps(metadata: &JsonValue, login: Option<Uuid>, what: &str) {
+    let stamp = match login {
+        Some(login) => json!({ "version": 1, "loginId": login.to_string() }),
+        None => json!({ "version": 1 }),
+    };
+    assert_eq!(metadata["claudeCode"], stamp, "{what}: {metadata}");
     assert_eq!(
         metadata["aiAccessMode"],
         json!("claude-code"),
@@ -1315,15 +1376,23 @@ fn assert_lane_stamps(metadata: &JsonValue, what: &str) {
     );
 }
 
-/// `job` is a turn of `person`'s own `agent`, a Claude Code agent, that waits
-/// for one of their computers: it runs on their own Claude Code, stamped so,
-/// with no connection, device grant or runtime pin.
+/// `job` is a turn of `person`'s own `agent`, a Claude Code agent that names
+/// no login, that waits for one of their computers: it runs on their own
+/// Claude Code, on their first login, stamped so, with no connection, device
+/// grant or runtime pin. Its payload names no login: the lease tells its
+/// runtime which.
 fn assert_lane_job(job: &Job, person: Uuid, agent: Uuid, what: &str) {
     assert_eq!(
         job.engine.as_deref(),
         Some(claude_code_lane::ENGINE),
         "{what}"
     );
+    assert_eq!(
+        job.claude_code_login_ids,
+        Some(vec![first_login_of(person)]),
+        "{what}"
+    );
+    assert_eq!(job.claude_code_login_id, None, "{what}: not leased yet");
     assert_eq!(job.credential_id, None, "{what}");
     assert_eq!(job.grant_ids, None, "{what}");
     assert_eq!(job.target_runtime_id, None, "{what}");
@@ -1335,7 +1404,7 @@ fn assert_lane_job(job: &Job, person: Uuid, agent: Uuid, what: &str) {
         "{what}: {}",
         job.payload
     );
-    assert_lane_stamps(&job.payload["metadata"], what);
+    assert_lane_stamps(&job.payload["metadata"], None, what);
 }
 
 /// `value`, anywhere in it, has none of `keys`.
@@ -1484,7 +1553,7 @@ async fn a_claude_code_agents_turn_waits_for_its_persons_own_computer() -> anyho
             let run = lane
                 .metadata_of("select metadata from runs where id = $1", run_id)
                 .await?;
-            assert_lane_stamps(&run, "run");
+            assert_lane_stamps(&run, Some(first_login_of(space.owner)), "run");
             assert!(run.get("runtimeAlert").is_none(), "no runtime alert: {run}");
             let prompt = lane
                 .metadata_of(
@@ -1493,7 +1562,7 @@ async fn a_claude_code_agents_turn_waits_for_its_persons_own_computer() -> anyho
                     run_id,
                 )
                 .await?;
-            assert_lane_stamps(&prompt, "prompt");
+            assert_lane_stamps(&prompt, Some(first_login_of(space.owner)), "prompt");
             let message = lane
                 .metadata_of(
                     "select metadata from conversation_messages
@@ -1501,7 +1570,7 @@ async fn a_claude_code_agents_turn_waits_for_its_persons_own_computer() -> anyho
                     run_id,
                 )
                 .await?;
-            assert_lane_stamps(&message, "message");
+            assert_lane_stamps(&message, Some(first_login_of(space.owner)), "message");
             // No trigger kind: device grants, the one feature that reads it,
             // are off for the person, whom only the lane's switch covers.
             assert!(message.get("trigger").is_none(), "{message}");
@@ -2636,7 +2705,11 @@ async fn a_send_to_a_claude_code_agent_and_another_runs_each_on_its_own_ai() -> 
             let claude_run = lane
                 .metadata_of("select metadata from runs where id = $1", run_of(claude))
                 .await?;
-            assert_lane_stamps(&claude_run, "@claude's run");
+            assert_lane_stamps(
+                &claude_run,
+                Some(first_login_of(space.owner)),
+                "@claude's run",
+            );
             let helper_run = lane
                 .metadata_of("select metadata from runs where id = $1", run_of(helper))
                 .await?;
@@ -2697,8 +2770,11 @@ async fn an_ambient_evaluation_sits_out_while_no_computer_of_its_persons_is_read
             // The owner's computers are up, without Claude Code ready; the
             // member's is ready.
             for computer in [lane.desktop, lane.second_desktop] {
-                lane.set_capabilities(computer, capabilities(Some(space.owner), lane_not_ready()))
-                    .await?;
+                lane.set_capabilities(
+                    computer,
+                    capabilities(Some(space.owner), lane_not_ready(space.owner)),
+                )
+                .await?;
             }
             let chat = lane.chat().await?;
             let before = lane.written().await?;
@@ -2715,7 +2791,11 @@ async fn an_ambient_evaluation_sits_out_while_no_computer_of_its_persons_is_read
                 json!({ "reason": "computer_away" }),
                 "{run_metadata}"
             );
-            assert_lane_stamps(&run_metadata, "the skipped run");
+            assert_lane_stamps(
+                &run_metadata,
+                Some(first_login_of(space.owner)),
+                "the skipped run",
+            );
             assert_eq!(
                 lane.written().await?,
                 Written {
@@ -2726,10 +2806,27 @@ async fn an_ambient_evaluation_sits_out_while_no_computer_of_its_persons_is_read
                 },
                 "the message and a closed run, and no job"
             );
+            // Nor does it run while the owner's computer is ready only on
+            // another login of theirs than the one its job would take.
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready_on(&[Uuid::new_v4()])),
+            )
+            .await?;
+            let (status, response) = lane
+                .send(&lane.owner(), lane.chat().await?, &ambient())
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let run = Uuid::parse_str(response["runId"].as_str().unwrap_or_default())
+                .map_err(|_| anyhow::anyhow!("no run: {response}"))?;
+            assert_eq!(lane.run_status(run).await?, "canceled", "another login");
 
             // With one of the owner's computers ready, it is a lane turn.
-            lane.set_capabilities(lane.desktop, capabilities(Some(space.owner), lane_ready()))
-                .await?;
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready(space.owner)),
+            )
+            .await?;
             let chat = lane.chat().await?;
             let job = lane.job(lane.admitted(chat, &ambient()).await?).await?;
             assert_lane_job(&job, space.owner, lane.owner_claude, "the evaluation");
@@ -2756,14 +2853,15 @@ async fn an_ambient_evaluation_sits_out_while_no_computer_of_its_persons_is_read
     .await
 }
 
-/// Lease (docs/Local-Engine-Turns.md 11.7): a waiting lane turn is leased
-/// only by a computer in its space that is private self-hosted, attested as
-/// its person's own, with a ready `claudeCode` of version 1: never a hosted
-/// runtime that reports the capability, even pinned to it, a teammate's or a
-/// service-owned computer, a Personal Browser runtime, or the person's own
-/// computer without the capability. The lease adds no envelope, metering
+/// Lease (docs/Local-Engine-Turns.md 11.7, 11.19): a waiting lane turn is
+/// leased only by a computer in its space that is private self-hosted,
+/// attested as its person's own, with a `claudeCode` of version 2 ready on
+/// the turn's login: never a hosted runtime that reports the capability,
+/// even pinned to it, a teammate's or a service-owned computer, a Personal
+/// Browser runtime, or the person's own computer without the capability, of
+/// version 1, or without that login. The lease adds no envelope, metering
 /// bind, job token, history or extras, keeps the internal workspace token,
-/// and is the turn's only one.
+/// is the turn's only one, and tells the runtime the login it took.
 #[tokio::test]
 async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> anyhow::Result<()> {
     with_lane(
@@ -2775,7 +2873,7 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
             let hosted = lane
                 .computer(
                     "instafy-cloud",
-                    capabilities(None, lane_ready()),
+                    capabilities(None, lane_ready(space.owner)),
                     "ready",
                     600,
                 )
@@ -2783,7 +2881,7 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
             let service_owned = lane
                 .computer(
                     "self-hosted",
-                    capabilities(Some(lane.service_user), lane_ready()),
+                    capabilities(Some(lane.service_user), lane_ready(space.owner)),
                     "ready",
                     600,
                 )
@@ -2794,7 +2892,7 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
                     capabilities(
                         Some(space.owner),
                         with(
-                            lane_ready(),
+                            lane_ready(space.owner),
                             json!({ "personalBrowser": {
                                 "enabled": true,
                                 "ownerUserId": space.owner.to_string(),
@@ -2821,35 +2919,75 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
                 lane.leases_nothing(runtime, "pinned there").await?;
             }
             lane.pin(job, None).await?;
-            // Nor does the person's own computer while it attests no ready
-            // capability of version 1, or another owner.
+            // Nor does the person's own computer while it attests no
+            // capability of version 2 ready on the turn's login, or another
+            // owner.
+            let login = first_login_of(space.owner);
             for (what, attested) in [
                 (
                     "not ready",
-                    capabilities(Some(space.owner), lane_not_ready()),
+                    capabilities(Some(space.owner), lane_not_ready(space.owner)),
                 ),
                 (
-                    "another version",
+                    "version 1",
                     capabilities(
                         Some(space.owner),
-                        json!({ "claudeCode": { "version": 2, "ready": true } }),
+                        json!({ "claudeCode": {
+                            "version": 1,
+                            "ready": true,
+                            "logins": { login.to_string(): { "ready": true } },
+                        } }),
                     ),
+                ),
+                (
+                    "another login",
+                    capabilities(Some(space.owner), lane_ready_on(&[Uuid::new_v4()])),
+                ),
+                (
+                    "the login held",
+                    capabilities(
+                        Some(space.owner),
+                        json!({ "claudeCode": {
+                            "version": 2,
+                            "ready": true,
+                            "logins": { login.to_string(): {
+                                "ready": false,
+                                "reason": "plan_limit",
+                                "resetsAt": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                            } },
+                        } }),
+                    ),
+                ),
+                (
+                    "no logins",
+                    capabilities(Some(space.owner), lane_ready_on(&[])),
                 ),
                 ("no capability", capabilities(Some(space.owner), json!({}))),
                 (
                     "another owner",
-                    capabilities(Some(space.member), lane_ready()),
+                    capabilities(Some(space.member), lane_ready(space.owner)),
                 ),
             ] {
                 lane.set_capabilities(lane.desktop, attested).await?;
                 lane.leases_nothing(lane.desktop, what).await?;
             }
-            lane.set_capabilities(lane.desktop, capabilities(Some(space.owner), lane_ready()))
-                .await?;
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready(space.owner)),
+            )
+            .await?;
 
             let leased = lane.lease_one(lane.desktop, job).await?;
             assert_eq!(leased["engine"], json!("claude-code"), "{leased}");
             assert_eq!(leased["lease_attempts"], json!(1), "{leased}");
+            // The runtime is told the login the lease took, which the job
+            // keeps.
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(login.to_string()),
+                "{leased}"
+            );
+            assert_eq!(lane.job(job).await?.claude_code_login_id, Some(login));
             for key in [
                 "proxy",
                 "controller_token",
@@ -2910,38 +3048,42 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
     .await
 }
 
-/// One lane turn runs at a time for each person, on any of their computers
-/// (docs/Local-Engine-Turns.md 11.7, 11.8): while one of the owner's turns
-/// runs on their second computer, neither computer leases their next, and
-/// the index refuses a second running one; another person's turn runs
+/// One lane turn runs at a time on each Claude Code login, on any of its
+/// person's computers (docs/Local-Engine-Turns.md 11.8, 11.19): while one of
+/// the owner's turns runs on their first login on their second computer,
+/// neither computer leases their next on the same login, and the index
+/// refuses a second running one on it; another person's turn runs
 /// meanwhile; and once the first ends, the other computer takes the next.
 #[tokio::test]
-async fn one_lane_turn_runs_at_a_time_for_each_person_on_any_of_their_computers(
+async fn one_lane_turn_runs_at_a_time_on_each_login_on_any_of_its_persons_computers(
 ) -> anyhow::Result<()> {
     with_lane(
         "lane-one-running",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
+            let login = first_login_of(space.owner);
             let (_, first) = lane.lane_turn().await?;
             let (_, next) = lane.lane_turn().await?;
             // Either computer of the person's takes their oldest waiting turn.
             lane.lease_one(lane.second_desktop, first).await?;
             for computer in [lane.desktop, lane.second_desktop] {
-                lane.leases_nothing(computer, "one runs at a time").await?;
+                lane.leases_nothing(computer, "one runs at a time on the login")
+                    .await?;
             }
             assert_eq!(lane.job(next).await?.status, "queued");
-            // The index agrees: a second running turn of the person's fails.
+            // The index agrees: a second running turn on the login fails.
             let refused = sql(
                 lane.pool(),
                 "update agent_jobs set status = 'leased', lease_attempts = 1,
                         leased_by_runtime_id = $2, leased_at = now(),
-                        lease_expires_at = now() + interval '2 minutes'
+                        lease_expires_at = now() + interval '2 minutes',
+                        claude_code_login_id = $3
                   where id = $1",
-                &[&next, &lane.desktop],
+                &[&next, &lane.desktop, &login],
             )
             .await
-            .expect_err("a second running turn");
+            .expect_err("a second running turn on the login");
             let refused = refused
                 .downcast_ref::<tokio_postgres::Error>()
                 .expect("a database error");
@@ -2949,7 +3091,7 @@ async fn one_lane_turn_runs_at_a_time_for_each_person_on_any_of_their_computers(
                 claude_code_lane::is_second_running_turn(refused),
                 "{refused}"
             );
-            // Another person's turn runs meanwhile.
+            // Another person's turn runs meanwhile, on their own login.
             let member_turn = lane
                 .admitted_as(
                     &lane.token(space.member),
@@ -2957,7 +3099,11 @@ async fn one_lane_turn_runs_at_a_time_for_each_person_on_any_of_their_computers(
                     &lane_send(lane_metadata(json!({}))),
                 )
                 .await?;
-            lane.lease_one(lane.member_desktop, member_turn).await?;
+            let leased = lane.lease_one(lane.member_desktop, member_turn).await?;
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(first_login_of(space.member).to_string())
+            );
             // The first ends: the other computer takes the next.
             lane.harness
                 .complete(
@@ -2967,6 +3113,832 @@ async fn one_lane_turn_runs_at_a_time_for_each_person_on_any_of_their_computers(
                 )
                 .await?;
             lane.lease_one(lane.desktop, next).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Turns on two Claude Code logins of one person run at once, on two of
+/// their computers (docs/Local-Engine-Turns.md 11.19): a turn of an agent
+/// that names the owner's second login is leased while a turn on their
+/// first runs, by a computer that attests the second ready, and the job
+/// keeps the login each lease took. A computer that attests only the first
+/// login never takes a turn on the second, nor one attesting no login.
+#[tokio::test]
+async fn turns_on_two_logins_of_one_person_run_at_once() -> anyhow::Result<()> {
+    with_lane(
+        "lane-two-logins",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let first_login = first_login_of(space.owner);
+            let second_login = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&second_login, &space.owner],
+            )
+            .await?;
+            // @claude runs on the first login; @worker, a second Claude Code
+            // agent of the owner's, names the second.
+            let worker = lane.claude_code_agent(space.owner, "worker").await?;
+            sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&worker, &second_login],
+            )
+            .await?;
+            let first_turn = lane
+                .admitted(lane.chat().await?, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            let second_turn = lane
+                .admitted(
+                    lane.chat().await?,
+                    &lane_send(metadata_for(&["worker"], json!({}))),
+                )
+                .await?;
+            assert_eq!(
+                lane.job(second_turn).await?.claude_code_login_ids,
+                Some(vec![second_login])
+            );
+            // One message to both, which only read: each run names its own
+            // agent's login, and the message and prompt, whose two turns run
+            // on different logins, name none.
+            let (status, both) = lane
+                .send(
+                    &lane.owner(),
+                    lane.chat().await?,
+                    &lane_send(metadata_for(
+                        &[CLAUDE, "worker"],
+                        json!({ "writeIntent": false }),
+                    )),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "both: {status} {both}");
+            let (lane_jobs, others) = lane.jobs_of(&both).await?;
+            assert!(others.is_empty(), "{both}");
+            let mut logins: Vec<Option<Vec<Uuid>>> = lane_jobs
+                .iter()
+                .map(|job| job.claude_code_login_ids.clone())
+                .collect();
+            logins.sort();
+            let mut expected_logins = vec![Some(vec![first_login]), Some(vec![second_login])];
+            expected_logins.sort();
+            assert_eq!(logins, expected_logins);
+            for job in &lane_jobs {
+                let run = lane
+                    .metadata_of(
+                        "select metadata from runs where id = $1",
+                        job.run_id.expect("run"),
+                    )
+                    .await?;
+                let login = job
+                    .claude_code_login_ids
+                    .as_ref()
+                    .and_then(|logins| logins.first().copied());
+                assert_lane_stamps(&run, login, "each run");
+            }
+            for (what, query) in [
+                (
+                    "the message to both",
+                    "select m.metadata from conversation_messages m
+                       join runs r on r.prompt_id = m.prompt_id
+                      where r.id = $1 and m.role = 'user'",
+                ),
+                (
+                    "the prompt to both",
+                    "select p.metadata from prompts p join runs r on r.prompt_id = p.id
+                      where r.id = $1",
+                ),
+            ] {
+                let metadata = lane
+                    .metadata_of(query, lane_jobs[0].run_id.expect("run"))
+                    .await?;
+                assert_lane_stamps(&metadata, None, what);
+            }
+            for job in &lane_jobs {
+                sql(
+                    lane.pool(),
+                    "update agent_jobs set status = 'completed', completed_at = now()
+                      where run_id = $1",
+                    &[&job.run_id],
+                )
+                .await?;
+            }
+            // The desktop attests only the first login; the second desktop
+            // both.
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(
+                    Some(space.owner),
+                    lane_ready_on(&[first_login, second_login]),
+                ),
+            )
+            .await?;
+            let leased = lane.lease_one(lane.desktop, first_turn).await?;
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(first_login.to_string())
+            );
+            // The desktop, though idle again, never takes the second login's
+            // turn, which it does not attest.
+            lane.leases_nothing(lane.desktop, "the second login is not set up there")
+                .await?;
+            // A computer of the owner's that attests no login takes none.
+            let no_logins = lane
+                .computer(
+                    "self-hosted",
+                    capabilities(Some(space.owner), lane_ready_on(&[])),
+                    "ready",
+                    600,
+                )
+                .await?;
+            lane.leases_nothing(no_logins, "no login").await?;
+            // The second desktop takes it while the first login's turn runs.
+            let leased = lane.lease_one(lane.second_desktop, second_turn).await?;
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(second_login.to_string())
+            );
+            let running: Vec<(Uuid, Option<Uuid>)> = lane
+                .pool()
+                .get()
+                .await?
+                .query(
+                    "select id, claude_code_login_id from agent_jobs
+                      where project_id = $1 and engine = 'claude-code' and status = 'leased'
+                      order by claude_code_login_id",
+                    &[&space.project_id],
+                )
+                .await?
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+            let mut expected = vec![
+                (first_turn, Some(first_login)),
+                (second_turn, Some(second_login)),
+            ];
+            expected.sort_by_key(|(_, login)| *login);
+            assert_eq!(running, expected, "two turns of one person run at once");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A waiting turn whose Claude Code login was deleted takes its person's
+/// first login when a computer leases it (docs/Local-Engine-Turns.md 11.19),
+/// and a person with no login at all has turns that wait: no computer of
+/// theirs leases one, whatever it attests.
+#[tokio::test]
+async fn a_turn_whose_login_was_deleted_takes_its_persons_first_login() -> anyhow::Result<()> {
+    with_lane(
+        "lane-deleted-login",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let first_login = first_login_of(space.owner);
+            let work = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&work, &space.owner],
+            )
+            .await?;
+            sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&lane.owner_claude, &work],
+            )
+            .await?;
+            let (_, job) = lane.lane_turn().await?;
+            assert_eq!(lane.job(job).await?.claude_code_login_ids, Some(vec![work]));
+            // The desktop attests both logins; the second desktop only the
+            // first.
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready_on(&[first_login, work])),
+            )
+            .await?;
+            lane.leases_nothing(lane.second_desktop, "the turn's login is not set up there")
+                .await?;
+            // The person deletes the login: the agent loses it, and the turn
+            // takes their first login, which the second desktop attests.
+            sql(
+                lane.pool(),
+                "delete from claude_code_logins where id = $1",
+                &[&work],
+            )
+            .await?;
+            let agent_login: Option<Uuid> = sql_one(
+                lane.pool(),
+                "select claude_code_login_id from user_agents where id = $1",
+                &[&lane.owner_claude],
+            )
+            .await?;
+            assert_eq!(agent_login, None, "on delete set null");
+            let leased = lane.lease_one(lane.second_desktop, job).await?;
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(first_login.to_string())
+            );
+            assert_eq!(lane.job(job).await?.claude_code_login_id, Some(first_login));
+
+            // The member deletes their only login: their turn waits.
+            sql(
+                lane.pool(),
+                "delete from claude_code_logins where user_id = $1",
+                &[&space.member],
+            )
+            .await?;
+            let member_turn = lane
+                .admitted_as(
+                    &lane.token(space.member),
+                    lane.chat().await?,
+                    &lane_send(lane_metadata(json!({}))),
+                )
+                .await?;
+            assert_eq!(
+                lane.job(member_turn).await?.claude_code_login_ids,
+                Some(Vec::new()),
+                "a person with no login"
+            );
+            lane.leases_nothing(lane.member_desktop, "a person with no login")
+                .await?;
+            assert_eq!(lane.job(member_turn).await?.status, "queued");
+            // A login they add later is their first, and the turn takes it.
+            let added = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Home')",
+                &[&added, &space.member],
+            )
+            .await?;
+            lane.set_capabilities(
+                lane.member_desktop,
+                capabilities(Some(space.member), lane_ready_on(&[added])),
+            )
+            .await?;
+            let leased = lane.lease_one(lane.member_desktop, member_turn).await?;
+            assert_eq!(leased["claude_code_login_id"], json!(added.to_string()));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A runtime older than the Claude Code logins, which reports `claudeCode`
+/// of version 1, leases no lane turn, whatever else it attests
+/// (docs/Local-Engine-Turns.md 11.19): its person's turns wait for a
+/// current one.
+#[tokio::test]
+async fn a_version_1_runtime_leases_no_lane_turn() -> anyhow::Result<()> {
+    with_lane(
+        "lane-version-1",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let login = first_login_of(space.owner);
+            let (_, job) = lane.lane_turn().await?;
+            for computer in [lane.desktop, lane.second_desktop] {
+                lane.set_capabilities(
+                    computer,
+                    capabilities(
+                        Some(space.owner),
+                        json!({ "claudeCode": {
+                            "version": 1,
+                            "ready": true,
+                            "planSignIn": true,
+                            "logins": { login.to_string(): { "ready": true } },
+                        } }),
+                    ),
+                )
+                .await?;
+                lane.leases_nothing(computer, "version 1").await?;
+            }
+            assert_eq!(lane.job(job).await?.status, "queued");
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready(space.owner)),
+            )
+            .await?;
+            lane.lease_one(lane.desktop, job).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A person's Claude Code logins (docs/Local-Engine-Turns.md 11.19), through
+/// their own session alone: listed oldest first, added only while the switch
+/// covers them, with a trimmed one-line label of 1 to 60 characters that no
+/// other login of theirs has ignoring case, at most ten, renamed and deleted
+/// only as their own. Another person's login is never found, and the service
+/// role and a job's token are refused every route.
+#[tokio::test]
+async fn a_persons_claude_code_logins_are_their_own() -> anyhow::Result<()> {
+    with_lane(
+        "lane-logins",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = lane.owner();
+            let call = |token: &str, method: &str, path: String, body: Option<JsonValue>| {
+                let lane = &lane;
+                let token = token.to_string();
+                let method = method.to_string();
+                async move { lane.harness.call(&method, path, Some(&token), body).await }
+            };
+            let listed = |token: String| {
+                let call = &call;
+                async move {
+                    let (status, body) =
+                        call(&token, "GET", "/me/claude-code-logins".to_string(), None).await?;
+                    anyhow::ensure!(status == StatusCode::OK, "list: {status} {body}");
+                    anyhow::Ok(
+                        body["logins"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|login| login["label"].as_str().unwrap_or_default().to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            };
+            let first = first_login_of(space.owner);
+            let (status, body) =
+                call(&owner, "GET", "/me/claude-code-logins".to_string(), None).await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["logins"].as_array().map(Vec::len), Some(1), "{body}");
+            assert_eq!(body["logins"][0]["id"], json!(first.to_string()));
+            assert_eq!(body["logins"][0]["label"], json!("Claude Code"));
+            assert!(body["logins"][0]["createdAt"].is_string(), "{body}");
+
+            // Added, trimmed, after the first.
+            let (status, work) = call(
+                &owner,
+                "POST",
+                "/me/claude-code-logins".to_string(),
+                Some(json!({ "label": "  Work \t" })),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::CREATED, "{work}");
+            assert_eq!(work["label"], json!("Work"));
+            let work_id = work["id"].as_str().expect("an id").to_string();
+            assert_eq!(listed(owner.clone()).await?, ["Claude Code", "Work"]);
+
+            // A label once trimmed is 1 to 60 characters on one line, and no
+            // other login of the person's has it, ignoring case.
+            for label in [
+                json!(""),
+                json!("   "),
+                json!("Work\nHome"),
+                json!("Tab\u{0007}"),
+                json!("é".repeat(61)),
+                JsonValue::Null,
+            ] {
+                let (status, body) = call(
+                    &owner,
+                    "POST",
+                    "/me/claude-code-logins".to_string(),
+                    Some(json!({ "label": label })),
+                )
+                .await?;
+                assert_eq!(
+                    (status, body["code"].as_str()),
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Some("claude_code_login_label_invalid")
+                    ),
+                    "{label}: {body}"
+                );
+            }
+            let (status, body) = call(
+                &owner,
+                "POST",
+                "/me/claude-code-logins".to_string(),
+                Some(json!({ "label": "WORK" })),
+            )
+            .await?;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (StatusCode::CONFLICT, Some("claude_code_login_label_taken")),
+                "{body}"
+            );
+            // The member may use the same label for a login of their own.
+            let member = lane.token(space.member);
+            let (status, body) = call(
+                &member,
+                "POST",
+                "/me/claude-code-logins".to_string(),
+                Some(json!({ "label": "Work" })),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert_eq!(listed(member.clone()).await?, ["Claude Code", "Work"]);
+
+            // Renamed, and only to a label the person has free.
+            let (status, renamed) = call(
+                &owner,
+                "PATCH",
+                format!("/me/claude-code-logins/{work_id}"),
+                Some(json!({ "label": "Work plan" })),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{renamed}");
+            assert_eq!(
+                (renamed["id"].as_str(), renamed["label"].as_str()),
+                (Some(work_id.as_str()), Some("Work plan"))
+            );
+            let (status, body) = call(
+                &owner,
+                "PATCH",
+                format!("/me/claude-code-logins/{work_id}"),
+                Some(json!({ "label": "claude code" })),
+            )
+            .await?;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (StatusCode::CONFLICT, Some("claude_code_login_label_taken")),
+                "{body}"
+            );
+            // Another person's login is never found, renamed or deleted.
+            let members_first = first_login_of(space.member);
+            for (method, body) in [
+                ("PATCH", Some(json!({ "label": "Mine now" }))),
+                ("DELETE", None),
+            ] {
+                let (status, response) = call(
+                    &owner,
+                    method,
+                    format!("/me/claude-code-logins/{members_first}"),
+                    body,
+                )
+                .await?;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {response}");
+            }
+            assert_eq!(listed(member.clone()).await?, ["Claude Code", "Work"]);
+
+            // At most ten.
+            for n in 3..=10 {
+                let (status, body) = call(
+                    &owner,
+                    "POST",
+                    "/me/claude-code-logins".to_string(),
+                    Some(json!({ "label": format!("Login {n}") })),
+                )
+                .await?;
+                assert_eq!(status, StatusCode::CREATED, "{n}: {body}");
+            }
+            let (status, body) = call(
+                &owner,
+                "POST",
+                "/me/claude-code-logins".to_string(),
+                Some(json!({ "label": "Eleventh" })),
+            )
+            .await?;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (StatusCode::CONFLICT, Some("claude_code_login_limit")),
+                "{body}"
+            );
+            assert_eq!(listed(owner.clone()).await?.len(), 10);
+
+            // Deleted, it is gone, and a new one fits again.
+            let (status, body) = call(
+                &owner,
+                "DELETE",
+                format!("/me/claude-code-logins/{work_id}"),
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            let (status, _) = call(
+                &owner,
+                "DELETE",
+                format!("/me/claude-code-logins/{work_id}"),
+                None,
+            )
+            .await?;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(listed(owner.clone()).await?.len(), 9);
+            assert!(!listed(owner.clone())
+                .await?
+                .contains(&"Work plan".to_string()));
+
+            // The guest, whom the switch does not cover, lists theirs but
+            // adds none.
+            let guest = lane.token(space.guest);
+            assert!(listed(guest.clone()).await?.is_empty());
+            let (status, body) = call(
+                &guest,
+                "POST",
+                "/me/claude-code-logins".to_string(),
+                Some(json!({ "label": "Mine" })),
+            )
+            .await?;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (
+                    StatusCode::FORBIDDEN,
+                    Some(claude_code_lane::TURN_NOT_ALLOWED)
+                ),
+                "{body}"
+            );
+
+            // The service role and a job's token are refused every route.
+            let codex_chat = lane.chat().await?;
+            lane.admitted(codex_chat, &octo_send(space.runtime)).await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+            for token in [SERVICE_ROLE.to_string(), job_token] {
+                for (method, path, body) in [
+                    ("GET", "/me/claude-code-logins".to_string(), None),
+                    (
+                        "POST",
+                        "/me/claude-code-logins".to_string(),
+                        Some(json!({ "label": "Theirs" })),
+                    ),
+                    (
+                        "PATCH",
+                        format!("/me/claude-code-logins/{first}"),
+                        Some(json!({ "label": "Theirs" })),
+                    ),
+                    ("DELETE", format!("/me/claude-code-logins/{first}"), None),
+                ] {
+                    let (status, response) = call(&token, method, path.clone(), body).await?;
+                    assert_eq!(
+                        status,
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path}: {response}"
+                    );
+                }
+            }
+            assert_eq!(listed(owner.clone()).await?[0], "Claude Code");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// An agent's Claude Code login (docs/Local-Engine-Turns.md 11.19): its owner
+/// sets it as `claudeCodeLoginId`, with Claude Code as the agent's AI, only
+/// to one of their own logins; the agent list returns it; null clears it;
+/// choosing a connection or Instafy AI clears it, and so does deleting the
+/// login. The agent's next turn runs on it, and its run, message and prompt
+/// name it.
+#[tokio::test]
+async fn an_agents_claude_code_login_is_one_of_its_owners_own() -> anyhow::Result<()> {
+    with_lane(
+        "lane-agent-login",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = lane.owner();
+            let (status, work) = lane
+                .harness
+                .call(
+                    "POST",
+                    "/me/claude-code-logins",
+                    Some(&owner),
+                    Some(json!({ "label": "Work" })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::CREATED, "{work}");
+            let work = Uuid::parse_str(work["id"].as_str().expect("an id"))?;
+            let patch = |agent: Uuid, body: JsonValue| {
+                let lane = &lane;
+                let owner = owner.clone();
+                async move {
+                    lane.harness
+                        .call(
+                            "PATCH",
+                            format!("/me/agents/{agent}"),
+                            Some(&owner),
+                            Some(body),
+                        )
+                        .await
+                }
+            };
+            let stored_login = |agent: Uuid| {
+                let lane = &lane;
+                async move {
+                    sql_one::<Option<Uuid>>(
+                        lane.pool(),
+                        "select claude_code_login_id from user_agents where id = $1",
+                        &[&agent],
+                    )
+                    .await
+                }
+            };
+
+            let (status, agent) =
+                patch(lane.owner_claude, json!({ "claudeCodeLoginId": work })).await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert_eq!(agent["claudeCodeLoginId"], json!(work.to_string()));
+            assert_eq!(agent["provider"], json!("claude-code"));
+            let (status, agents) = lane
+                .harness
+                .call("GET", "/me/agents", Some(&owner), None)
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{agents}");
+            let listed = agents
+                .as_array()
+                .and_then(|agents| {
+                    agents
+                        .iter()
+                        .find(|agent| agent["id"] == json!(lane.owner_claude.to_string()))
+                })
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            assert_eq!(
+                listed["claudeCodeLoginId"],
+                json!(work.to_string()),
+                "{agents}"
+            );
+            assert!(
+                agents
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|agent| agent["id"] != json!(lane.owner_claude.to_string()))
+                    .all(|agent| agent["claudeCodeLoginId"].is_null()),
+                "{agents}"
+            );
+
+            // Only one of the owner's own logins.
+            for unknown in [
+                json!(first_login_of(space.member).to_string()),
+                json!(Uuid::new_v4().to_string()),
+                json!("not-a-login"),
+                json!(""),
+            ] {
+                let (status, body) =
+                    patch(lane.owner_claude, json!({ "claudeCodeLoginId": unknown })).await?;
+                assert_eq!(
+                    (status, body["code"].as_str()),
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Some("claude_code_login_unknown")
+                    ),
+                    "{unknown}: {body}"
+                );
+            }
+            assert_eq!(stored_login(lane.owner_claude).await?, Some(work));
+            // The reference keeps another person's login out whoever writes
+            // the row.
+            let refused = sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&lane.owner_claude, &first_login_of(space.member)],
+            )
+            .await
+            .expect_err("another person's login");
+            assert_eq!(
+                refused
+                    .downcast_ref::<tokio_postgres::Error>()
+                    .and_then(tokio_postgres::Error::code),
+                Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
+                "{refused}"
+            );
+            // Only with Claude Code as the agent's AI after the request.
+            let helper = space.owner_agent;
+            let (status, body) = patch(helper, json!({ "claudeCodeLoginId": work })).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            let (status, body) = patch(
+                lane.owner_claude,
+                json!({ "provider": "openai", "claudeCodeLoginId": work }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(stored_login(lane.owner_claude).await?, Some(work));
+            let (status, body) = lane
+                .harness
+                .call(
+                    "POST",
+                    "/me/agents",
+                    Some(&owner),
+                    Some(json!({ "handle": "coder", "claudeCodeLoginId": work })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+            // Absent keeps it; the agent's next turn runs on it, and its
+            // run, message and prompt name it.
+            let (status, agent) = patch(
+                lane.owner_claude,
+                json!({ "displayName": "Claude at work" }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert_eq!(agent["claudeCodeLoginId"], json!(work.to_string()));
+            let job = lane.job(lane.lane_turn().await?.1).await?;
+            assert_eq!(job.claude_code_login_ids, Some(vec![work]));
+            let run = job.run_id.expect("run");
+            assert_lane_stamps(
+                &lane
+                    .metadata_of("select metadata from runs where id = $1", run)
+                    .await?,
+                Some(work),
+                "run",
+            );
+            assert_lane_stamps(
+                &lane
+                    .metadata_of(
+                        "select metadata from conversation_messages
+                          where run_id = $1 and role = 'user'",
+                        run,
+                    )
+                    .await?,
+                Some(work),
+                "message",
+            );
+            assert_lane_stamps(
+                &lane
+                    .metadata_of(
+                        "select p.metadata from prompts p join runs r on r.prompt_id = p.id
+                          where r.id = $1",
+                        run,
+                    )
+                    .await?,
+                Some(work),
+                "prompt",
+            );
+            assert_lane_stamps(&job.payload["metadata"], None, "payload");
+            lane.end_jobs().await?;
+
+            // Null clears it: the first login.
+            let (status, agent) =
+                patch(lane.owner_claude, json!({ "claudeCodeLoginId": null })).await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert!(agent["claudeCodeLoginId"].is_null(), "{agent}");
+            let job = lane.job(lane.lane_turn().await?.1).await?;
+            assert_eq!(
+                job.claude_code_login_ids,
+                Some(vec![first_login_of(space.owner)])
+            );
+            lane.end_jobs().await?;
+
+            // A new Claude Code agent may name one when it is made.
+            let (status, coder) = lane
+                .harness
+                .call(
+                    "POST",
+                    "/me/agents",
+                    Some(&owner),
+                    Some(json!({
+                        "handle": "coder",
+                        "provider": "claude-code",
+                        "claudeCodeLoginId": work,
+                    })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{coder}");
+            assert_eq!(coder["claudeCodeLoginId"], json!(work.to_string()));
+            let coder = Uuid::parse_str(coder["id"].as_str().expect("an id"))?;
+
+            // Choosing a connection clears it, and so does Instafy AI.
+            let (status, agent) = patch(
+                coder,
+                json!({ "credentialId": lane.owner_credential.to_string() }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert_ne!(agent["provider"], json!("claude-code"));
+            assert!(agent["claudeCodeLoginId"].is_null(), "{agent}");
+            let (status, agent) =
+                patch(lane.owner_claude, json!({ "claudeCodeLoginId": work })).await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            let (status, agent) = patch(lane.owner_claude, json!({ "provider": "openai" })).await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert!(agent["claudeCodeLoginId"].is_null(), "{agent}");
+            assert_eq!(stored_login(lane.owner_claude).await?, None);
+
+            // Deleting the login clears it from the agents that named it.
+            let (status, agent) = patch(
+                lane.owner_claude,
+                json!({ "provider": "claude-code", "claudeCodeLoginId": work }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{agent}");
+            assert_eq!(stored_login(lane.owner_claude).await?, Some(work));
+            let (status, body) = lane
+                .harness
+                .call(
+                    "DELETE",
+                    format!("/me/claude-code-logins/{work}"),
+                    Some(&owner),
+                    None,
+                )
+                .await?;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            assert_eq!(stored_login(lane.owner_claude).await?, None);
+            assert_eq!(lane.ai_of(lane.owner_claude).await?.0, "claude-code");
             Ok(())
         },
     )
@@ -2995,7 +3967,7 @@ async fn a_lane_turn_waits_for_its_persons_computer_however_long() -> anyhow::Re
             .await?;
             lane.set_capabilities(
                 lane.second_desktop,
-                capabilities(Some(space.owner), lane_not_ready()),
+                capabilities(Some(space.owner), lane_not_ready(space.owner)),
             )
             .await?;
             let (_, job) = lane.lane_turn().await?;
@@ -3145,7 +4117,12 @@ async fn an_expired_lane_lease_ends_its_turn_for_good() -> anyhow::Result<()> {
             assert_eq!(lane.run_status(run).await?, "failed");
             let (_, metadata) = lane.failure_message(run).await?;
             assert_eq!(metadata["kind"], json!("run_once_interrupted"));
-            assert_lane_failure(&metadata, "run_once_interrupted", "an expired lease");
+            assert_lane_failure(
+                &metadata,
+                "run_once_interrupted",
+                Some(first_login_of(lane.space().owner)),
+                "an expired lease",
+            );
             for computer in [lane.desktop, lane.second_desktop] {
                 lane.leases_nothing(computer, "an ended turn").await?;
             }
@@ -3190,7 +4167,12 @@ async fn the_run_once_sweep_fails_a_lane_turn_put_back_after_a_lease() -> anyhow
             assert_eq!(lane.run_status(run).await?, "failed");
             let (_, metadata) = lane.failure_message(run).await?;
             assert_eq!(metadata["kind"], json!("run_once_interrupted"));
-            assert_lane_failure(&metadata, "run_once_interrupted", "put back after a lease");
+            assert_lane_failure(
+                &metadata,
+                "run_once_interrupted",
+                Some(first_login_of(lane.space().owner)),
+                "put back after a lease",
+            );
 
             assert_eq!(lane.job(waiting).await?.status, "queued");
             lane.lease_one(lane.desktop, waiting).await?;
@@ -3248,7 +4230,12 @@ async fn a_runtime_stop_fails_the_lane_turn_it_leased_and_leaves_waiting_ones_qu
             let (content, metadata) = lane.failure_message(run).await?;
             assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
             assert_eq!(metadata["kind"], json!(claude_code_lane::MACHINE_STOPPED));
-            assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "leased");
+            assert_lane_failure(
+                &metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
+                "leased",
+            );
             let next_job = lane.job(next).await?;
             assert_eq!(
                 (next_job.status.as_str(), next_job.target_runtime_id),
@@ -3349,6 +4336,7 @@ async fn a_runtime_stop_never_waits_on_its_lane_turns_chat() -> anyhow::Result<(
             assert_lane_failure(
                 &message.metadata,
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the turn's end",
             );
             assert_eq!(lane.run_status(run).await?, "failed");
@@ -3500,6 +4488,7 @@ async fn a_runtime_stop_publishes_its_lane_turns_failure() -> anyhow::Result<()>
             assert_lane_failure(
                 &message["metadata"],
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the message event",
             );
             assert_eq!(ended["finalStatus"], json!("failed"));
@@ -3575,6 +4564,7 @@ async fn the_idle_sweep_writes_a_stopped_lane_turns_end_its_stop_never_wrote() -
             assert_lane_failure(
                 &metadata,
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the sweep's write",
             );
             lane.assert_failure_notified_once(chat, run, "the sweep's write")
@@ -3591,6 +4581,7 @@ async fn the_idle_sweep_writes_a_stopped_lane_turns_end_its_stop_never_wrote() -
             assert_lane_failure(
                 &published[0].1["metadata"],
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the published message",
             );
             assert_eq!(published[1].1["finalStatus"], json!("failed"));
@@ -3703,6 +4694,7 @@ async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stands_in_for_it() -
             assert_lane_failure(
                 &published[0].1["metadata"],
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the published message",
             );
             assert_eq!(published[1].1["finalStatus"], json!("failed"));
@@ -3716,7 +4708,12 @@ async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stands_in_for_it() -
             let (content, metadata) = lane.failure_message(run).await?;
             assert_eq!(content, claude_code_lane::MACHINE_STOPPED_MESSAGE);
             assert_eq!(metadata["jobId"], json!(job));
-            assert_lane_failure(&metadata, claude_code_lane::MACHINE_STOPPED, "the stop's");
+            assert_lane_failure(
+                &metadata,
+                claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
+                "the stop's",
+            );
             lane.assert_failure_notified_once(chat, run, "a stop after a claim")
                 .await?;
             Ok(())
@@ -3756,6 +4753,7 @@ async fn a_recorded_claim_of_a_stopped_lane_turns_end_never_stops_the_sweep_writ
             assert_lane_failure(
                 &metadata,
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the sweep's write",
             );
             let published = stopped_turn_events(&mut events, chat, run);
@@ -3808,6 +4806,7 @@ async fn only_the_controllers_own_message_is_a_stopped_lane_turns_end() -> anyho
             claude_code_lane::stamp_failure(
                 stamped.as_object_mut().expect("metadata"),
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
             );
             let unstamped = without(stamped.clone(), &["claudeCode"]);
             for (author, of_run, metadata) in [
@@ -3842,6 +4841,7 @@ async fn only_the_controllers_own_message_is_a_stopped_lane_turns_end() -> anyho
             assert_lane_failure(
                 &message.metadata,
                 claude_code_lane::MACHINE_STOPPED,
+                Some(first_login_of(lane.space().owner)),
                 "the turn's end",
             );
             assert_eq!(lane.run_status(run).await?, "failed");
@@ -4428,9 +5428,11 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
             let (status, _, proxy_metadata) = lane.ended(job).await?;
             assert_eq!(status, "completed");
             assert_eq!(proxy_metadata["provider"], json!("claude-code"));
+            // Kept with the login the lease took, which the runtime never
+            // names.
             assert_eq!(
                 proxy_metadata["conversation"],
-                lane_session(lane.desktop, session)
+                kept_session(lane.desktop, session, first_login_of(space.owner))
             );
             let run = lane.job(job).await?.run_id.expect("run");
             let run_metadata = lane
@@ -4482,7 +5484,7 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
                     run,
                 )
                 .await?;
-            assert_lane_stamps(&reply, "reply");
+            assert_lane_stamps(&reply, Some(first_login_of(space.owner)), "reply");
             assert_eq!(reply["provider"], json!("claude-code"));
             assert!(reply.get("claudeCodeFailure").is_none(), "{reply}");
 
@@ -4514,9 +5516,9 @@ async fn a_lane_turns_completion_keeps_only_what_the_lane_writes() -> anyhow::Re
                 assert_eq!(proxy_metadata["conversation"], JsonValue::Null, "{code}");
                 let run = lane.job(failed).await?.run_id.expect("run");
                 let (_, metadata) = lane.failure_message(run).await?;
-                assert_lane_stamps(&metadata, code);
+                assert_lane_stamps(&metadata, Some(first_login_of(space.owner)), code);
                 if copied {
-                    assert_lane_failure(&metadata, code, code);
+                    assert_lane_failure(&metadata, code, Some(first_login_of(space.owner)), code);
                 } else {
                     assert!(metadata.get("claudeCodeFailure").is_none(), "{metadata}");
                 }
@@ -4574,11 +5576,22 @@ fn lane_session(runtime: Uuid, session: Uuid) -> JsonValue {
     })
 }
 
+/// [`lane_session`] as completion keeps it: with the Claude Code login its
+/// turn's lease took (docs/Local-Engine-Turns.md 11.19).
+fn kept_session(runtime: Uuid, session: Uuid, login: Uuid) -> JsonValue {
+    with(
+        lane_session(runtime, session),
+        json!({ "loginId": login.to_string() }),
+    )
+}
+
 /// The next lane turn resumes its own engine's session
-/// (docs/Local-Engine-Turns.md 11.9): its person's, with the same agent, in
-/// the same chat, whichever of their computers saved it, and the latest one.
-/// A turn that saved no state, such as a stopped one, is passed over, and a
-/// reset starts a new session. The Codex loader never returns lane state.
+/// (docs/Local-Engine-Turns.md 11.9, 11.19): its person's, with the same
+/// agent, in the same chat, on the same Claude Code login, whichever of their
+/// computers saved it, and the latest one. A turn that saved no state, such
+/// as a stopped one, is passed over, and a reset starts a new session, as
+/// does a turn on another login, whose folder holds no such session. The
+/// Codex loader never returns lane state.
 #[tokio::test]
 async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -> anyhow::Result<()>
 {
@@ -4601,6 +5614,7 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
                     )
                 }
             };
+            let login = first_login_of(space.owner);
             let (first_session, latest_session) = (Uuid::new_v4(), Uuid::new_v4());
             let first = lane.admitted(chat, &send()).await?;
             assert_eq!(state_of(first).await?, None, "a first turn starts a session");
@@ -4619,12 +5633,12 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
                 )
                 .await?;
 
-            // The loader keeps to the person, the agent and the chat, and not
-            // to the computer that saved it.
+            // The loader keeps to the person, the agent, the chat and the
+            // login, and not to the computer that saved it.
             {
                 let mut connection = lane.pool().get().await?;
                 let transaction = connection.transaction().await?;
-                let load = |conversation: Uuid, person: Uuid, agent: Uuid| {
+                let load = |conversation: Uuid, person: Uuid, agent: Uuid, on: Option<Uuid>| {
                     let transaction = &transaction;
                     let project = space.project_id;
                     async move {
@@ -4634,23 +5648,38 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
                             &conversation,
                             &person,
                             Some(&agent),
+                            on.as_ref(),
                         )
                         .await
                         .map_err(|(status, error)| anyhow::anyhow!("{status} {}", error.message))
                     }
                 };
                 assert_eq!(
-                    load(chat, space.owner, lane.owner_claude).await?,
-                    Some(lane_session(lane.desktop, first_session))
+                    load(chat, space.owner, lane.owner_claude, Some(login)).await?,
+                    Some(kept_session(lane.desktop, first_session, login))
                 );
-                for (what, conversation, person, agent) in [
-                    ("another chat", space.log, space.owner, lane.owner_claude),
-                    ("another person", chat, space.member, lane.owner_claude),
-                    ("another person's agent", chat, space.member, lane.member_claude),
-                    ("another agent", chat, space.owner, space.owner_agent),
+                for (what, conversation, person, agent, on) in [
+                    ("another chat", space.log, space.owner, lane.owner_claude, Some(login)),
+                    ("another person", chat, space.member, lane.owner_claude, Some(login)),
+                    (
+                        "another person's agent",
+                        chat,
+                        space.member,
+                        lane.member_claude,
+                        Some(login),
+                    ),
+                    ("another agent", chat, space.owner, space.owner_agent, Some(login)),
+                    (
+                        "another login",
+                        chat,
+                        space.owner,
+                        lane.owner_claude,
+                        Some(Uuid::new_v4()),
+                    ),
+                    ("no login", chat, space.owner, lane.owner_claude, None),
                 ] {
                     assert_eq!(
-                        load(conversation, person, agent).await?,
+                        load(conversation, person, agent, on).await?,
                         None,
                         "{what}"
                     );
@@ -4694,7 +5723,7 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
             let second = lane.admitted(chat, &send()).await?;
             assert_eq!(
                 state_of(second).await?,
-                Some(lane_session(lane.desktop, first_session))
+                Some(kept_session(lane.desktop, first_session, login))
             );
             lane.lease_one(lane.second_desktop, second).await?;
             lane.harness
@@ -4714,7 +5743,7 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
             let third = lane.admitted(chat, &send()).await?;
             assert_eq!(
                 state_of(third).await?,
-                Some(lane_session(lane.second_desktop, latest_session))
+                Some(kept_session(lane.second_desktop, latest_session, login))
             );
             // Stopped, it saves nothing: the turn after it resumes the same
             // session.
@@ -4729,10 +5758,44 @@ async fn a_lane_turn_resumes_its_own_session_on_any_of_its_persons_computers() -
                 )
                 .await?;
             assert_eq!(status, StatusCode::OK, "{body}");
+            // Moved to another login, the agent's next turn finds no session
+            // there; moved back, the one after resumes its first login's.
+            let work = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&work, &space.owner],
+            )
+            .await?;
+            let set_login = |on: Option<Uuid>| {
+                let lane = &lane;
+                async move {
+                    sql(
+                        lane.pool(),
+                        "update user_agents set claude_code_login_id = $2 where id = $1",
+                        &[&lane.owner_claude, &on],
+                    )
+                    .await
+                }
+            };
+            set_login(Some(work)).await?;
+            let on_work = lane.admitted(chat, &send()).await?;
+            assert_eq!(state_of(on_work).await?, None, "another login's folder");
+            let (status, body) = lane
+                .harness
+                .call(
+                    "POST",
+                    format!("/jobs/{on_work}/cancel"),
+                    Some(&lane.owner()),
+                    Some(json!({})),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            set_login(None).await?;
             let fourth = lane.admitted(chat, &send()).await?;
             assert_eq!(
                 state_of(fourth).await?,
-                Some(lane_session(lane.second_desktop, latest_session)),
+                Some(kept_session(lane.second_desktop, latest_session, login)),
                 "a stopped turn is passed over"
             );
 
@@ -5233,13 +6296,14 @@ fn project_of(user: Uuid) -> crate::ProjectRecord {
 }
 
 /// The builders of a lane job's payload and of its reply: the reply is
-/// stamped as a lane turn's, and an evaluation's payload carries its
-/// participation instruction in front of the message for Claude Code, the
-/// same as for any engine (docs/Local-Engine-Turns.md 11.10), and keeps its
-/// marker.
+/// stamped as a lane turn's, naming the login its lease took
+/// (docs/Local-Engine-Turns.md 11.19), and an evaluation's payload carries
+/// its participation instruction in front of the message for Claude Code,
+/// the same as for any engine (11.10), keeps its marker, and names no login.
 #[test]
 fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
     let reply = json!({ "source": "agent", "outcome": "completed" });
+    let login = Uuid::new_v4();
     let stamped = crate::agent::stamp_ai_access_mode_from_job_payload(
         reply.clone(),
         &json!({ "metadata": {
@@ -5247,12 +6311,14 @@ fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
             "managedAiUsed": false,
             "claudeCode": { "version": 1 },
         } }),
+        Some(login),
     );
     assert_eq!(stamped["source"], json!("agent"));
-    assert_lane_stamps(&stamped, "reply");
+    assert_lane_stamps(&stamped, Some(login), "reply");
     let byoc = crate::agent::stamp_ai_access_mode_from_job_payload(
         reply.clone(),
         &json!({ "metadata": { "aiAccessMode": "byoc" } }),
+        Some(login),
     );
     assert_eq!(byoc["aiAccessMode"], json!("byoc"));
     assert!(byoc.get("claudeCode").is_none());
@@ -5276,7 +6342,9 @@ fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
         crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
             .expect("an evaluation payload");
     assert_ne!(evaluation["prompt_text"], json!(WORDS), "the instruction");
-    request.claude_code_lane = Some(claude_code_lane::LaneAdmission);
+    request.claude_code_lane = Some(claude_code_lane::LaneAdmission {
+        login_id: Some(login),
+    });
     let lane_evaluation =
         crate::agent::build_agent_job_payload(&project, &context, &request, &run, &prompt, None)
             .expect("a lane evaluation payload");
@@ -5288,7 +6356,7 @@ fn the_payload_and_reply_builders_keep_a_lane_turn_its_own() {
         .as_str()
         .is_some_and(|text| text.ends_with(WORDS)));
     assert!(crate::group_participation::job_payload_marks_agent_evaluation(&lane_evaluation));
-    assert_lane_stamps(&lane_evaluation["metadata"], "a lane evaluation");
+    assert_lane_stamps(&lane_evaluation["metadata"], None, "a lane evaluation");
 }
 
 /// A lane job's payload names its workspace mode by its execution mode, which
@@ -5328,7 +6396,7 @@ fn a_lane_payload_names_its_workspace_mode_by_its_execution_mode_alone() {
         )
         .expect("a payload");
         assert_eq!(codex["executionMode"], json!(mode), "{key}");
-        request.claude_code_lane = Some(claude_code_lane::LaneAdmission);
+        request.claude_code_lane = Some(claude_code_lane::LaneAdmission { login_id: None });
         let lane = crate::agent::build_agent_job_payload(
             &project, &context, &request, &run, &prompt, None,
         )

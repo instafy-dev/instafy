@@ -1,6 +1,6 @@
-//! A local-engine turn's job (docs/Local-Engine-Turns.md 3.1, 3.9 and 11.12): the checks that need
-//! only the leased job and this process's grant, the turn's execution mode, and the session a
-//! turn resumes (2.7, 11.9).
+//! A local-engine turn's job (docs/Local-Engine-Turns.md 3.1, 3.9, 11.12 and 11.19): the checks
+//! that need only the leased job and this process's grant, the login of the grant the turn runs
+//! on, the turn's execution mode, and the session a turn resumes (2.7, 11.9).
 //!
 //! [`refuse_unless_runnable`] runs in the job loop before anything of a job with an engine runs:
 //! no heartbeat, no secrets, no folder. [`LaneJob::of`] runs there and again when the turn starts.
@@ -164,15 +164,19 @@ pub struct LaneJob<'a> {
     job: &'a LeaseJob,
     prompt: &'a str,
     mode: ExecutionMode,
+    login: Uuid,
 }
 
 impl<'a> LaneJob<'a> {
-    /// Checks `job` against 3.9 and 11.12 for `grant`'s person:
+    /// Checks `job` against 3.9, 11.12 and 11.19 for `grant`'s person:
     /// - the job's shape: `engine` is `claude-code`, it is leased for the first time, it holds no
     ///   proxy envelope, controller token, device grant, grant token or credential, and it has a
     ///   workspace token (verified later, in the turn);
     /// - the person: `payload.user_id` is the person who consented on this computer, the owner
     ///   of the agent whose turn it is (11.5);
+    /// - the login: the job's `claude_code_login_id`, the login its lease took, is one of the
+    ///   grant's, so the turn runs with a folder the person consented to here (11.19); no lease
+    ///   hands out any other, so a job without one is refused with no code;
     /// - the mode: `metadata.execution_mode` is absent, `apply` or `plan_only`, and the write
     ///   scope is absent, `unscoped` or `read_only`; a `plan_only` or `read_only` turn runs
     ///   read-only ([`ExecutionMode::PlanOnly`]);
@@ -223,6 +227,14 @@ impl<'a> LaneJob<'a> {
                 "This Claude Code turn isn't from the Instafy account that set up Claude Code on this computer.",
             ));
         }
+        let login = job
+            .claude_code_login_id
+            .filter(|login| grant.login(*login).is_some())
+            .ok_or_else(|| {
+                uncoded(
+                    "This Claude Code turn isn't for a Claude Code login set up on this computer, so it didn't start.",
+                )
+            })?;
         let mode = execution_mode(payload)?;
         let mode = if reads_only(payload)? {
             ExecutionMode::PlanOnly
@@ -280,11 +292,21 @@ impl<'a> LaneJob<'a> {
                 "This turn starts with /, which Claude Code would read as a command of its own, so it didn't start.",
             ));
         }
-        Ok(Self { job, prompt, mode })
+        Ok(Self {
+            job,
+            prompt,
+            mode,
+            login,
+        })
     }
 
     pub fn job(&self) -> &'a LeaseJob {
         self.job
+    }
+
+    /// The grant's login the turn runs on, the one its lease took (11.19).
+    pub fn login(&self) -> Uuid {
+        self.login
     }
 
     /// Exactly the words dispatch recorded for the turn, byte for byte (3.5, 11.10): never
@@ -384,6 +406,11 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    /// The login a lane job's lease took: Claude Code's usual folder on this computer.
+    const LOGIN: &str = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+    /// The person's other login here, a folder of its own.
+    const OTHER_LOGIN: &str = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+
     fn grant(user_id: Uuid) -> LaunchGrant {
         LaunchGrant::parse(
             RawLaunchGrant {
@@ -391,6 +418,14 @@ mod tests {
                 path: None,
                 user_id: Some(user_id.to_string().into()),
                 env_json: None,
+                logins_json: Some(
+                    json!([
+                        { "id": LOGIN, "configDir": null },
+                        { "id": OTHER_LOGIN, "configDir": "/home/person/.claude-work" },
+                    ])
+                    .to_string()
+                    .into(),
+                ),
             },
             LaunchEnvSnapshot::default(),
             Confinement::new([PathBuf::from("/workspace")]),
@@ -403,11 +438,11 @@ mod tests {
         .unwrap()
     }
 
-    /// A lane job as the controller leases it. Its payload is runtime-contracts' recorded lane job
-    /// payload (claude_code_lane_fixtures.json), which the controller's own test builds the way
-    /// dispatch does, with this job's ids in place of its placeholders and `user_id` as its
-    /// sender. Its top-level `executionMode` is the workspace mode the controller writes on every
-    /// write job (`shared_write`), not an execution mode.
+    /// A lane job as the controller leases it, on [`LOGIN`]. Its payload is runtime-contracts'
+    /// recorded lane job payload (claude_code_lane_fixtures.json), which the controller's own test
+    /// builds the way dispatch does, with this job's ids in place of its placeholders and
+    /// `user_id` as its sender. Its top-level `executionMode` is the workspace mode the controller
+    /// writes on every write job (`shared_write`), not an execution mode.
     fn lane_job(user_id: Uuid) -> LeaseJob {
         /// `value` with each placeholder of `ids` replaced by its id.
         fn with_ids(value: &mut Value, ids: &[(&str, Uuid)]) {
@@ -456,6 +491,7 @@ mod tests {
             "run_id": run_id,
             "conversation_id": conversation_id,
             "engine": "claude-code",
+            "claude_code_login_id": LOGIN,
             "lease_attempts": 1,
             "workspace_token": "workspace-token",
             "payload": payload,
@@ -478,8 +514,49 @@ mod tests {
         assert_eq!(Some(lane_job.prompt()), job.payload["prompt_text"].as_str());
         assert_eq!(lane_job.job().id, job.id);
         assert_eq!(lane_job.mode(), ExecutionMode::Apply);
+        assert_eq!(lane_job.login(), Uuid::parse_str(LOGIN).unwrap());
         let spaced = LaneJob::of(&spaced, &grant(person)).expect("runnable");
         assert_eq!(spaced.prompt(), "  Rename the project in README.md\n");
+    }
+
+    /// A turn runs on the login its lease took, when it is one of this computer's grant (11.19):
+    /// any of them, the first or not. One that names no login, or a login not set up here, is
+    /// refused with no code, before anything of it runs.
+    #[test]
+    fn a_turn_runs_on_the_login_its_lease_took_when_the_grant_has_it() {
+        let person = Uuid::new_v4();
+        let grant = grant(person);
+        let mut other = lane_job(person);
+        other.claude_code_login_id = Some(Uuid::parse_str(OTHER_LOGIN).unwrap());
+        assert_eq!(
+            LaneJob::of(&other, &grant).map(|lane_job| lane_job.login()),
+            Ok(Uuid::parse_str(OTHER_LOGIN).unwrap())
+        );
+        let lane = Lane::new(grant.clone());
+        for login in [None, Some(Uuid::new_v4())] {
+            let mut job = lane_job(person);
+            job.claude_code_login_id = login;
+            let failure = refusal(&job, &grant);
+            assert_eq!(failure.code, None, "{login:?}");
+            assert_eq!(
+                failure.message,
+                "This Claude Code turn isn't for a Claude Code login set up on this computer, so it didn't start.",
+            );
+            assert!(refuse_unless_runnable(&job, Ok(&lane)).is_some());
+        }
+        // The lease names it as the controller writes it.
+        let job: LeaseJob = serde_json::from_value(json!({
+            "id": Uuid::new_v4(),
+            "engine": "claude-code",
+            "claude_code_login_id": OTHER_LOGIN,
+        }))
+        .unwrap();
+        assert_eq!(
+            job.claude_code_login_id,
+            Some(Uuid::parse_str(OTHER_LOGIN).unwrap())
+        );
+        let job: LeaseJob = serde_json::from_value(json!({ "id": Uuid::new_v4() })).unwrap();
+        assert_eq!(job.claude_code_login_id, None);
     }
 
     /// Every turn of a Claude Code agent runs, whatever started it (11.4, 11.12): what marked a

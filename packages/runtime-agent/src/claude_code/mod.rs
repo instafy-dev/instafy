@@ -4,12 +4,15 @@
 //! before a turn starts:
 //!
 //! - the launch grant Desktop hands this process (`INSTAFY_CLAUDE_CODE_*`), read and removed at
-//!   startup before any thread exists, with a snapshot of the launch environment (3.2, 3.4);
-//! - the checks on the granted binary, configuration directory, CA file and PATH entries (3.2),
+//!   startup before any thread exists, with a snapshot of the launch environment (3.2, 3.4): the
+//!   program, and the person's Claude Code logins on this computer, each a configuration folder
+//!   they signed in to themselves (11.19);
+//! - the checks on the granted binary, each login's folder, the CA file and PATH entries (3.2),
 //!   which run at capture and again before every spawn;
-//! - the probe of `claude --version`, `--help` and `auth status`, and the `claudeCode`
-//!   registration capability it gives (2.10, 3.2), which says not ready while the person's
-//!   Claude plan's usage limit holds the lane, until it resets (11.11);
+//! - the probe of `claude --version` and `--help` for the program and of `auth status` for each
+//!   login, and the version 2 `claudeCode` registration capability it gives (2.10, 3.2, 11.19):
+//!   the program once, and each login apart, which says not ready while its Claude plan's usage
+//!   limit holds it, until it resets (11.11);
 //! - the cleanup latch that stops leasing when a turn's processes cannot be confirmed gone (3.6).
 //!
 //! [`command`] builds the exact argv and environment of the `claude` process (3.3, 3.4),
@@ -40,13 +43,15 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use runtime_contracts::claude_code_lane::{CAPABILITY_VERSION, MAX_LOGINS};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// The registration capability this module reports (2.10).
+/// The registration capability this module reports (2.10), at
+/// `runtime_contracts::claude_code_lane::CAPABILITY_VERSION` (11.19).
 pub const CAPABILITY_KEY: &str = "claudeCode";
 
 /// The absolute path of the `claude` the person confirmed in Desktop (4.1). It may be a link.
@@ -55,19 +60,24 @@ pub const BIN_ENV: &str = "INSTAFY_CLAUDE_CODE_BIN";
 pub const PATH_ENV: &str = "INSTAFY_CLAUDE_CODE_PATH";
 /// The Instafy user who consented; every lane job must be theirs (3.9).
 pub const USER_ID_ENV: &str = "INSTAFY_CLAUDE_CODE_USER_ID";
-/// The login-shell values D26 grants, as a JSON object of strings.
+/// The login-shell values D26 grants every login alike, as a JSON object of strings.
 pub const ENV_JSON_ENV: &str = "INSTAFY_CLAUDE_CODE_ENV_JSON";
-/// Every launch value of the grant (4.3). All of them leave the environment at startup.
-pub const LAUNCH_GRANT_ENV_KEYS: [&str; 4] = [BIN_ENV, PATH_ENV, USER_ID_ENV, ENV_JSON_ENV];
-
-/// The names `INSTAFY_CLAUDE_CODE_ENV_JSON` can grant (D26). Any other name in it is ignored.
-pub const GRANTED_ENV_KEYS: [&str; 5] = [
-    CONFIG_DIR_KEY,
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "NO_PROXY",
-    CA_FILE_KEY,
+/// The person's Claude Code logins on this computer (11.19), as a JSON list of
+/// `{"id": "<uuid>", "configDir": "/absolute/path" | null}`, `null` for Claude Code's usual folder.
+pub const LOGINS_JSON_ENV: &str = "INSTAFY_CLAUDE_CODE_LOGINS_JSON";
+/// Every launch value of the grant (4.3, 11.19). All of them leave the environment at startup.
+pub const LAUNCH_GRANT_ENV_KEYS: [&str; 5] = [
+    BIN_ENV,
+    PATH_ENV,
+    USER_ID_ENV,
+    ENV_JSON_ENV,
+    LOGINS_JSON_ENV,
 ];
+
+/// The names `INSTAFY_CLAUDE_CODE_ENV_JSON` can grant (D26), shared by every login. Any other
+/// name in it is ignored, `CLAUDE_CONFIG_DIR` too: each login brings its own (11.19).
+pub const GRANTED_ENV_KEYS: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", CA_FILE_KEY];
+/// The one `CLAUDE_*` name the child can get: its login's own folder, never another value (3.4).
 const CONFIG_DIR_KEY: &str = "CLAUDE_CONFIG_DIR";
 const CA_FILE_KEY: &str = "NODE_EXTRA_CA_CERTS";
 
@@ -125,13 +135,17 @@ pub const LANE_FLAGS: [&str; 10] = [
     "--resume",
 ];
 
-/// Why the lane is not ready (3.2). The controller keeps only these values (2.10):
-/// `runtime_contracts::claude_code_lane::NOT_READY_REASONS`, which a test holds [`Self::ALL`] to.
+/// Why the program, or one login, is not ready (3.2, 11.19). The controller keeps only these
+/// values (2.10): `runtime_contracts::claude_code_lane::NOT_READY_REASONS`, which a test holds
+/// [`Self::ALL`] to. The program's own reason is any but `plan_limit`
+/// (`PROGRAM_NOT_READY_REASONS`); a login's is the program's while the program is not ready,
+/// otherwise `binary_unsafe` for a folder that fails its checks, or `plan_limit` while its hold
+/// lasts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NotReadyReason {
     /// No runnable file at the granted path, or no granted path.
     BinaryMissing,
-    /// The grant or a granted path fails a check of 3.2.
+    /// The grant, a granted path or a login's folder fails a check of 3.2.
     BinaryUnsafe,
     /// `--version` or `--help` failed, timed out, printed too much, or printed no version.
     ProbeFailed,
@@ -139,8 +153,8 @@ pub enum NotReadyReason {
     UnsupportedVersion,
     /// `--help` says bare mode is the default in print mode.
     BareDefault,
-    /// A turn failed at the person's Claude plan's usage limit, which has not reset yet: a
-    /// [`PlanLimitHold`] (11.11). No probe gives it.
+    /// A turn on a login failed at its Claude plan's usage limit, which has not reset yet: a
+    /// [`PlanLimitHold`] of that login (11.11). No probe gives it.
     PlanLimit,
 }
 
@@ -811,13 +825,14 @@ impl LaunchEnvSnapshot {
     }
 }
 
-/// The four launch values of the grant, as Desktop set them (4.3).
+/// The five launch values of the grant, as Desktop set them (4.3, 11.19).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RawLaunchGrant {
     pub bin: Option<OsString>,
     pub path: Option<OsString>,
     pub user_id: Option<OsString>,
     pub env_json: Option<OsString>,
+    pub logins_json: Option<OsString>,
 }
 
 impl RawLaunchGrant {
@@ -827,6 +842,7 @@ impl RawLaunchGrant {
             path: lookup(PATH_ENV),
             user_id: lookup(USER_ID_ENV),
             env_json: lookup(ENV_JSON_ENV),
+            logins_json: lookup(LOGINS_JSON_ENV),
         }
     }
 
@@ -836,25 +852,55 @@ impl RawLaunchGrant {
             && self.path.is_none()
             && self.user_id.is_none()
             && self.env_json.is_none()
+            && self.logins_json.is_none()
     }
 }
 
-/// A grant whose values are well formed (3.2): an absolute binary path, a UUID user id, and
-/// granted values that are strings, with absolute `CLAUDE_CONFIG_DIR` and CA file paths. What
-/// they point at is checked by [`LaunchGrant::check`], at capture and before every spawn.
+/// One of the person's Claude Code logins on this computer (11.19): a Claude Code configuration
+/// folder they signed in to themselves, and the id the controller knows the login by. Claude Code
+/// keeps each folder's sign-in, settings and sessions apart, so each holds one subscription.
+/// Instafy reads nothing inside it: it only sets `CLAUDE_CONFIG_DIR` to it for `claude`, or sets
+/// none for Claude Code's usual folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Login {
+    id: Uuid,
+    config_dir: Option<PathBuf>,
+}
+
+impl Login {
+    /// The login's id, which a lane job's lease names (`claude_code_login_id`).
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// The folder Desktop granted, as it granted it; `None` for Claude Code's usual folder, whose
+    /// child gets no `CLAUDE_CONFIG_DIR` at all.
+    pub fn config_dir(&self) -> Option<&Path> {
+        self.config_dir.as_deref()
+    }
+}
+
+/// A grant whose values are well formed (3.2, 11.19): an absolute binary path, a UUID user id,
+/// granted values that are strings, with an absolute CA file path, and one to [`MAX_LOGINS`]
+/// logins, each id and each folder once, each folder absolute or Claude Code's usual one. What
+/// they point at is checked by [`LaunchGrant::check`] and [`LaunchGrant::check_login`], at
+/// capture and before every spawn.
 #[derive(Clone, Debug)]
 pub struct LaunchGrant {
     binary: PathBuf,
     path_entries: Vec<PathBuf>,
     user_id: Uuid,
     env: Vec<(&'static str, OsString)>,
+    logins: Vec<Login>,
     snapshot: LaunchEnvSnapshot,
     confinement: Confinement,
     trust: Trust,
 }
 
 impl LaunchGrant {
-    /// `Ok(None)` when Desktop granted nothing; a malformed grant is not ready, with the reason.
+    /// `Ok(None)` when Desktop granted nothing; a malformed grant is not ready as a whole, with
+    /// the reason: `binary_missing` without a binary path, otherwise `binary_unsafe`, a list of
+    /// logins that is absent or not well formed included.
     pub fn parse(
         raw: RawLaunchGrant,
         snapshot: LaunchEnvSnapshot,
@@ -882,6 +928,7 @@ impl LaunchGrant {
             Some(json) => parse_granted_env(&json)?,
             None => Vec::new(),
         };
+        let logins = parse_logins(raw.logins_json.as_deref())?;
         let path_entries = raw
             .path
             .map(|value| {
@@ -895,10 +942,21 @@ impl LaunchGrant {
             path_entries,
             user_id,
             env,
+            logins,
             snapshot,
             confinement,
             trust,
         }))
+    }
+
+    /// The granted logins, in the order Desktop granted them.
+    pub fn logins(&self) -> &[Login] {
+        &self.logins
+    }
+
+    /// The granted login `id`, if the grant has it.
+    pub fn login(&self, id: Uuid) -> Option<&Login> {
+        self.logins.iter().find(|login| login.id == id)
     }
 
     /// The granted path, as Desktop stored it (a link, so Claude Code's updates keep working).
@@ -916,7 +974,7 @@ impl LaunchGrant {
         &self.path_entries
     }
 
-    /// The granted D26 values, unchecked, in [`GRANTED_ENV_KEYS`] order.
+    /// The granted D26 values every login shares, unchecked, in [`GRANTED_ENV_KEYS`] order.
     pub fn granted_env(&self) -> &[(&'static str, OsString)] {
         &self.env
     }
@@ -933,16 +991,15 @@ impl LaunchGrant {
         self.trust
     }
 
-    /// The checks of 3.2 on what the grant points at now. They run at capture and before every
-    /// spawn, since Claude Code's updates move the link's target (4.1); the runtime then spawns
-    /// the checked target, not the link.
+    /// The checks of 3.2 on what the grant points at now, for the program: the binary and the CA
+    /// file every login shares. They run at capture and before every spawn, since Claude Code's
+    /// updates move the link's target (4.1); the runtime then spawns the checked target, not the
+    /// link. A login's folder has checks of its own ([`Self::check_login`]).
     pub fn check(&self) -> Result<CheckedLaunch, NotReadyReason> {
         let (program, identity) = self.check_binary()?;
         for (name, value) in &self.env {
-            match *name {
-                CONFIG_DIR_KEY => self.check_private_location(Path::new(value), true)?,
-                CA_FILE_KEY => self.check_private_location(Path::new(value), false)?,
-                _ => {}
+            if *name == CA_FILE_KEY {
+                self.check_private_location(Path::new(value), false)?;
             }
         }
         let granted_dir = self
@@ -956,6 +1013,23 @@ impl LaunchGrant {
             identity,
             granted_env: self.env.clone(),
         })
+    }
+
+    /// The checks of 3.2 on a login's folder now (11.19): those a granted `CLAUDE_CONFIG_DIR`
+    /// gets (D26), at capture and before every spawn. One that fails makes only its own login
+    /// not ready, as `binary_unsafe`: nothing starts `claude` with that folder, and nothing starts
+    /// it without, since Claude Code would then load its usual folder instead. Claude Code's usual
+    /// folder itself has no granted path to check, as before a grant named folders.
+    pub fn check_login(&self, login: &Login) -> Result<CheckedLogin, NotReadyReason> {
+        if let Some(folder) = &login.config_dir {
+            self.check_private_location(folder, true)?;
+        }
+        Ok(CheckedLogin(login.clone()))
+    }
+
+    /// [`Self::check_login`] again, on a login that passed it at its probe, right before a spawn.
+    pub fn recheck_login(&self, login: &CheckedLogin) -> Result<(), NotReadyReason> {
+        self.check_login(&login.0).map(drop)
     }
 
     /// The granted path: neither it, a link on the way, nor its target is in the confinement;
@@ -1016,10 +1090,10 @@ impl LaunchGrant {
         }
     }
 
-    /// A granted `CLAUDE_CONFIG_DIR` (a directory) or CA file: absolute, outside the
-    /// confinement with every link on the way, owned by the effective user or root, and neither
-    /// group- nor world-writable (D26). A failure is `binary_unsafe`: the value is never just
-    /// left out, since without it Claude Code would load its default configuration.
+    /// A login's folder, its `CLAUDE_CONFIG_DIR` (a directory), or the granted CA file: absolute,
+    /// outside the confinement with every link on the way, owned by the effective user or root,
+    /// and neither group- nor world-writable (D26). A failure is `binary_unsafe`: the value is
+    /// never just left out, since without it Claude Code would load its default configuration.
     #[cfg(unix)]
     fn check_private_location(&self, path: &Path, directory: bool) -> Result<(), NotReadyReason> {
         use std::os::unix::fs::MetadataExt;
@@ -1105,14 +1179,75 @@ fn parse_granted_env(json: &OsStr) -> Result<Vec<(&'static str, OsString)>, NotR
         if value.is_empty() {
             continue;
         }
-        if value.contains('\0')
-            || (matches!(name, CONFIG_DIR_KEY | CA_FILE_KEY) && !Path::new(value).is_absolute())
-        {
+        if value.contains('\0') || (name == CA_FILE_KEY && !Path::new(value).is_absolute()) {
             return Err(malformed);
         }
         env.push((name, OsString::from(value)));
     }
     Ok(env)
+}
+
+/// `INSTAFY_CLAUDE_CODE_LOGINS_JSON` (11.19), read strictly: a list of one to [`MAX_LOGINS`]
+/// objects with exactly an `id`, a UUID in its hyphenated form, and a `configDir`, an absolute
+/// path or `null` for Claude Code's usual folder; no id twice, and no folder twice (the usual one
+/// included), as paths compare on a Mac. Anything else, an absent value included, makes the whole
+/// grant malformed (`binary_unsafe`): a list the runtime only half understood could start `claude`
+/// with a folder the person never consented to.
+fn parse_logins(json: Option<&OsStr>) -> Result<Vec<Login>, NotReadyReason> {
+    let malformed = NotReadyReason::BinaryUnsafe;
+    let entries: Vec<Value> = json
+        .and_then(OsStr::to_str)
+        .and_then(|text| serde_json::from_str(text).ok())
+        .ok_or(malformed)?;
+    if entries.is_empty() || entries.len() > MAX_LOGINS {
+        return Err(malformed);
+    }
+    let mut logins: Vec<Login> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let entry = entry.as_object().ok_or(malformed)?;
+        if entry.len() != 2 {
+            return Err(malformed);
+        }
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| id.len() == 36)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .ok_or(malformed)?;
+        let config_dir = match entry.get("configDir").ok_or(malformed)? {
+            Value::Null => None,
+            Value::String(folder) if !folder.contains('\0') && Path::new(folder).is_absolute() => {
+                Some(PathBuf::from(folder))
+            }
+            _ => return Err(malformed),
+        };
+        let taken = logins.iter().any(|login| {
+            login.id == id
+                || match (&login.config_dir, &config_dir) {
+                    (None, None) => true,
+                    (Some(taken), Some(folder)) => same_folder(taken, folder),
+                    _ => false,
+                }
+        });
+        if taken {
+            return Err(malformed);
+        }
+        logins.push(Login { id, config_dir });
+    }
+    Ok(logins)
+}
+
+/// Whether two absolute paths name the same folder as written: component by component, ignoring
+/// ASCII case as a Mac's folders do, and a trailing `/` or a `.`.
+fn same_folder(left: &Path, right: &Path) -> bool {
+    let (mut left, mut right) = (left.components(), right.components());
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(left), Some(right)) if same_component(left, right) => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Which file a probe ran: the `--help` reading stays valid while this and the version hold.
@@ -1138,7 +1273,7 @@ impl BinaryIdentity {
 }
 
 /// What [`LaunchGrant::check`] passed: the target to spawn, the granted path's folder (the
-/// first PATH entry), and the granted values to pass.
+/// first PATH entry), and the granted values every login shares.
 #[derive(Clone, Debug)]
 pub struct CheckedLaunch {
     program: PathBuf,
@@ -1162,18 +1297,73 @@ impl CheckedLaunch {
         &self.identity
     }
 
-    /// The granted D26 values that passed their checks.
+    /// The granted D26 values every login shares that passed their checks.
     pub fn granted_env(&self) -> &[(&'static str, OsString)] {
         &self.granted_env
     }
 }
 
-/// What a probe found (3.2).
+/// A login whose folder passed [`LaunchGrant::check_login`]: what its `claude` gets as
+/// `CLAUDE_CONFIG_DIR`, or nothing for Claude Code's usual folder (3.4, 11.19).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedLogin(Login);
+
+impl CheckedLogin {
+    pub fn id(&self) -> Uuid {
+        self.0.id
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` the child gets, the person's own folder as Desktop granted it;
+    /// `None` for Claude Code's usual folder, where the child gets none.
+    pub fn config_dir(&self) -> Option<&Path> {
+        self.0.config_dir()
+    }
+}
+
+/// What a login's last `claude auth status` said (3.2, 11.19), the one sign-in check the lane
+/// makes. Nothing else of its output is kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignIn {
+    signed_in: Option<bool>,
+    plan_sign_in: bool,
+}
+
+impl SignIn {
+    /// What a run of `auth status` on `cli` says that exited with `status` and printed `stdout`.
+    fn of(status: ExitStatus, stdout: &[u8], cli: CliVersion) -> Self {
+        Self {
+            signed_in: match status.code() {
+                Some(0) => Some(true),
+                Some(1) => Some(false),
+                _ => None,
+            },
+            plan_sign_in: plan_sign_in(status.success(), stdout, cli),
+        }
+    }
+
+    /// The capability's `signedIn`: true when `auth status` exited 0, false when it exited 1,
+    /// `None` when the probe could not tell or has not run it. A sign-out never makes a login not
+    /// ready: a turn on it fails as `not_signed_in`, and Studio says beforehand that the login is
+    /// not signed in (3.2).
+    pub fn signed_in(&self) -> Option<bool> {
+        self.signed_in
+    }
+
+    /// The capability's `planSignIn`: a Claude plan sign-in, as [`plan_sign_in`] reads one.
+    pub fn plan_sign_in(&self) -> bool {
+        self.plan_sign_in
+    }
+}
+
+/// What a probe found for one login (3.2, 11.19): a turn's, or one whose plan limit just reset.
 #[derive(Clone, Debug)]
 pub enum Readiness {
+    /// The program and the login are ready.
     Ready(ReadyLane),
+    /// The program's reason or, with the program ready, the login's own: `binary_unsafe` for a
+    /// folder that fails its checks.
     NotReady(NotReadyReason),
-    /// A plan limit holds the lane (11.11): nothing was probed.
+    /// A plan limit holds the login (11.11): nothing was probed.
     Held(PlanLimitHold),
 }
 
@@ -1196,23 +1386,15 @@ impl Readiness {
             Self::NotReady(_) | Self::Held(_) => None,
         }
     }
-
-    /// The `claudeCode` registration capability (2.10, 3.2, 11.11).
-    pub fn capability(&self) -> Value {
-        match self {
-            Self::Ready(ready) => ready.capability(),
-            Self::NotReady(reason) => not_ready_capability(*reason),
-            Self::Held(hold) => hold.capability(),
-        }
-    }
 }
 
-/// The person's Claude plan reached its usage limit, and the lane holds until the limit resets
-/// (11.11, D37): after a turn failed as `plan_limit`, the capability says not ready, with the
-/// reason `plan_limit` and the reset time, so the controller leases no lane job to this runtime
-/// and the person's other waiting turns wait for the reset instead of each starting and failing
-/// in turn. A turn leased all the same fails as `plan_limit` at its probe. The hold lives only in
-/// memory: a restart forgets it, and the next turn that reaches the limit sets it again.
+/// A login's Claude plan reached its usage limit, and the login holds until the limit resets
+/// (11.11, 11.19, D37): after a turn on it failed as `plan_limit`, the capability says that login
+/// is not ready, with the reason `plan_limit` and the reset time, so the controller leases this
+/// runtime no lane job on it and the person's other waiting turns on it wait for the reset instead
+/// of each starting and failing in turn. The person's other logins keep taking turns. A turn
+/// leased on it all the same fails as `plan_limit` at its probe. The hold lives only in memory: a
+/// restart forgets it, and the next turn that reaches the limit sets it again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanLimitHold {
     resets_at: chrono::DateTime<chrono::Utc>,
@@ -1260,32 +1442,18 @@ impl PlanLimitHold {
             .to_std()
             .unwrap_or(Duration::ZERO)
     }
-
-    /// `{"version": 1, "ready": false, "reason": "plan_limit", "resetsAt": "<RFC 3339, UTC>"}`
-    /// (11.11).
-    pub fn capability(&self) -> Value {
-        json!({
-            "version": 1,
-            "ready": false,
-            "reason": NotReadyReason::PlanLimit.as_str(),
-            "resetsAt": self.resets_at_rfc3339(),
-        })
-    }
 }
 
-/// `{"version": 1, "ready": false, "reason": …}` (3.2).
-pub fn not_ready_capability(reason: NotReadyReason) -> Value {
-    json!({ "version": 1, "ready": false, "reason": reason.as_str() })
-}
-
-/// A supported `claude` and what a turn needs from its probe.
+/// A supported `claude`, a login whose folder passed its checks, and what a turn on that login
+/// needs from its probe.
 #[derive(Clone, Debug)]
 pub struct ReadyLane {
     cli: CliVersion,
     verified: bool,
-    plan_sign_in: bool,
     help: HelpFacts,
     launch: CheckedLaunch,
+    login: CheckedLogin,
+    sign_in: SignIn,
 }
 
 impl ReadyLane {
@@ -1297,8 +1465,14 @@ impl ReadyLane {
         self.verified
     }
 
+    /// Whether the login's `auth status` reports a Claude plan sign-in.
     pub fn plan_sign_in(&self) -> bool {
-        self.plan_sign_in
+        self.sign_in.plan_sign_in
+    }
+
+    /// How the login's `auth status` exited: [`SignIn::signed_in`].
+    pub fn signed_in(&self) -> Option<bool> {
+        self.sign_in.signed_in
     }
 
     pub fn help(&self) -> &HelpFacts {
@@ -1309,22 +1483,171 @@ impl ReadyLane {
         &self.launch
     }
 
-    /// `{"version": 1, "ready": true, "cli", "verified", "planSignIn", "partialMessages"}`. The
-    /// lane always streams partial messages (`--include-partial-messages`, 3.3).
-    pub fn capability(&self) -> Value {
-        json!({
-            "version": 1,
-            "ready": true,
-            "cli": self.cli.to_string(),
-            "verified": self.verified,
-            "planSignIn": self.plan_sign_in,
-            "partialMessages": true,
-        })
+    /// The login the turn runs on, whose folder passed its checks at the probe.
+    pub fn login(&self) -> &CheckedLogin {
+        &self.login
     }
 }
 
-/// A probe and whether it changed the published capability. A change while registered means
-/// the runtime must register again with the new value (3.2).
+/// The capability of a grant that is not well formed as a whole (11.19): not ready, with its
+/// reason, and no login, since the runtime trusts nothing such a grant names:
+/// `{"version": 2, "ready": false, "reason": …, "logins": {}}`.
+pub fn malformed_grant_capability(reason: NotReadyReason) -> Value {
+    json!({
+        "version": CAPABILITY_VERSION,
+        "ready": false,
+        "reason": reason.as_str(),
+        "logins": {},
+    })
+}
+
+/// What the program's last probe found that the capability carries (3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProgramFacts {
+    cli: CliVersion,
+    verified: bool,
+}
+
+impl ProgramFacts {
+    fn of(cli: CliVersion) -> Self {
+        Self {
+            cli,
+            verified: is_verified(cli),
+        }
+    }
+}
+
+/// What the lane knows of one login (11.19).
+#[derive(Clone, Debug)]
+struct LoginState {
+    id: Uuid,
+    /// Its folder's checks, as they last ran: at capture, then at each probe of the login.
+    folder: Result<(), NotReadyReason>,
+    /// What its last `auth status` said; nothing before the first.
+    sign_in: SignIn,
+    /// The plan limit that holds it (11.11). One whose reset time has passed holds nothing, and
+    /// stays only until the login's next probe, which the timed re-probe runs at that time.
+    hold: Option<PlanLimitHold>,
+}
+
+impl LoginState {
+    /// The login's entry in the capability at `now`, under a program that is ready, or not ready
+    /// for `program_reason`.
+    fn capability_at(
+        &self,
+        program_reason: Option<NotReadyReason>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Value {
+        let hold = self.hold.filter(|hold| hold.holds_at(now));
+        let reason = program_reason
+            .or(self.folder.err())
+            .or(hold.map(|_| NotReadyReason::PlanLimit));
+        let mut entry = serde_json::Map::new();
+        entry.insert("ready".into(), Value::Bool(reason.is_none()));
+        if let Some(reason) = reason {
+            entry.insert("reason".into(), reason.as_str().into());
+        }
+        if let (Some(NotReadyReason::PlanLimit), Some(hold)) = (reason, hold) {
+            entry.insert("resetsAt".into(), hold.resets_at_rfc3339().into());
+        }
+        entry.insert("planSignIn".into(), Value::Bool(self.sign_in.plan_sign_in));
+        if let Some(signed_in) = self.sign_in.signed_in {
+            entry.insert("signedIn".into(), Value::Bool(signed_in));
+        }
+        Value::Object(entry)
+    }
+}
+
+/// What the lane knows of the program and of each login, which the capability is built from.
+#[derive(Clone, Debug)]
+struct LaneState {
+    /// The program's last probe: `None` before the first, unless the program failed its checks
+    /// at capture.
+    program: Option<Result<ProgramFacts, NotReadyReason>>,
+    /// Every granted login, in the grant's order.
+    logins: Vec<LoginState>,
+}
+
+impl LaneState {
+    fn login_mut(&mut self, id: Uuid) -> Option<&mut LoginState> {
+        self.logins.iter_mut().find(|login| login.id == id)
+    }
+
+    /// The version 2 `claudeCode` capability at `now` (2.10, 3.2, 11.19), or `None` before the
+    /// program's first probe:
+    /// `{"version": 2, "ready", "reason"?, "cli"?, "verified"?, "partialMessages"?, "logins"}`.
+    /// The top level is the program's: `cli`, `verified` and `partialMessages` while it is ready
+    /// (the lane always streams partial messages, `--include-partial-messages`, 3.3), and its
+    /// `reason` while it is not. Every granted login is listed under its id, lowercase and
+    /// hyphenated, with `ready`, a `reason` while it is not ready, `resetsAt` with `plan_limit`
+    /// only, `planSignIn`, and `signedIn` when its last `auth status` told. A login is ready only
+    /// while the program is, and otherwise carries the program's reason; with the program ready,
+    /// `binary_unsafe` for a folder that fails its checks, or `plan_limit` while its hold lasts.
+    /// It never holds a path, which would name the OS user.
+    fn capability_at(&self, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+        let program = self.program.as_ref()?;
+        let program_reason = program.as_ref().err().copied();
+        let logins: serde_json::Map<String, Value> = self
+            .logins
+            .iter()
+            .map(|login| {
+                (
+                    login.id.to_string(),
+                    login.capability_at(program_reason, now),
+                )
+            })
+            .collect();
+        let mut capability = match program {
+            Ok(facts) => json!({
+                "version": CAPABILITY_VERSION,
+                "ready": true,
+                "cli": facts.cli.to_string(),
+                "verified": facts.verified,
+                "partialMessages": true,
+            }),
+            Err(reason) => json!({
+                "version": CAPABILITY_VERSION,
+                "ready": false,
+                "reason": reason.as_str(),
+            }),
+        };
+        capability["logins"] = Value::Object(logins);
+        Some(capability)
+    }
+
+    /// What the timed re-probe has to probe now (3.2, 11.11).
+    fn reprobe_due(&self, now: chrono::DateTime<chrono::Utc>) -> Reprobe {
+        let program_ready = matches!(self.program, Some(Ok(_)));
+        if !program_ready || self.logins.iter().any(|login| login.folder.is_err()) {
+            return Reprobe::Everything;
+        }
+        let reset: Vec<Uuid> = self
+            .logins
+            .iter()
+            .filter(|login| login.hold.is_some_and(|hold| !hold.holds_at(now)))
+            .map(|login| login.id)
+            .collect();
+        if reset.is_empty() {
+            Reprobe::Nothing
+        } else {
+            Reprobe::Logins(reset)
+        }
+    }
+}
+
+/// What the timed re-probe probes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reprobe {
+    /// The program, or a login's folder, is not ready: no lane turn runs to notice that the
+    /// person fixed it, so the program and every login no plan limit holds are probed again.
+    Everything,
+    /// The plan limits of these logins reset: each is probed again.
+    Logins(Vec<Uuid>),
+    Nothing,
+}
+
+/// A probe of one login and whether it changed the published capability. A change while
+/// registered means the runtime must register again with the new value (3.2).
 #[derive(Clone, Debug)]
 pub struct LaneProbe {
     pub readiness: Readiness,
@@ -1337,32 +1660,50 @@ struct CachedHelp {
     facts: HelpFacts,
 }
 
-/// The lane of a captured grant: its probe, the `--help` reading it keeps, the published
-/// `claudeCode` capability, and the plan limit that holds it, while one does.
+/// The lane of a captured grant: its probes, the `--help` reading it keeps, what it knows of the
+/// program and of each login, the published `claudeCode` capability built from that, and the
+/// plan limits that hold its logins, while they do (11.19).
 ///
-/// The capability is fixed for each registration. Registration reads [`Lane::capability`];
-/// a per-turn probe that changes it, a plan limit's hold and its end
-/// ([`Lane::hold_for_plan_limit`]), and [`Lane::reprobe_while_not_ready`] publish the new value
-/// to [`Lane::subscribe`] for the registration loop to register again.
+/// The capability is fixed for each registration. Registration reads [`Lane::capability`]; a
+/// probe that changes it, a plan limit's hold and its end ([`Lane::hold_for_plan_limit`]), and
+/// [`Lane::reprobe_while_not_ready`] publish the new value to [`Lane::subscribe`] for the
+/// registration loop to register again.
 pub struct Lane {
     grant: LaunchGrant,
     probe_timeout: Duration,
+    /// The last `--help` reading. The probe that runs holds it, so probes run one at a time.
     help: tokio::sync::Mutex<Option<CachedHelp>>,
+    /// What the capability is built from. It is never held across an await.
+    state: parking_lot::Mutex<LaneState>,
     capability: watch::Sender<Option<Value>>,
-    /// The plan limit that holds the lane (11.11), until its reset time.
-    hold: parking_lot::Mutex<Option<PlanLimitHold>>,
-    /// Wakes the timed re-probe when a hold starts, so it probes again at the reset time.
+    /// Wakes the timed re-probe when a hold starts, so it probes that login again at its reset
+    /// time.
     hold_started: tokio::sync::Notify,
 }
 
 impl Lane {
+    /// The lane of `grant`, each login's folder checked once, as the capture checks it (3.2).
+    /// Nothing is published before the program's first probe.
     pub fn new(grant: LaunchGrant) -> Self {
+        let logins = grant
+            .logins
+            .iter()
+            .map(|login| LoginState {
+                id: login.id,
+                folder: grant.check_login(login).map(drop),
+                sign_in: SignIn::default(),
+                hold: None,
+            })
+            .collect();
         Self {
             grant,
             probe_timeout: PROBE_TIMEOUT,
             help: tokio::sync::Mutex::new(None),
+            state: parking_lot::Mutex::new(LaneState {
+                program: None,
+                logins,
+            }),
             capability: watch::channel(None).0,
-            hold: parking_lot::Mutex::new(None),
             hold_started: tokio::sync::Notify::new(),
         }
     }
@@ -1377,38 +1718,170 @@ impl Lane {
         &self.grant
     }
 
-    /// Probes the granted `claude` (3.2): checks the grant again, then runs `--version`,
-    /// `--help` only when the version or the binary changed since it last ran, and
-    /// `auth status`, each with the lane environment, stdin from null, a fresh empty runtime
-    /// folder as working directory, [`PROBE_TIMEOUT`] and [`PROBE_OUTPUT_CAP`]. It never sends a
-    /// prompt. Probes run one at a time. While a plan limit holds the lane, it runs nothing and
-    /// says so ([`Readiness::Held`], 11.11): the limit, not `claude`, keeps turns from running.
-    pub async fn probe(&self) -> Readiness {
-        self.probe_by(None).await
-    }
-
-    /// [`Self::probe`], with every command ending by `deadline` when there is one. A command the
-    /// deadline cuts short fails the probe as `probe_failed`, `auth status` too.
-    async fn probe_by(&self, deadline: Option<Instant>) -> Readiness {
-        if let Some(hold) = self.plan_limit_hold() {
+    /// Probes the granted `claude` for a turn on `login` (3.2, 11.19): checks the grant and the
+    /// login's folder again, then runs `--version`, `--help` only when the version or the binary
+    /// changed since it last ran, and `auth status`, each with the login's lane environment,
+    /// stdin from null, a fresh empty runtime folder as working directory, [`PROBE_TIMEOUT`] and
+    /// [`PROBE_OUTPUT_CAP`]. It never sends a prompt. Probes run one at a time. While a plan limit
+    /// holds the login, it runs nothing and says so ([`Readiness::Held`], 11.11): the limit, not
+    /// `claude`, keeps the login's turns from running. A login the grant does not have is not
+    /// ready (`binary_unsafe`), and nothing runs for it; no lane job names one (3.9). What it
+    /// finds is kept for the capability, which [`Self::probe_and_publish`] publishes.
+    pub async fn probe(&self, login: Uuid) -> Readiness {
+        let Some(login) = self.grant.login(login) else {
+            return Readiness::NotReady(NotReadyReason::BinaryUnsafe);
+        };
+        if let Some(hold) = self.hold_or_clear(login.id) {
             return Readiness::Held(hold);
         }
         let mut cached_help = self.help.lock().await;
-        match self.probe_with(&mut cached_help, deadline).await {
-            Ok(ready) => Readiness::Ready(ready),
-            Err(reason) => Readiness::NotReady(reason),
+        let checked = self.grant.check_login(login);
+        self.keep_folder(login.id, &checked);
+        let launch = match self.grant.check() {
+            Ok(launch) => launch,
+            Err(reason) => {
+                self.keep_program(Err(reason));
+                return Readiness::NotReady(reason);
+            }
+        };
+        let checked = match checked {
+            Ok(checked) => checked,
+            Err(reason) => return Readiness::NotReady(reason),
+        };
+        let environment = command::lane_environment(&self.grant, &launch, &checked);
+        let (cli, help) = match self
+            .probe_program(&mut cached_help, &launch, &environment, None)
+            .await
+        {
+            Ok(found) => found,
+            Err(reason) => {
+                self.keep_program(Err(reason));
+                return Readiness::NotReady(reason);
+            }
+        };
+        self.keep_program(Ok(ProgramFacts::of(cli)));
+        // Without a deadline nothing cuts `auth status` short.
+        let sign_in = self
+            .auth_status(&launch, cli, &environment, None)
+            .await
+            .unwrap_or_default();
+        self.keep_sign_in(login.id, sign_in);
+        drop(cached_help);
+        // A plan limit's hold that started while the probe ran says what the login is (11.11).
+        if let Some(hold) = self.plan_limit_hold(login.id) {
+            return Readiness::Held(hold);
+        }
+        Readiness::Ready(ReadyLane {
+            cli,
+            verified: is_verified(cli),
+            help,
+            launch,
+            login: checked,
+            sign_in,
+        })
+    }
+
+    /// [`Self::probe`] of `login`, then publishes what the lane knows.
+    pub async fn probe_and_publish(&self, login: Uuid) -> LaneProbe {
+        let readiness = self.probe(login).await;
+        let capability_changed = self.publish();
+        LaneProbe {
+            readiness,
+            capability_changed,
         }
     }
 
-    async fn probe_with(
+    /// Probes the program and every login, then publishes what the lane knows, and says whether
+    /// that changed the capability (3.2, 11.19). `--version`, and `--help` as [`Self::probe`]
+    /// runs it, run once for the program; then `auth status` runs once for each login whose folder
+    /// passes its checks and that no plan limit holds, all at the same time, each with its login's
+    /// `CLAUDE_CONFIG_DIR` and nothing else changed. The program's commands run in a login's
+    /// environment too, the first one's whose folder passes its checks, so `claude` never runs
+    /// with a folder the person did not grant, or one that failed its checks. When every folder
+    /// fails them, nothing runs, and the program is not ready either (`binary_unsafe`).
+    pub async fn probe_and_publish_all(&self) -> bool {
+        self.probe_all(None).await;
+        self.publish()
+    }
+
+    /// The startup probe (3.2): [`Self::probe_and_publish_all`], with one limit for every command
+    /// together, the limit of one ([`PROBE_TIMEOUT`]), the logins' `auth status` running side by
+    /// side within it. The runtime registers, and so takes any turn, Codex's too, only once it
+    /// ended, so a `claude` that stalls delays that by this limit and the last commands' kill at
+    /// most. A probe that runs out of it, an `auth status` cut short included, leaves the program
+    /// `probe_failed`, which the timed re-probe ([`Self::reprobe_while_not_ready`]) corrects by
+    /// registering again.
+    pub async fn probe_and_publish_at_startup(&self) -> bool {
+        self.probe_all(Some(Instant::now() + self.probe_timeout))
+            .await;
+        self.publish()
+    }
+
+    async fn probe_all(&self, deadline: Option<Instant>) {
+        let mut cached_help = self.help.lock().await;
+        let checked: Vec<Result<CheckedLogin, NotReadyReason>> = self
+            .grant
+            .logins
+            .iter()
+            .map(|login| {
+                let checked = self.grant.check_login(login);
+                self.keep_folder(login.id, &checked);
+                checked
+            })
+            .collect();
+        // The probe that starts now is the one an ended hold called for.
+        self.clear_ended_holds();
+        let launch = match self.grant.check() {
+            Ok(launch) => launch,
+            Err(reason) => return self.keep_program(Err(reason)),
+        };
+        let Some(first) = checked.iter().find_map(|checked| checked.as_ref().ok()) else {
+            return self.keep_program(Err(NotReadyReason::BinaryUnsafe));
+        };
+        let environment = command::lane_environment(&self.grant, &launch, first);
+        let cli = match self
+            .probe_program(&mut cached_help, &launch, &environment, deadline)
+            .await
+        {
+            Ok((cli, _)) => cli,
+            Err(reason) => return self.keep_program(Err(reason)),
+        };
+        let launch = &launch;
+        let signs_in = futures_util::future::join_all(
+            checked
+                .iter()
+                .filter_map(|checked| checked.as_ref().ok())
+                .filter(|login| self.plan_limit_hold(login.id()).is_none())
+                .map(|login| async move {
+                    let environment = command::lane_environment(&self.grant, launch, login);
+                    let sign_in = self.auth_status(launch, cli, &environment, deadline).await;
+                    (login.id(), sign_in)
+                }),
+        )
+        .await;
+        let mut cut_short = false;
+        for (login, sign_in) in signs_in {
+            cut_short |= sign_in.is_none();
+            self.keep_sign_in(login, sign_in.unwrap_or_default());
+        }
+        self.keep_program(if cut_short {
+            Err(NotReadyReason::ProbeFailed)
+        } else {
+            Ok(ProgramFacts::of(cli))
+        });
+    }
+
+    /// `--version`, and `--help` unless its last reading still holds, with `environment`: the
+    /// program's version and `--help` facts, or why it is not ready (3.2).
+    async fn probe_program(
         &self,
         cached_help: &mut Option<CachedHelp>,
+        launch: &CheckedLaunch,
+        environment: &[(OsString, OsString)],
         deadline: Option<Instant>,
-    ) -> Result<ReadyLane, NotReadyReason> {
-        let launch = self.grant.check()?;
-        let environment = command::lane_environment(&self.grant, &launch);
+    ) -> Result<(CliVersion, HelpFacts), NotReadyReason> {
         let version = self
-            .run(&launch, &environment, &["--version"], deadline)
+            .run(launch, environment, &["--version"], deadline)
             .await
             .ok()
             .filter(|run| run.status.success())
@@ -1425,7 +1898,7 @@ impl Lane {
             Some(facts) => facts,
             None => {
                 let run = self
-                    .run(&launch, &environment, &["--help"], deadline)
+                    .run(launch, environment, &["--help"], deadline)
                     .await
                     .ok()
                     .filter(|run| run.status.success())
@@ -1449,25 +1922,31 @@ impl Lane {
         if help.bare_is_default() {
             return Err(NotReadyReason::BareDefault);
         }
-        let plan_sign_in = match self
-            .run(&launch, &environment, &["auth", "status"], deadline)
+        Ok((version, help))
+    }
+
+    /// What `auth status` says of a login, run with its `environment` (3.2). `None` only when the
+    /// startup probe's `deadline` cut it short, which fails that probe; one that fails otherwise
+    /// says nothing of the sign-in, and the login stays ready.
+    async fn auth_status(
+        &self,
+        launch: &CheckedLaunch,
+        cli: CliVersion,
+        environment: &[(OsString, OsString)],
+        deadline: Option<Instant>,
+    ) -> Option<SignIn> {
+        match self
+            .run(launch, environment, &["auth", "status"], deadline)
             .await
         {
-            Ok(run) => plan_sign_in(run.status.success(), &run.stdout, version),
+            Ok(run) => Some(SignIn::of(run.status, &run.stdout, cli)),
             Err(ProbeRunError::TimedOut)
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
             {
-                return Err(NotReadyReason::ProbeFailed);
+                None
             }
-            Err(_) => false,
-        };
-        Ok(ReadyLane {
-            cli: version,
-            verified: is_verified(version),
-            plan_sign_in,
-            help,
-            launch,
-        })
+            Err(_) => Some(SignIn::default()),
+        }
     }
 
     async fn run(
@@ -1496,87 +1975,112 @@ impl Lane {
         run
     }
 
-    /// Probes, then publishes the capability it gives.
-    pub async fn probe_and_publish(&self) -> LaneProbe {
-        self.probe_and_publish_by(None).await
+    fn keep_program(&self, program: Result<ProgramFacts, NotReadyReason>) {
+        self.state.lock().program = Some(program);
     }
 
-    /// The startup probe (3.2): [`Self::probe_and_publish`], with one limit for its commands
-    /// together, the limit of one ([`PROBE_TIMEOUT`]). The runtime registers, and so takes any
-    /// turn, Codex's too, only once it ended, so a `claude` that stalls delays that by this limit
-    /// and the last command's kill at most. A probe that runs out of it is `probe_failed`, which
-    /// the timed re-probe ([`Self::reprobe_while_not_ready`]) corrects by registering again.
-    pub async fn probe_and_publish_at_startup(&self) -> LaneProbe {
-        self.probe_and_publish_by(Some(Instant::now() + self.probe_timeout))
-            .await
-    }
-
-    async fn probe_and_publish_by(&self, deadline: Option<Instant>) -> LaneProbe {
-        let mut readiness = self.probe_by(deadline).await;
-        // A plan limit's hold that started while the probe ran says what the lane is (11.11).
-        if let Some(hold) = self.plan_limit_hold() {
-            readiness = Readiness::Held(hold);
-        }
-        let capability_changed = self.publish(readiness.capability());
-        if capability_changed {
-            match &readiness {
-                Readiness::Ready(ready) => info!(
-                    cli = %ready.cli,
-                    verified = ready.verified,
-                    plan_sign_in = ready.plan_sign_in,
-                    "Claude Code lane is ready"
-                ),
-                Readiness::NotReady(reason) => {
-                    info!(reason = reason.as_str(), "Claude Code lane is not ready")
-                }
-                Readiness::Held(hold) => info!(
-                    resets_at = %hold.resets_at_rfc3339(),
-                    "Claude Code lane waits for the Claude plan's limit to reset"
-                ),
-            }
-        }
-        LaneProbe {
-            readiness,
-            capability_changed,
+    fn keep_folder(&self, login: Uuid, checked: &Result<CheckedLogin, NotReadyReason>) {
+        if let Some(state) = self.state.lock().login_mut(login) {
+            state.folder = checked.as_ref().map(|_| ()).map_err(|reason| *reason);
         }
     }
 
-    /// Holds the lane after a turn failed at the person's Claude plan's usage limit (11.11):
+    fn keep_sign_in(&self, login: Uuid, sign_in: SignIn) {
+        if let Some(state) = self.state.lock().login_mut(login) {
+            state.sign_in = sign_in;
+        }
+    }
+
+    /// Holds `login` after a turn on it failed at its Claude plan's usage limit (11.11, 11.19):
     /// until `resets_at` (seconds since the epoch), or as [`PlanLimitHold::after`] says without
-    /// it. It publishes the hold's capability, so this runtime registers again saying it is not
-    /// ready, and wakes the timed re-probe, which probes again at the reset time. Returns the
-    /// hold, or None when the reset time has passed already.
-    pub fn hold_for_plan_limit(&self, resets_at: Option<i64>) -> Option<PlanLimitHold> {
+    /// it. It publishes the capability with that login not ready, so this runtime registers again,
+    /// and wakes the timed re-probe, which probes the login again at the reset time. The person's
+    /// other logins keep taking turns. Returns the hold, or None when the reset time has passed
+    /// already or the grant has no such login.
+    pub fn hold_for_plan_limit(
+        &self,
+        login: Uuid,
+        resets_at: Option<i64>,
+    ) -> Option<PlanLimitHold> {
         let hold = PlanLimitHold::after(resets_at, chrono::Utc::now())?;
-        *self.hold.lock() = Some(hold);
-        if self.publish(hold.capability()) {
+        self.state.lock().login_mut(login)?.hold = Some(hold);
+        if self.publish() {
             info!(
+                %login,
                 resets_at = %hold.resets_at_rfc3339(),
-                "Claude Code reached the person's Claude plan limit; this runtime takes no Claude Code turn until it resets"
+                "a Claude Code login reached its Claude plan's limit; this runtime takes no Claude Code turn on it until it resets"
             );
         }
         self.hold_started.notify_one();
         Some(hold)
     }
 
-    /// The plan limit that holds the lane now, if one does. A hold whose reset time has passed
-    /// holds nothing: the next probe runs, and publishes what it finds.
-    pub fn plan_limit_hold(&self) -> Option<PlanLimitHold> {
-        let mut hold = self.hold.lock();
-        if hold.is_some_and(|held| !held.holds_at(chrono::Utc::now())) {
-            *hold = None;
-        }
-        *hold
+    /// The plan limit that holds `login` now, if one does. A hold whose reset time has passed
+    /// holds nothing: the login's next probe runs, and publishes what it finds.
+    pub fn plan_limit_hold(&self, login: Uuid) -> Option<PlanLimitHold> {
+        let now = chrono::Utc::now();
+        self.state
+            .lock()
+            .logins
+            .iter()
+            .find(|state| state.id == login)?
+            .hold
+            .filter(|hold| hold.holds_at(now))
     }
 
-    fn publish(&self, capability: Value) -> bool {
-        self.capability.send_if_modified(|current| {
+    /// The hold a probe of `login` respects; one that has ended is dropped, since the probe that
+    /// starts now is the one its end called for.
+    fn hold_or_clear(&self, login: Uuid) -> Option<PlanLimitHold> {
+        let now = chrono::Utc::now();
+        let mut state = self.state.lock();
+        let login = state.login_mut(login)?;
+        if login.hold.is_some_and(|hold| !hold.holds_at(now)) {
+            login.hold = None;
+        }
+        login.hold
+    }
+
+    fn clear_ended_holds(&self) {
+        let now = chrono::Utc::now();
+        for login in &mut self.state.lock().logins {
+            if login.hold.is_some_and(|hold| !hold.holds_at(now)) {
+                login.hold = None;
+            }
+        }
+    }
+
+    /// How long until the first of the logins' holds ends, zero for one that ended unprobed;
+    /// `None` while no hold is kept.
+    fn until_a_hold_ends(&self) -> Option<Duration> {
+        self.state
+            .lock()
+            .logins
+            .iter()
+            .filter_map(|login| login.hold)
+            .map(|hold| hold.remaining())
+            .min()
+    }
+
+    /// Publishes the capability the lane's state gives now, if it changed; returns whether it
+    /// did. The state stays locked while it publishes, so values go out in the order the state
+    /// took them.
+    fn publish(&self) -> bool {
+        let state = self.state.lock();
+        let Some(capability) = state.capability_at(chrono::Utc::now()) else {
+            return false;
+        };
+        let changed = self.capability.send_if_modified(|current| {
             if current.as_ref() == Some(&capability) {
                 return false;
             }
-            *current = Some(capability);
+            *current = Some(capability.clone());
             true
-        })
+        });
+        drop(state);
+        if changed {
+            info!(%capability, "the Claude Code capability changed");
+        }
+        changed
     }
 
     /// The published capability, `None` before the first probe.
@@ -1589,32 +2093,33 @@ impl Lane {
         self.capability.subscribe()
     }
 
-    fn capability_says_ready(&self) -> bool {
-        self.capability
-            .borrow()
-            .as_ref()
-            .and_then(|capability| capability.get("ready"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    /// While the published capability says not ready, probes again every `interval` and
-    /// publishes a changed result: no lane turn, and so no per-turn probe, runs to notice that
-    /// the person fixed Claude Code (3.2). While a plan limit holds the lane, it probes nothing
-    /// until the reset time, and probes then, however soon that comes, so the lane reports ready
-    /// again, or what the probe finds, and registers again (11.11). A hold that starts while it
-    /// waits wakes it to wait for the reset instead. Runs until dropped.
+    /// Probes again while the program or a login is not ready, and publishes a changed result
+    /// (3.2, 11.11): every `interval` while the program, or a login's folder, is not ready, since
+    /// no lane turn, and so no per-turn probe, runs to notice that the person fixed Claude Code
+    /// or the folder; and each login a plan limit holds at its reset time, however soon that
+    /// comes, so it reports ready again, or what the probe finds, and registers again. A held
+    /// login is probed for nothing until then, and ready ones are left to their turns' probes. A
+    /// hold that starts while it waits wakes it to wait for that reset too. Runs until dropped.
     pub async fn reprobe_while_not_ready(&self, interval: Duration) {
         loop {
             let wait = self
-                .plan_limit_hold()
-                .map_or(interval, |hold| hold.remaining().min(interval));
+                .until_a_hold_ends()
+                .map_or(interval, |left| left.min(interval));
             tokio::select! {
                 () = tokio::time::sleep(wait) => {}
                 () = self.hold_started.notified() => continue,
             }
-            if !self.capability_says_ready() {
-                self.probe_and_publish().await;
+            let due = self.state.lock().reprobe_due(chrono::Utc::now());
+            match due {
+                Reprobe::Everything => {
+                    self.probe_and_publish_all().await;
+                }
+                Reprobe::Logins(logins) => {
+                    for login in logins {
+                        self.probe_and_publish(login).await;
+                    }
+                }
+                Reprobe::Nothing => {}
             }
         }
     }
@@ -1632,20 +2137,19 @@ impl Lane {
                         .enable_all()
                         .build()
                         .ok()?;
-                    Some(runtime.block_on(self.probe_and_publish_at_startup()))
+                    runtime.block_on(self.probe_and_publish_at_startup());
+                    Some(())
                 })
                 .join()
                 .ok()
                 .flatten()
         });
-        match probed {
-            Some(probe) => probe.readiness.capability(),
-            None => {
-                let capability = not_ready_capability(NotReadyReason::ProbeFailed);
-                self.publish(capability.clone());
-                capability
-            }
+        if probed.is_none() || self.capability().is_none() {
+            self.keep_program(Err(NotReadyReason::ProbeFailed));
+            self.publish();
         }
+        self.capability()
+            .unwrap_or_else(|| malformed_grant_capability(NotReadyReason::ProbeFailed))
     }
 }
 
@@ -1755,15 +2259,17 @@ async fn read_within(
 pub enum CapturedGrant {
     /// Desktop granted nothing: no capability.
     Absent,
-    /// A malformed grant: not ready, with the reason, until a new grant restarts the runtime.
+    /// A malformed grant: not ready as a whole, with the reason and no login, until a new grant
+    /// restarts the runtime.
     Unusable(NotReadyReason),
     /// A well-formed grant and its lane.
     Granted(Lane),
 }
 
 impl CapturedGrant {
-    /// Parses the grant and checks it once, so a grant that fails its checks gives a not-ready
-    /// capability from the start. Nothing here stops startup.
+    /// Parses the grant and checks it once, the program and each login's folder, so a program
+    /// that fails its checks gives a not-ready capability from the start, and a login whose
+    /// folder fails them is not ready from the startup probe on. Nothing here stops startup.
     pub fn from_raw(
         raw: RawLaunchGrant,
         snapshot: LaunchEnvSnapshot,
@@ -1777,7 +2283,8 @@ impl CapturedGrant {
                 let checked = grant.check();
                 let lane = Lane::new(grant);
                 if let Err(reason) = checked {
-                    lane.publish(not_ready_capability(reason));
+                    lane.keep_program(Err(reason));
+                    lane.publish();
                 }
                 Self::Granted(lane)
             }
@@ -1799,11 +2306,11 @@ pub(crate) fn turn_timeout_setting() -> Option<String> {
     }
 }
 
-/// Reads and removes the launch grant (`INSTAFY_CLAUDE_CODE_*`), snapshots the launch
-/// environment the child gets (3.4), checks the grant (3.2) and keeps all of it for the life of
-/// the process. A bad value leaves the lane not ready (`binary_missing` or `binary_unsafe`); it
-/// never stops startup. The variables leave the environment whatever the platform, so nothing
-/// the runtime starts inherits them.
+/// Reads and removes the launch grant (`INSTAFY_CLAUDE_CODE_*`, the logins included), snapshots
+/// the launch environment the child gets (3.4), checks the grant (3.2, 11.19) and keeps all of it
+/// for the life of the process. A bad value leaves the lane not ready (`binary_missing` or
+/// `binary_unsafe`), or, for a login's folder, that login; it never stops startup. The variables
+/// leave the environment whatever the platform, so nothing the runtime starts inherits them.
 ///
 /// It runs before any thread, the skill-pack export, `arg0_dispatch` (which may load
 /// `$CODEX_HOME/.env`), the launch-credential scrub, the skill-pack shims joining PATH, and any
@@ -1886,15 +2393,16 @@ pub fn with_published_capability(capabilities: &Value, lane: &Lane) -> Value {
     capabilities
 }
 
-/// The `claudeCode` registration capability (2.10, 3.2): absent without a grant, off macOS and
-/// on a Personal Browser runtime; otherwise the published value, or the startup probe's.
+/// The `claudeCode` registration capability (2.10, 3.2, 11.19): absent without a grant, off
+/// macOS and on a Personal Browser runtime; for a malformed grant, not ready with no login;
+/// otherwise the published value, or the startup probe's.
 pub fn registration_capability() -> Option<Value> {
     if !lane_is_offered_here() {
         return None;
     }
     match CAPTURED.get()? {
         CapturedGrant::Absent => None,
-        CapturedGrant::Unusable(reason) => Some(not_ready_capability(*reason)),
+        CapturedGrant::Unusable(reason) => Some(malformed_grant_capability(*reason)),
         CapturedGrant::Granted(lane) => Some(lane.startup_capability()),
     }
 }
@@ -2226,12 +2734,27 @@ mod tests {
         })
     }
 
+    /// `INSTAFY_CLAUDE_CODE_LOGINS_JSON` for `logins`, each an id and its folder, `None` for
+    /// Claude Code's usual one.
+    fn logins_json(logins: &[(Uuid, Option<&str>)]) -> OsString {
+        Value::Array(
+            logins
+                .iter()
+                .map(|(id, folder)| json!({ "id": id.to_string(), "configDir": folder }))
+                .collect(),
+        )
+        .to_string()
+        .into()
+    }
+
+    /// A grant of the binary `bin` with one login, Claude Code's usual folder.
     fn raw(bin: &str) -> RawLaunchGrant {
         RawLaunchGrant {
             bin: Some(bin.into()),
             path: None,
             user_id: Some(Uuid::new_v4().to_string().into()),
             env_json: None,
+            logins_json: Some(logins_json(&[(Uuid::new_v4(), None)])),
         }
     }
 
@@ -2247,6 +2770,13 @@ mod tests {
         )
     }
 
+    fn lane_fixtures() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../runtime-contracts/src/claude_code_lane_fixtures.json"
+        ))
+        .expect("the lane fixtures are JSON")
+    }
+
     #[test]
     fn nothing_granted_is_no_grant_and_a_malformed_grant_is_not_ready() {
         assert!(matches!(parse(RawLaunchGrant::default()), Ok(None)));
@@ -2256,6 +2786,15 @@ mod tests {
         };
         assert_eq!(
             parse(without_binary).err(),
+            Some(NotReadyReason::BinaryMissing)
+        );
+        // Logins alone are a grant too, one without a binary.
+        let only_logins = RawLaunchGrant {
+            logins_json: raw("/usr/local/bin/claude").logins_json,
+            ..RawLaunchGrant::default()
+        };
+        assert_eq!(
+            parse(only_logins).err(),
             Some(NotReadyReason::BinaryMissing)
         );
         assert_eq!(parse(raw("")).err(), Some(NotReadyReason::BinaryMissing));
@@ -2280,10 +2819,9 @@ mod tests {
         for env_json in [
             "not json",
             "[]",
-            r#""CLAUDE_CONFIG_DIR""#,
-            r#"{"CLAUDE_CONFIG_DIR": 7}"#,
+            r#""HTTPS_PROXY""#,
+            r#"{"HTTPS_PROXY": 7}"#,
             r#"{"HTTPS_PROXY": ["http://proxy.example:3128"]}"#,
-            r#"{"CLAUDE_CONFIG_DIR": "relative/.claude"}"#,
             r#"{"NODE_EXTRA_CA_CERTS": "ca.pem"}"#,
             r#"{"NO_PROXY": "a\u0000b"}"#,
         ] {
@@ -2299,9 +2837,117 @@ mod tests {
         }
     }
 
+    /// The logins are read strictly (11.19): one to ten of them, each with exactly a UUID `id`
+    /// and an absolute or `null` `configDir`, no id and no folder twice. Anything else, an absent
+    /// list included, makes the whole grant malformed, `binary_unsafe`.
     #[test]
-    fn a_grant_keeps_only_the_d26_names_and_its_path_entries_as_given() {
+    fn a_list_of_logins_that_is_not_well_formed_makes_the_whole_grant_malformed() {
+        let id = Uuid::new_v4().to_string();
+        let other = Uuid::new_v4().to_string();
+        let folders = |count: usize| -> Value {
+            (0..count)
+                .map(|n| {
+                    json!({
+                        "id": Uuid::new_v4().to_string(),
+                        "configDir": format!("/home/person/.claude-{n}"),
+                    })
+                })
+                .collect()
+        };
+        let with_logins = |logins: &str| RawLaunchGrant {
+            logins_json: Some(logins.into()),
+            ..raw("/usr/local/bin/claude")
+        };
+        for logins in [
+            "not json".to_string(),
+            "null".to_string(),
+            "{}".to_string(),
+            "[]".to_string(),
+            folders(11).to_string(),
+            json!([7]).to_string(),
+            json!([{ "id": id }]).to_string(),
+            json!([{ "configDir": null }]).to_string(),
+            json!([{ "id": id, "configDir": null, "label": "Work" }]).to_string(),
+            json!([{ "id": "not-a-uuid", "configDir": null }]).to_string(),
+            json!([{ "id": Uuid::parse_str(&id).unwrap().simple().to_string(), "configDir": null }])
+                .to_string(),
+            json!([{ "id": format!("{{{id}}}"), "configDir": null }]).to_string(),
+            json!([{ "id": format!(" {id}"), "configDir": null }]).to_string(),
+            json!([{ "id": 7, "configDir": null }]).to_string(),
+            json!([{ "id": id, "configDir": "relative/.claude" }]).to_string(),
+            json!([{ "id": id, "configDir": "~/.claude-work" }]).to_string(),
+            json!([{ "id": id, "configDir": "" }]).to_string(),
+            json!([{ "id": id, "configDir": 7 }]).to_string(),
+            json!([{ "id": id, "configDir": "/home/person/.claude\u{0}work" }]).to_string(),
+            json!([
+                { "id": id, "configDir": null },
+                { "id": id, "configDir": "/home/person/.claude-work" },
+            ])
+            .to_string(),
+            json!([
+                { "id": id, "configDir": null },
+                { "id": id.to_uppercase(), "configDir": "/home/person/.claude-work" },
+            ])
+            .to_string(),
+            json!([
+                { "id": id, "configDir": null },
+                { "id": other, "configDir": null },
+            ])
+            .to_string(),
+            json!([
+                { "id": id, "configDir": "/home/person/.claude-work" },
+                { "id": other, "configDir": "/home/person/.claude-work/" },
+            ])
+            .to_string(),
+            json!([
+                { "id": id, "configDir": "/home/person/.claude-work" },
+                { "id": other, "configDir": "/Home/Person/.Claude-Work" },
+            ])
+            .to_string(),
+            json!([
+                { "id": id, "configDir": "/home/person/./.claude-work" },
+                { "id": other, "configDir": "/home/person/.claude-work" },
+            ])
+            .to_string(),
+        ] {
+            assert_eq!(
+                parse(with_logins(&logins)).err(),
+                Some(NotReadyReason::BinaryUnsafe),
+                "{logins}"
+            );
+        }
+        let absent = RawLaunchGrant {
+            logins_json: None,
+            ..raw("/usr/local/bin/claude")
+        };
+        assert_eq!(parse(absent).err(), Some(NotReadyReason::BinaryUnsafe));
+        // Ten is the most, and folders that differ in more than case or a trailing slash are
+        // folders of their own.
+        let ten = parse(with_logins(&folders(10).to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ten.logins().len(),
+            runtime_contracts::claude_code_lane::MAX_LOGINS
+        );
+        let apart = json!([
+            { "id": id, "configDir": "/home/person/.claude-work" },
+            { "id": other, "configDir": "/home/person/.claude-work-2" },
+        ]);
+        assert_eq!(
+            parse(with_logins(&apart.to_string()))
+                .unwrap()
+                .unwrap()
+                .logins()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_grant_keeps_only_the_d26_names_its_logins_and_its_path_entries_as_given() {
         let user_id = Uuid::new_v4();
+        let (work, usual) = (Uuid::new_v4(), Uuid::new_v4());
         let grant = parse(RawLaunchGrant {
             bin: Some("/opt/homebrew/bin/claude".into()),
             path: Some("/opt/homebrew/bin::relative/bin:/usr/bin".into()),
@@ -2309,7 +2955,7 @@ mod tests {
             env_json: Some(
                 r#"{
                     "NODE_EXTRA_CA_CERTS": "/etc/ssl/corporate.pem",
-                    "CLAUDE_CONFIG_DIR": "/home/person/.claude-work",
+                    "CLAUDE_CONFIG_DIR": "/home/person/.claude-elsewhere",
                     "HTTPS_PROXY": "http://proxy.example:3128",
                     "HTTP_PROXY": null,
                     "NO_PROXY": "",
@@ -2317,6 +2963,14 @@ mod tests {
                     "CLAUDE_CODE_OAUTH_TOKEN": "not-a-real-token",
                     "PATH": "/evil"
                 }"#
+                .into(),
+            ),
+            logins_json: Some(
+                json!([
+                    { "id": work.to_string().to_uppercase(), "configDir": "/home/person/.claude-work" },
+                    { "id": usual.to_string(), "configDir": null },
+                ])
+                .to_string()
                 .into(),
             ),
         })
@@ -2332,13 +2986,10 @@ mod tests {
                 PathBuf::from("/usr/bin"),
             ]
         );
+        // `CLAUDE_CONFIG_DIR` is no longer one of these: each login brings its own.
         assert_eq!(
             grant.granted_env(),
             [
-                (
-                    "CLAUDE_CONFIG_DIR",
-                    OsString::from("/home/person/.claude-work")
-                ),
                 ("HTTPS_PROXY", OsString::from("http://proxy.example:3128")),
                 (
                     "NODE_EXTRA_CA_CERTS",
@@ -2346,56 +2997,234 @@ mod tests {
                 ),
             ]
         );
+        assert_eq!(
+            grant.logins(),
+            [
+                Login {
+                    id: work,
+                    config_dir: Some(PathBuf::from("/home/person/.claude-work")),
+                },
+                Login {
+                    id: usual,
+                    config_dir: None,
+                },
+            ]
+        );
+        assert_eq!(
+            grant.login(work).and_then(Login::config_dir),
+            Some(Path::new("/home/person/.claude-work"))
+        );
+        assert_eq!(grant.login(usual).map(Login::config_dir), Some(None));
+        assert_eq!(grant.login(Uuid::new_v4()), None);
+        // A `CLAUDE_CONFIG_DIR` there is ignored whatever it holds.
+        for ignored in [
+            r#"{"CLAUDE_CONFIG_DIR": 7}"#,
+            r#"{"CLAUDE_CONFIG_DIR": "relative/.claude"}"#,
+        ] {
+            let grant = parse(RawLaunchGrant {
+                env_json: Some(ignored.into()),
+                ..raw("/usr/local/bin/claude")
+            })
+            .unwrap()
+            .unwrap();
+            assert!(grant.granted_env().is_empty(), "{ignored}");
+        }
     }
 
+    /// The capability a runtime with two logins reports is runtime-contracts' `capability`
+    /// fixture, which the controller's attestation keeps unchanged and Studio reads (11.19): the
+    /// program ready on 2.1.325, one login ready and signed in with a Claude plan, and one that a
+    /// plan limit holds until 2026-11-22T18:00:00Z, which keeps what its last `auth status` said.
     #[test]
-    fn the_capability_has_the_two_shapes_of_3_2_and_never_a_path() {
-        for (reason, text) in [
-            (NotReadyReason::BinaryMissing, "binary_missing"),
-            (NotReadyReason::BinaryUnsafe, "binary_unsafe"),
-            (NotReadyReason::ProbeFailed, "probe_failed"),
-            (NotReadyReason::UnsupportedVersion, "unsupported_version"),
-            (NotReadyReason::BareDefault, "bare_default"),
-        ] {
-            assert_eq!(
-                Readiness::NotReady(reason).capability(),
-                json!({ "version": 1, "ready": false, "reason": text })
-            );
-        }
-        let ready = Readiness::Ready(ReadyLane {
+    fn two_logins_give_the_capability_runtime_contracts_records() {
+        let fixture = lane_fixtures()["capability"].clone();
+        let ready = Uuid::parse_str("6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01").unwrap();
+        let held = Uuid::parse_str("0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02").unwrap();
+        let resets_at = chrono::DateTime::from_timestamp(
+            chrono::DateTime::parse_from_rfc3339("2026-11-22T18:00:00Z")
+                .unwrap()
+                .timestamp(),
+            0,
+        )
+        .unwrap();
+        let now = resets_at - chrono::Duration::hours(6);
+        let plan = SignIn {
+            signed_in: Some(true),
+            plan_sign_in: true,
+        };
+        let state = LaneState {
+            program: Some(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION))),
+            logins: vec![
+                LoginState {
+                    id: ready,
+                    folder: Ok(()),
+                    sign_in: plan,
+                    hold: None,
+                },
+                LoginState {
+                    id: held,
+                    folder: Ok(()),
+                    sign_in: plan,
+                    hold: PlanLimitHold::after(Some(resets_at.timestamp()), now),
+                },
+            ],
+        };
+        assert_eq!(state.capability_at(now), Some(fixture));
+        assert_eq!(
+            CAPABILITY_VERSION,
+            lane_fixtures()["capabilityVersion"].as_u64().unwrap()
+        );
+    }
+
+    /// The capability's shapes (11.19): the program at the top, with `cli`, `verified` and
+    /// `partialMessages` only while it is ready, and every login under its id, which is ready
+    /// only while the program is and otherwise carries the first reason that holds: the
+    /// program's, then `binary_unsafe` for its folder, then `plan_limit` with `resetsAt` while its
+    /// hold lasts. `signedIn` only when its last `auth status` told; never a path.
+    #[test]
+    fn each_login_is_ready_only_while_the_program_is_and_says_the_first_reason_that_holds() {
+        let now = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+        let hold = PlanLimitHold::after(Some(1_900_003_600), now);
+        let (ready, folder_unsafe, held) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (ready_key, unsafe_key, held_key) = (
+            ready.to_string(),
+            folder_unsafe.to_string(),
+            held.to_string(),
+        );
+        let logins = vec![
+            LoginState {
+                id: ready,
+                folder: Ok(()),
+                sign_in: SignIn {
+                    signed_in: Some(false),
+                    plan_sign_in: false,
+                },
+                hold: None,
+            },
+            LoginState {
+                id: folder_unsafe,
+                folder: Err(NotReadyReason::BinaryUnsafe),
+                sign_in: SignIn::default(),
+                hold,
+            },
+            LoginState {
+                id: held,
+                folder: Ok(()),
+                sign_in: SignIn {
+                    signed_in: Some(true),
+                    plan_sign_in: true,
+                },
+                hold,
+            },
+        ];
+        let state = |program| LaneState {
+            program,
+            logins: logins.clone(),
+        };
+        assert_eq!(
+            state(None).capability_at(now),
+            None,
+            "nothing before a probe"
+        );
+        let program_ready = state(Some(Ok(ProgramFacts {
             cli: CliVersion::new(2, 1, 400),
             verified: false,
-            plan_sign_in: true,
-            help: HelpFacts::read(""),
-            launch: CheckedLaunch {
-                program: PathBuf::from("/home/person/.local/share/claude/versions/2.1.400"),
-                granted_dir: PathBuf::from("/home/person/.local/bin"),
-                identity: BinaryIdentity {
-                    canonical: PathBuf::from("/home/person/.local/share/claude/versions/2.1.400"),
-                    size: 1,
-                    modified: None,
-                },
-                granted_env: vec![(CONFIG_DIR_KEY, OsString::from("/home/person/.claude"))],
-            },
-        });
-        let capability = ready.capability();
+        })));
+        let ready_capability = program_ready.capability_at(now).unwrap();
         assert_eq!(
-            capability,
+            ready_capability,
             json!({
-                "version": 1,
+                "version": 2,
                 "ready": true,
                 "cli": "2.1.400",
                 "verified": false,
-                "planSignIn": true,
                 "partialMessages": true,
+                "logins": {
+                    ready_key.clone(): { "ready": true, "planSignIn": false, "signedIn": false },
+                    unsafe_key.clone(): { "ready": false, "reason": "binary_unsafe", "planSignIn": false },
+                    held_key.clone(): {
+                        "ready": false,
+                        "reason": "plan_limit",
+                        "resetsAt": "2030-03-17T18:46:40Z",
+                        "planSignIn": true,
+                        "signedIn": true,
+                    },
+                },
             })
         );
-        assert!(!capability.to_string().contains('/'));
+        let not_ready = state(Some(Err(NotReadyReason::UnsupportedVersion)))
+            .capability_at(now)
+            .unwrap();
+        assert_eq!(
+            not_ready,
+            json!({
+                "version": 2,
+                "ready": false,
+                "reason": "unsupported_version",
+                "logins": {
+                    ready_key.clone(): {
+                        "ready": false,
+                        "reason": "unsupported_version",
+                        "planSignIn": false,
+                        "signedIn": false,
+                    },
+                    unsafe_key.clone(): { "ready": false, "reason": "unsupported_version", "planSignIn": false },
+                    held_key.clone(): {
+                        "ready": false,
+                        "reason": "unsupported_version",
+                        "planSignIn": true,
+                        "signedIn": true,
+                    },
+                },
+            })
+        );
+        // At its reset time a hold holds nothing.
+        let reset = program_ready
+            .capability_at(chrono::DateTime::from_timestamp(1_900_003_600, 0).unwrap())
+            .unwrap();
+        assert_eq!(
+            reset["logins"][held_key.as_str()],
+            json!({ "ready": true, "planSignIn": true, "signedIn": true })
+        );
+        assert_eq!(
+            reset["logins"][unsafe_key.as_str()]["reason"],
+            "binary_unsafe"
+        );
+        for capability in [&ready_capability, &not_ready, &reset] {
+            assert!(!capability.to_string().contains('/'), "{capability}");
+            let keys: Vec<&String> = capability["logins"].as_object().unwrap().keys().collect();
+            assert_eq!(keys.len(), 3, "every granted login is listed");
+            for key in keys {
+                assert_eq!(*key, Uuid::parse_str(key).unwrap().hyphenated().to_string());
+            }
+        }
+        // A grant that is not well formed lists no login.
+        assert_eq!(
+            malformed_grant_capability(NotReadyReason::BinaryUnsafe),
+            json!({ "version": 2, "ready": false, "reason": "binary_unsafe", "logins": {} })
+        );
+        assert_eq!(
+            malformed_grant_capability(NotReadyReason::BinaryMissing)["reason"],
+            "binary_missing"
+        );
     }
 
-    /// A plan limit holds the lane until the reset time Claude Code gave, at most a week ahead,
-    /// or an hour without one; a reset time that has passed holds nothing (11.11). Its capability
-    /// says not ready, as `plan_limit`, with the reset time in RFC 3339, UTC.
+    /// The program's own reason is never a login's `plan_limit` (11.19): the program reasons are
+    /// runtime-contracts' `PROGRAM_NOT_READY_REASONS`.
+    #[test]
+    fn the_programs_reasons_are_every_reason_but_a_logins_plan_limit() {
+        use runtime_contracts::claude_code_lane::PROGRAM_NOT_READY_REASONS;
+        let program: Vec<&str> = NotReadyReason::ALL
+            .iter()
+            .filter(|reason| **reason != NotReadyReason::PlanLimit)
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(program, PROGRAM_NOT_READY_REASONS);
+    }
+
+    /// A plan limit holds a login until the reset time Claude Code gave, at most a week ahead, or
+    /// an hour without one; a reset time that has passed holds nothing (11.11). Meanwhile its
+    /// login says not ready, as `plan_limit`, with the reset time in RFC 3339, UTC.
     #[test]
     fn a_plan_limit_holds_until_its_reset_time_and_at_most_a_week() {
         let now = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
@@ -2414,20 +3243,84 @@ mod tests {
         for passed in [1_900_000_000, 1_899_999_999, 0, -1, i64::MIN] {
             assert_eq!(at(Some(passed)), None, "{passed}");
         }
+        let login = LoginState {
+            id: Uuid::new_v4(),
+            folder: Ok(()),
+            sign_in: SignIn::default(),
+            hold: Some(hold),
+        };
         assert_eq!(
-            hold.capability(),
+            login.capability_at(None, now),
             json!({
-                "version": 1,
                 "ready": false,
                 "reason": "plan_limit",
                 "resetsAt": "2030-03-17T17:56:40Z",
+                "planSignIn": false,
             })
         );
+        assert_eq!(
+            login.capability_at(None, hold.resets_at()),
+            json!({ "ready": true, "planSignIn": false })
+        );
         let held = Readiness::Held(hold);
-        assert_eq!(held.capability(), hold.capability());
         assert_eq!(held.reason(), Some(NotReadyReason::PlanLimit));
         assert!(!held.is_ready() && held.ready().is_none());
-        assert!(!hold.capability().to_string().contains('/'));
+    }
+
+    /// The timed re-probe probes what no turn would (3.2, 11.11): everything while the program
+    /// or a login's folder is not ready, a login whose plan limit reset, and nothing while every
+    /// login is ready or only held.
+    #[test]
+    fn the_timed_probe_probes_what_no_turn_would() {
+        let now = chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap();
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        let live = PlanLimitHold::after(Some(1_900_000_600), now);
+        let ended = PlanLimitHold::after(
+            Some(1_899_999_000),
+            chrono::DateTime::from_timestamp(1_899_990_000, 0).unwrap(),
+        );
+        let state = |program: Option<Result<ProgramFacts, NotReadyReason>>,
+                     folder: Result<(), NotReadyReason>,
+                     hold: Option<PlanLimitHold>| LaneState {
+            program,
+            logins: vec![
+                LoginState {
+                    id: first,
+                    folder,
+                    sign_in: SignIn::default(),
+                    hold,
+                },
+                LoginState {
+                    id: second,
+                    folder: Ok(()),
+                    sign_in: SignIn::default(),
+                    hold: None,
+                },
+            ],
+        };
+        let ready = Some(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
+        assert_eq!(
+            state(ready, Ok(()), None).reprobe_due(now),
+            Reprobe::Nothing
+        );
+        assert_eq!(
+            state(ready, Ok(()), live).reprobe_due(now),
+            Reprobe::Nothing
+        );
+        assert_eq!(
+            state(ready, Ok(()), ended).reprobe_due(now),
+            Reprobe::Logins(vec![first])
+        );
+        for program in [None, Some(Err(NotReadyReason::ProbeFailed))] {
+            assert_eq!(
+                state(program, Ok(()), ended).reprobe_due(now),
+                Reprobe::Everything
+            );
+        }
+        assert_eq!(
+            state(ready, Err(NotReadyReason::BinaryUnsafe), live).reprobe_due(now),
+            Reprobe::Everything
+        );
     }
 
     #[test]
@@ -2464,13 +3357,15 @@ mod tests {
         let lane = Lane::new(grant);
         let launched = json!({
             "agent": true,
-            "claudeCode": { "version": 1, "ready": true, "cli": "2.1.325" },
+            "claudeCode": { "version": 2, "ready": true, "cli": "2.1.325", "logins": {} },
             "claude_code": { "ready": true },
         });
         // Before any probe the launch value stands.
         assert_eq!(with_published_capability(&launched, &lane), launched);
-        let not_ready = not_ready_capability(NotReadyReason::UnsupportedVersion);
-        lane.publish(not_ready.clone());
+        lane.keep_program(Err(NotReadyReason::UnsupportedVersion));
+        assert!(lane.publish());
+        let not_ready = lane.capability().expect("published");
+        assert_eq!(not_ready["reason"], "unsupported_version");
         assert_eq!(
             with_published_capability(&launched, &lane),
             json!({ "agent": true, "claudeCode": not_ready })
@@ -2496,14 +3391,87 @@ mod tests {
         let lane = Lane::new(grant);
         let mut updates = lane.subscribe();
         assert_eq!(lane.capability(), None);
-        let missing = not_ready_capability(NotReadyReason::BinaryMissing);
-        assert!(lane.publish(missing.clone()));
+        assert!(!lane.publish(), "nothing before the program's first probe");
+        lane.keep_program(Err(NotReadyReason::BinaryMissing));
+        assert!(lane.publish());
         assert!(updates.has_changed().unwrap());
-        assert_eq!(*updates.borrow_and_update(), Some(missing.clone()));
-        assert!(!lane.publish(missing.clone()));
+        let missing = updates.borrow_and_update().clone().expect("published");
+        assert_eq!(missing["reason"], "binary_missing");
+        assert!(!lane.publish());
         assert!(!updates.has_changed().unwrap());
-        assert!(!lane.capability_says_ready());
+        assert_eq!(
+            lane.state.lock().reprobe_due(chrono::Utc::now()),
+            Reprobe::Everything
+        );
         assert_eq!(lane.startup_capability(), missing);
+    }
+
+    /// A plan limit holds the login a turn ran on, and only it (11.19): the capability says that
+    /// login is not ready, with its reset time, while the program and the person's other login
+    /// stay ready; the timed re-probe waits for the reset rather than probing now. Neither a login
+    /// the grant does not have nor a reset time that passed holds anything, and nothing runs for
+    /// a login the grant does not have.
+    #[tokio::test]
+    async fn a_hold_is_its_logins_alone() {
+        let folder = tempfile::tempdir().unwrap();
+        let (work, usual) = (Uuid::new_v4(), Uuid::new_v4());
+        let grant = parse(RawLaunchGrant {
+            logins_json: Some(logins_json(&[
+                (work, Some(folder.path().to_str().unwrap())),
+                (usual, None),
+            ])),
+            ..raw("/usr/local/bin/claude")
+        })
+        .unwrap()
+        .unwrap();
+        let lane = Lane::new(grant);
+        lane.keep_program(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
+        assert!(lane.publish());
+        let mut updates = lane.subscribe();
+        updates.borrow_and_update();
+        let resets_at = chrono::Utc::now().timestamp() + 3_600;
+        let hold = lane
+            .hold_for_plan_limit(work, Some(resets_at))
+            .expect("a hold");
+        assert_eq!(lane.plan_limit_hold(work), Some(hold));
+        assert_eq!(lane.plan_limit_hold(usual), None);
+        assert!(updates.has_changed().unwrap());
+        let capability = updates.borrow_and_update().clone().expect("published");
+        assert_eq!(capability["ready"], true);
+        assert_eq!(
+            capability["logins"][work.to_string()],
+            json!({
+                "ready": false,
+                "reason": "plan_limit",
+                "resetsAt": hold.resets_at_rfc3339(),
+                "planSignIn": false,
+            })
+        );
+        assert_eq!(
+            capability["logins"][usual.to_string()],
+            json!({ "ready": true, "planSignIn": false })
+        );
+        assert_eq!(
+            lane.hold_for_plan_limit(Uuid::new_v4(), Some(resets_at)),
+            None
+        );
+        assert_eq!(
+            lane.hold_for_plan_limit(usual, Some(resets_at - 7_200)),
+            None
+        );
+        assert!(!updates.has_changed().unwrap());
+        assert_eq!(
+            lane.state.lock().reprobe_due(chrono::Utc::now()),
+            Reprobe::Nothing
+        );
+        let left = lane.until_a_hold_ends().expect("a hold to wait for");
+        assert!(left > Duration::from_secs(3_500) && left <= Duration::from_secs(3_600));
+        // A held login's probe runs nothing and says it is held.
+        assert!(matches!(lane.probe(work).await, Readiness::Held(found) if found == hold));
+        assert_eq!(
+            lane.probe(Uuid::new_v4()).await.reason(),
+            Some(NotReadyReason::BinaryUnsafe)
+        );
     }
 
     /// The codes and reasons are runtime-contracts' lists, which the controller keeps and Studio

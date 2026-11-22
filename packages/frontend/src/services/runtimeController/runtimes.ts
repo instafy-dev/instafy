@@ -98,65 +98,143 @@ export interface ControllerRuntimeStatusEntry {
 }
 
 /**
- * Why a runtime's Claude Code cannot take a turn, as the runtime attests it.
- * `plan_limit`: a turn reached the person's Claude plan's usage limit, and
- * the runtime takes none until it resets (docs/Local-Engine-Turns.md 11.11).
+ * Why a runtime's Claude Code program cannot take a turn, as the runtime
+ * attests it (runtime-contracts' PROGRAM_NOT_READY_REASONS).
  */
-export type ControllerRuntimeClaudeCodeNotReadyReason =
+export type ControllerRuntimeClaudeCodeProgramNotReadyReason =
   | "binary_missing"
   | "binary_unsafe"
   | "probe_failed"
   | "unsupported_version"
-  | "bare_default"
+  | "bare_default";
+
+/**
+ * Why one of the person's Claude Code logins cannot take a turn on a runtime
+ * (runtime-contracts' NOT_READY_REASONS): the program's reason while the
+ * program is not ready; otherwise `binary_unsafe` for a folder that fails its
+ * checks, or `plan_limit` while a turn on that login reached its Claude
+ * plan's usage limit and the runtime takes none on it until it resets
+ * (docs/Local-Engine-Turns.md 11.11, 11.19).
+ */
+export type ControllerRuntimeClaudeCodeNotReadyReason =
+  | ControllerRuntimeClaudeCodeProgramNotReadyReason
   | "plan_limit";
 
+const CLAUDE_CODE_PROGRAM_NOT_READY_REASONS: ReadonlySet<string> =
+  new Set<ControllerRuntimeClaudeCodeProgramNotReadyReason>([
+    "binary_missing",
+    "binary_unsafe",
+    "probe_failed",
+    "unsupported_version",
+    "bare_default",
+  ]);
+
 const CLAUDE_CODE_NOT_READY_REASONS: ReadonlySet<string> = new Set<ControllerRuntimeClaudeCodeNotReadyReason>([
-  "binary_missing",
-  "binary_unsafe",
-  "probe_failed",
-  "unsupported_version",
-  "bare_default",
+  ...(CLAUDE_CODE_PROGRAM_NOT_READY_REASONS as ReadonlySet<ControllerRuntimeClaudeCodeProgramNotReadyReason>),
   "plan_limit",
 ]);
 
-/** A runtime's attested Claude Code capability, as its status entry carries it. */
-export interface ControllerRuntimeClaudeCode {
+/** What a runtime attests of one of the person's Claude Code logins (11.19). */
+export interface ControllerRuntimeClaudeCodeLogin {
+  /** Whether a turn on this login can start here now; never while the program cannot. */
   ready: boolean;
   /** Set only while not ready, and only to a reason this client knows. */
   reason: ControllerRuntimeClaudeCodeNotReadyReason | null;
+  /**
+   * While the runtime holds turns on this login until its Claude plan's limit
+   * resets (`plan_limit`): when it resets, as attested (RFC 3339). Null otherwise.
+   */
+  resetsAt: string | null;
+  /** True only when the probe found a Claude plan sign-in in this login's folder. */
+  planSignIn: boolean;
+  /**
+   * How `claude auth status` exited for this login's folder: true for 0,
+   * false for 1, null when the probe could not tell. A sign-out never makes
+   * a login not ready: such a turn fails as `not_signed_in` (3.2).
+   */
+  signedIn: boolean | null;
+}
+
+/**
+ * A runtime's attested Claude Code capability, version 2, as its status
+ * entry carries it (docs/Local-Engine-Turns.md 2.10, 11.19): the program at
+ * the top, and each of the person's logins this computer's Desktop granted.
+ */
+export interface ControllerRuntimeClaudeCode {
+  /** The program: whether it passed its probe. */
+  ready: boolean;
+  /** Set only while the program is not ready, and only to a program reason this client knows. */
+  reason: ControllerRuntimeClaudeCodeProgramNotReadyReason | null;
   /** The probed Claude Code version, such as "2.1.314". */
   cli: string | null;
   /** Whether that version is at most the one Instafy verified; null when unsaid. */
   verified: boolean | null;
-  /** True only when the probe found a Claude plan sign-in. */
-  planSignIn: boolean;
-  /**
-   * While the runtime holds the person's Claude Code turns until their Claude
-   * plan's limit resets (not ready for `plan_limit`, docs/Local-Engine-Turns.md
-   * 11.11): when it resets, as attested (RFC 3339). Null otherwise.
-   */
-  resetsAt: string | null;
+  /** Every login granted to the runtime, keyed by its id (a lowercase UUID), at most ten. */
+  logins: Readonly<Record<string, ControllerRuntimeClaudeCodeLogin>>;
 }
 
-// The not-ready reason of a runtime that holds the person's turns until their
+/** The capability version this client reads; any other, version 1 included, reads as none. */
+export const CONTROLLER_RUNTIME_CLAUDE_CODE_VERSION = 2;
+/** The most logins a runtime attests (runtime-contracts' MAX_LOGINS). */
+export const CONTROLLER_RUNTIME_CLAUDE_CODE_MAX_LOGINS = 10;
+
+// The not-ready reason of a login whose runtime holds its turns until its
 // Claude plan's limit resets, which `resetsAt` comes with (11.11).
 const CLAUDE_CODE_PLAN_LIMIT_REASON = "plan_limit";
 
 const CLAUDE_CODE_CLI_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,64})?$/;
+// A login's key as the controller keeps it: a canonical lowercase hyphenated UUID.
+const CLAUDE_CODE_LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function mapControllerRuntimeClaudeCodeLogin(
+  value: unknown,
+  program: { ready: boolean; reason: ControllerRuntimeClaudeCodeProgramNotReadyReason | null },
+): ControllerRuntimeClaudeCodeLogin | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.ready !== "boolean") {
+    return null;
+  }
+  // A login is never ready while the program is not, and then it carries the
+  // program's reason, as the controller's attestation forces it.
+  const ready = record.ready && program.ready;
+  const ownReason =
+    !record.ready && typeof record.reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(record.reason)
+      ? (record.reason as ControllerRuntimeClaudeCodeNotReadyReason)
+      : null;
+  const reason = ready ? null : program.ready ? ownReason : program.reason ?? ownReason;
+  const resetsAt =
+    reason === CLAUDE_CODE_PLAN_LIMIT_REASON &&
+    typeof record.resetsAt === "string" &&
+    Number.isFinite(Date.parse(record.resetsAt))
+      ? record.resetsAt
+      : null;
+  return {
+    ready,
+    reason,
+    resetsAt,
+    planSignIn: record.planSignIn === true,
+    signedIn: typeof record.signedIn === "boolean" ? record.signedIn : null,
+  };
+}
 
 /**
- * `claudeCode` of a status entry, in the shape the controller attests (2.10),
- * or null. Another version or a `ready` that is not a boolean reads as no
- * capability, so a malformed or newer shape never offers a turn this client
- * cannot check. Other fields are kept only when well-formed, and keys this
- * client does not know (a path, say) are dropped.
+ * `claudeCode` of a status entry, in the version 2 shape the controller
+ * attests (docs/Local-Engine-Turns.md 2.10, 11.19), or null. Another version,
+ * version 1 or none included, or a `ready` that is not a boolean, reads as no
+ * capability, so a malformed, older or newer shape never offers a turn this
+ * client cannot check. Other fields are kept only when well-formed; a login
+ * is kept only under a canonical UUID and with a boolean `ready`, at most
+ * ten of them; and keys this client does not know (a path, say) are dropped.
  */
 export function mapControllerRuntimeClaudeCode(value: unknown): ControllerRuntimeClaudeCode | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (record.version !== undefined && record.version !== 1) {
+  if (record.version !== CONTROLLER_RUNTIME_CLAUDE_CODE_VERSION) {
     return null;
   }
   if (typeof record.ready !== "boolean") {
@@ -164,23 +242,34 @@ export function mapControllerRuntimeClaudeCode(value: unknown): ControllerRuntim
   }
   const cli = typeof record.cli === "string" && CLAUDE_CODE_CLI_VERSION.test(record.cli) ? record.cli : null;
   const reason =
-    !record.ready && typeof record.reason === "string" && CLAUDE_CODE_NOT_READY_REASONS.has(record.reason)
-      ? (record.reason as ControllerRuntimeClaudeCodeNotReadyReason)
+    !record.ready && typeof record.reason === "string" && CLAUDE_CODE_PROGRAM_NOT_READY_REASONS.has(record.reason)
+      ? (record.reason as ControllerRuntimeClaudeCodeProgramNotReadyReason)
       : null;
-  const resetsAt =
-    !record.ready &&
-    record.reason === CLAUDE_CODE_PLAN_LIMIT_REASON &&
-    typeof record.resetsAt === "string" &&
-    Number.isFinite(Date.parse(record.resetsAt))
-      ? record.resetsAt
-      : null;
+  const program = { ready: record.ready, reason };
+  const logins: Record<string, ControllerRuntimeClaudeCodeLogin> = {};
+  const reported = record.logins;
+  if (reported && typeof reported === "object" && !Array.isArray(reported)) {
+    let kept = 0;
+    for (const [loginId, entry] of Object.entries(reported as Record<string, unknown>)) {
+      if (kept === CONTROLLER_RUNTIME_CLAUDE_CODE_MAX_LOGINS) {
+        break;
+      }
+      if (!CLAUDE_CODE_LOGIN_ID.test(loginId)) {
+        continue;
+      }
+      const login = mapControllerRuntimeClaudeCodeLogin(entry, program);
+      if (login) {
+        logins[loginId] = login;
+        kept += 1;
+      }
+    }
+  }
   return {
     ready: record.ready,
     reason,
     cli,
     verified: typeof record.verified === "boolean" ? record.verified : null,
-    planSignIn: record.planSignIn === true,
-    resetsAt,
+    logins: Object.freeze(logins),
   };
 }
 

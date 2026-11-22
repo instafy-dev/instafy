@@ -125,6 +125,7 @@ function hostFor({ userId = USER_A, controllerOrigin = CONTROLLER, consents = me
     dialogs: {
       showMessageBox: async () => 1,
       pickFile: async () => null,
+      pickFolder: async () => null,
     },
     desktopOwnedPaths: ["/fixture/workspace"],
   };
@@ -201,6 +202,28 @@ test("a method gets the host context, never identity from its payload", async ()
   const bare = await registry.invoke("fixture-engine", "context", { x: 1 });
   assert.equal(bare.session, null);
   assert.equal(bare.hasConsentStore, false);
+});
+
+test("a call without a host gets no native dialog of any kind", async () => {
+  const registry = createDesktopExtensionRegistry([
+    createFixtureModule({
+      desktopExtensions: [
+        {
+          id: "weather",
+          methods: {
+            ask: (_payload, host) => host.dialogs.showMessageBox({ message: "?", buttons: ["OK"] }),
+            pickFile: (_payload, host) => host.dialogs.pickFile({}),
+            pickFolder: (_payload, host) => host.dialogs.pickFolder({}),
+          },
+        },
+      ],
+    }),
+  ]);
+  for (const method of ["ask", "pickFile", "pickFolder"]) {
+    await assert.rejects(registry.invoke("weather", method, {}), /Desktop dialogs are unavailable for this call\./, method);
+  }
+  // With a host, the shell's own dialogs answer.
+  assert.equal(await registry.invoke("weather", "pickFolder", {}, hostFor()), null);
 });
 
 test("consent records are kept per module, controller origin and user", async () => {

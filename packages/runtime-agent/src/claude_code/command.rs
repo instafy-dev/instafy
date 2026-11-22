@@ -3,10 +3,12 @@
 //!
 //! The process starts with no shell, one argv element per item, in the space's folder, with the
 //! prompt on stdin followed by EOF (3.5) and nothing in argv but flags. Its environment is built
-//! from scratch: the launch snapshot's allowlist, the values Desktop granted, a `PATH` built from
-//! values captured at startup, and `ENABLE_CLAUDEAI_MCP_SERVERS=false`. Nothing else crosses,
-//! however the process environment looks by then: granted secrets of other jobs, the proxy key,
-//! `CONTROLLER_ACCESS_TOKEN`, a changed `HOME`, or anything `$CODEX_HOME/.env` loaded.
+//! from scratch for one of the person's Claude Code logins (11.19): the launch snapshot's
+//! allowlist, that login's folder as `CLAUDE_CONFIG_DIR` (none for Claude Code's usual folder),
+//! the values Desktop granted every login, a `PATH` built from values captured at startup, and
+//! `ENABLE_CLAUDEAI_MCP_SERVERS=false`. Nothing else crosses, however the process environment
+//! looks by then: granted secrets of other jobs, the proxy key, `CONTROLLER_ACCESS_TOKEN`, a
+//! changed `HOME`, another `CLAUDE_CONFIG_DIR`, or anything `$CODEX_HOME/.env` loaded.
 
 use std::ffi::OsString;
 use std::io;
@@ -19,7 +21,7 @@ use uuid::Uuid;
 
 use super::events::LaneFailure;
 use super::job::not_ready_failure;
-use super::{CheckedLaunch, ExecutionMode, LaunchGrant, ReadyLane};
+use super::{CONFIG_DIR_KEY, CheckedLaunch, CheckedLogin, ExecutionMode, LaunchGrant, ReadyLane};
 
 /// The one value Instafy sets (3.4). Documented by Claude Code: it only stops claude.ai
 /// connectors from loading, and does not depend on `--strict-mcp-config`.
@@ -69,18 +71,33 @@ pub fn lane_argv(
     argv
 }
 
-/// Every variable the child gets, in a fixed order (3.4): the snapshot's allowlisted values,
-/// the granted D26 values that passed their checks, `PATH` and
-/// `ENABLE_CLAUDEAI_MCP_SERVERS=false`. `CLAUDE_CONFIG_DIR` is the only `CLAUDE_*` name it can
-/// hold, and only with the person's granted value.
-pub fn lane_environment(grant: &LaunchGrant, launch: &CheckedLaunch) -> Vec<(OsString, OsString)> {
+/// Every variable the child of a turn or probe on `login` gets, in a fixed order (3.4, 11.19):
+/// the snapshot's allowlisted values, the login's folder as `CLAUDE_CONFIG_DIR` (nothing for
+/// Claude Code's usual folder), the granted D26 values every login shares that passed their
+/// checks, `PATH` and `ENABLE_CLAUDEAI_MCP_SERVERS=false`. Logins differ in `CLAUDE_CONFIG_DIR`
+/// alone. It is the only `CLAUDE_*` name the child can hold, and only with the person's granted
+/// folder: never one from `INSTAFY_CLAUDE_CODE_ENV_JSON`, the process environment or another
+/// login.
+pub fn lane_environment(
+    grant: &LaunchGrant,
+    launch: &CheckedLaunch,
+    login: &CheckedLogin,
+) -> Vec<(OsString, OsString)> {
     let mut environment: Vec<(OsString, OsString)> = grant
         .snapshot()
         .values()
         .iter()
-        .chain(launch.granted_env())
         .map(|(name, value)| (OsString::from(name), value.clone()))
         .collect();
+    if let Some(folder) = login.config_dir() {
+        environment.push((CONFIG_DIR_KEY.into(), folder.as_os_str().to_owned()));
+    }
+    environment.extend(
+        launch
+            .granted_env()
+            .iter()
+            .map(|(name, value)| (OsString::from(name), value.clone())),
+    );
     environment.push(("PATH".into(), lane_path(grant, launch)));
     environment.push((ENABLE_CLAUDEAI_MCP_SERVERS.into(), "false".into()));
     environment
@@ -140,10 +157,10 @@ impl McpConfigFile {
 }
 
 /// The turn's `claude` process, unspawned (3.3, 3.6): the checked target the probe ran, the
-/// exact argv for the turn's mode, a cleared environment holding only [`lane_environment`], the
-/// space's folder as working directory, piped stdio and `kill_on_drop`. It stays in
-/// runtime-agent's own process group, which Desktop signals and proves gone as a unit, so there
-/// is no `process_group(0)`.
+/// exact argv for the turn's mode, a cleared environment holding only [`lane_environment`] of the
+/// login the probe checked, the space's folder as working directory, piped stdio and
+/// `kill_on_drop`. It stays in runtime-agent's own process group, which Desktop signals and
+/// proves gone as a unit, so there is no `process_group(0)`.
 pub fn turn_command(
     grant: &LaunchGrant,
     ready: &ReadyLane,
@@ -161,7 +178,7 @@ pub fn turn_command(
             resume,
         ))
         .env_clear()
-        .envs(lane_environment(grant, ready.launch()))
+        .envs(lane_environment(grant, ready.launch(), ready.login()))
         .current_dir(folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -172,10 +189,11 @@ pub fn turn_command(
 
 /// A turn's second start (11.9): when `claude`, started with `--resume`, reported its session
 /// missing before its first `init`, the same command without `--resume` starts the turn again,
-/// in a new session, but only once the grant's checks pass again, as before every spawn (3.2).
+/// in a new session, but only once the grant's checks, and its login's folder's, pass again, as
+/// before every spawn (3.2, 11.19).
 pub struct StartAgain<'a> {
     pub grant: &'a LaunchGrant,
-    /// The turn's probe, whose checked binary the first start ran.
+    /// The turn's probe, whose checked binary and login the first start ran.
     pub ready: &'a ReadyLane,
     pub mcp_config: &'a McpConfigFile,
     pub mode: ExecutionMode,
@@ -184,11 +202,14 @@ pub struct StartAgain<'a> {
 
 impl StartAgain<'_> {
     /// The second start's command, the first one's without `--resume`, once the grant's checks
-    /// pass again on the binary the turn's probe vetted. Otherwise why it may not start: the
-    /// checks' reason, as a turn's probe gives it, or a binary that changed since the probe, which
-    /// no probe vetted.
+    /// pass again on the binary the turn's probe vetted, and the login's folder passes its own.
+    /// Otherwise why it may not start: the checks' reason, as a turn's probe gives it, or a binary
+    /// that changed since the probe, which no probe vetted.
     pub fn command(&self) -> Result<Command, LaneFailure> {
         let checked = self.grant.check().map_err(not_ready_failure)?;
+        self.grant
+            .recheck_login(self.ready.login())
+            .map_err(not_ready_failure)?;
         if checked.identity() != self.ready.launch().identity() {
             return Err(LaneFailure {
                 code: None,
@@ -367,9 +388,13 @@ mod tests {
         path.to_path_buf()
     }
 
+    /// Each login's child gets the same environment but for `CLAUDE_CONFIG_DIR` (3.4, 11.19):
+    /// its own folder, or none at all for Claude Code's usual folder, and never the one
+    /// `INSTAFY_CLAUDE_CODE_ENV_JSON` names.
     #[cfg(unix)]
     #[test]
-    fn the_environment_is_the_allowlist_the_granted_values_path_and_one_constant() {
+    fn the_environment_is_the_allowlist_the_logins_folder_the_granted_values_path_and_one_constant()
+    {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let bin = folder(&root.join("bin"), 0o755);
@@ -377,6 +402,8 @@ mod tests {
         let in_workspace = folder(&workspace.join("space/node_modules/.bin"), 0o755);
         let writable = folder(&root.join("writable"), 0o777);
         let tmp = folder(&root.join("tmp"), 0o700);
+        let work_folder = folder(&root.join("home/.claude-work"), 0o700);
+        let (work, usual) = (Uuid::new_v4(), Uuid::new_v4());
         let snapshot = LaunchEnvSnapshot::from_lookup(|key| {
             let value = match key {
                 "HOME" => "/home/person".to_string(),
@@ -404,8 +431,16 @@ mod tests {
             ),
             user_id: Some(Uuid::new_v4().to_string().into()),
             env_json: Some(
-                r#"{"HTTPS_PROXY": "http://proxy.example:3128", "NO_PROXY": "localhost", "ANTHROPIC_BASE_URL": "http://gateway.example"}"#
+                r#"{"HTTPS_PROXY": "http://proxy.example:3128", "NO_PROXY": "localhost", "ANTHROPIC_BASE_URL": "http://gateway.example", "CLAUDE_CONFIG_DIR": "/elsewhere/.claude"}"#
                     .into(),
+            ),
+            logins_json: Some(
+                serde_json::json!([
+                    { "id": work, "configDir": work_folder },
+                    { "id": usual, "configDir": null },
+                ])
+                .to_string()
+                .into(),
             ),
         };
         let grant = LaunchGrant::parse(
@@ -427,20 +462,31 @@ mod tests {
             granted_env: grant.granted_env().to_vec(),
         };
         let expected_path = format!("{}:/usr/bin:/bin", bin.display());
-        let expected: Vec<(OsString, OsString)> = [
-            ("HOME", "/home/person"),
-            ("USER", "person"),
-            ("LANG", "en_US.UTF-8"),
-            ("TMPDIR", tmp.to_str().unwrap()),
-            ("HTTPS_PROXY", "http://proxy.example:3128"),
-            ("NO_PROXY", "localhost"),
-            ("PATH", expected_path.as_str()),
-            ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
-        ]
-        .into_iter()
-        .map(|(name, value)| (name.into(), value.into()))
-        .collect();
-        assert_eq!(lane_environment(&grant, &launch), expected);
+        let expected = |config_dir: Option<&str>| -> Vec<(OsString, OsString)> {
+            [
+                ("HOME", Some("/home/person")),
+                ("USER", Some("person")),
+                ("LANG", Some("en_US.UTF-8")),
+                ("TMPDIR", tmp.to_str()),
+                ("CLAUDE_CONFIG_DIR", config_dir),
+                ("HTTPS_PROXY", Some("http://proxy.example:3128")),
+                ("NO_PROXY", Some("localhost")),
+                ("PATH", Some(expected_path.as_str())),
+                ("ENABLE_CLAUDEAI_MCP_SERVERS", Some("false")),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| Some((name.into(), value?.into())))
+            .collect()
+        };
+        let checked = |login: Uuid| grant.check_login(grant.login(login).unwrap()).unwrap();
+        assert_eq!(
+            lane_environment(&grant, &launch, &checked(work)),
+            expected(work_folder.to_str())
+        );
+        assert_eq!(
+            lane_environment(&grant, &launch, &checked(usual)),
+            expected(None)
+        );
     }
 
     #[cfg(unix)]
@@ -456,6 +502,9 @@ mod tests {
                 RawLaunchGrant {
                     bin: Some("/usr/local/bin/claude".into()),
                     user_id: Some(Uuid::new_v4().to_string().into()),
+                    logins_json: Some(
+                        format!(r#"[{{"id": "{}", "configDir": null}}]"#, Uuid::new_v4()).into(),
+                    ),
                     ..RawLaunchGrant::default()
                 },
                 LaunchEnvSnapshot::from_lookup(|key| {

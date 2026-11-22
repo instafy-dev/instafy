@@ -10,6 +10,7 @@ import type {
   FrontendTurnEngineContribution,
 } from "../frontendFeatureModule";
 import type { FetchRuntimeStatusResult } from "../../services/runtimeController/runtimes";
+import { ClaudeCodeAgentAiLabel, ClaudeCodeAgentAiLogin } from "./ClaudeCodeAgentAiLogin";
 import { ClaudeCodeAgentAiNote } from "./ClaudeCodeAgentAiNote";
 import { ClaudeCodeAutoStart } from "./ClaudeCodeAutoStart";
 import { ClaudeCodeWaitingNote } from "./ClaudeCodeWaitingNote";
@@ -20,6 +21,9 @@ import {
   CLAUDE_CODE_TURN_NOT_ALLOWED_CODE,
   CLAUDE_CODE_TURN_PRESENTATION,
 } from "./claudeCodeTurnPresentation";
+
+/** A save naming a Claude Code login that is not one of the caller's own (422, 11.19). */
+const CLAUDE_CODE_LOGIN_UNKNOWN_CODE = "claude_code_login_unknown";
 
 /**
  * Claude Code as an agent's AI (docs/Local-Engine-Turns.md 11.3): offered in
@@ -32,9 +36,21 @@ export const CLAUDE_CODE_AGENT_AI: FrontendTurnEngineAgentAi = Object.freeze({
   icon: createElement(Laptop, { className: "h-4 w-4", "aria-hidden": true }),
   description: CLAUDE_CODE_COPY.agentAi.description,
   offeredBy: (status: FetchRuntimeStatusResult) => status.claudeCodeLane === true,
-  describeSaveRefusal: ({ code }: { code: string; details: unknown }) =>
-    code.trim() === CLAUDE_CODE_TURN_NOT_ALLOWED_CODE ? CLAUDE_CODE_COPY.agentAi.notAllowed : null,
+  describeSaveRefusal: ({ code }: { code: string; details: unknown }) => {
+    switch (code.trim()) {
+      case CLAUDE_CODE_TURN_NOT_ALLOWED_CODE:
+        return CLAUDE_CODE_COPY.agentAi.notAllowed;
+      // A login that is not one of the person's own, such as one just deleted (11.19).
+      case CLAUDE_CODE_LOGIN_UNKNOWN_CODE:
+        return CLAUDE_CODE_COPY.agentAi.loginUnknown;
+      default:
+        return null;
+    }
+  },
   Note: ClaudeCodeAgentAiNote,
+  // Which of the person's Claude Code logins the agent's turns run on (11.19).
+  Fields: ClaudeCodeAgentAiLogin,
+  AgentLabel: ClaudeCodeAgentAiLabel,
 });
 
 /**

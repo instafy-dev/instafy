@@ -141,7 +141,7 @@ describe("the failure card of a turn-engine turn", () => {
     runtimeState.runtimeStatuses = [
       {
         runtimeId: "runtime-mac",
-        claudeCode: { ready: true, reason: null, cli: "2.3.0", verified: false, planSignIn: true, resetsAt: null },
+        claudeCode: { ready: true, reason: null, cli: "2.3.0", verified: false, logins: {} },
       } as ControllerRuntimeStatusEntry,
     ];
     await render(context({ isViewer: true, name: null }));

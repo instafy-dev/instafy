@@ -200,19 +200,35 @@ export type ClaudeCodeShellSettingValidationOptions = {
   fs?: ClaudeCodeFileSystem;
 };
 
+/**
+ * What checking a login-shell value or a login's folder found: where it
+ * really is, or why Desktop won't use it, in the program's words.
+ * `not_a_file` there means the place is not the kind it must be, so for a
+ * folder that it is not a folder.
+ */
+export type ClaudeCodePlaceCheck =
+  | Readonly<{ ok: true; target: string }>
+  | Readonly<{ ok: false; problem: ClaudeCodeBinaryProblem }>;
+
+function refusePlace(problem: ClaudeCodeBinaryProblem): ClaudeCodePlaceCheck {
+  return Object.freeze({ ok: false as const, problem });
+}
+
 function pathSteps(value: string): string[] {
   return value.split("/").filter((step) => step.length > 0 && step !== ".");
 }
 
+type SymlinkWalk =
+  | { target: string; links: string[] }
+  | { problem: "missing" | "too_many_links" };
+
 /**
  * Resolve an absolute path one component at a time, as the kernel does and
  * runtime-agent's own walk does, and note every symlink met on the way where
- * it physically is. Null when a component is missing or there are too many.
+ * it physically is. A missing component, or too many links, ends the walk.
+ * It only looks at each component and reads each link; it opens nothing.
  */
-function walkSymlinks(
-  files: ClaudeCodeFileSystem,
-  absolutePath: string,
-): { target: string; links: string[] } | null {
+function walkSymlinks(files: ClaudeCodeFileSystem, absolutePath: string): SymlinkWalk {
   const pending = pathSteps(absolutePath);
   const links: string[] = [];
   let current = "/";
@@ -232,11 +248,11 @@ function walkSymlinks(
         continue;
       }
       if (links.length >= MAX_SYMLINK_HOPS) {
-        return null;
+        return { problem: "too_many_links" };
       }
       destination = files.readlinkSync(next);
     } catch {
-      return null;
+      return { problem: "missing" };
     }
     links.push(next);
     if (destination.startsWith("/")) {
@@ -254,16 +270,17 @@ function walkSymlinks(
  * this user or root; the place itself owned by this user or root and writable
  * by neither its group nor anyone else; and none of them inside a folder
  * Instafy owns. A value that fails would make every turn refuse, so Desktop
- * neither offers nor grants it.
+ * neither offers nor grants it. A login's folder is checked the same way, as
+ * the `CLAUDE_CONFIG_DIR` runtime-agent gives that login (11.19).
  */
-export function claudeCodeShellSettingIsUsable(
+export function checkClaudeCodeShellSetting(
   setting: ClaudeCodeShellSetting,
   value: unknown,
   options: ClaudeCodeShellSettingValidationOptions,
-): boolean {
+): ClaudeCodePlaceCheck {
   const files = options.fs ?? fs;
   if (typeof value !== "string" || !value.startsWith("/") || hasControlCharacter(value)) {
-    return false;
+    return refusePlace("relative_path");
   }
   const ownedPaths = options.desktopOwnedPaths
     .filter((entry) => typeof entry === "string" && entry.startsWith("/"))
@@ -277,25 +294,74 @@ export function claudeCodeShellSettingIsUsable(
   const steps = pathSteps(value);
   const firstParent = steps.indexOf("..");
   if (insideOwnedPath(`/${(firstParent === -1 ? steps : steps.slice(0, firstParent)).join("/")}`)) {
-    return false;
+    return refusePlace("inside_instafy_folder");
   }
   const walk = walkSymlinks(files, value);
-  if (!walk || insideOwnedPath(walk.target)) {
-    return false;
+  if ("problem" in walk) {
+    return refusePlace(walk.problem);
+  }
+  if (insideOwnedPath(walk.target)) {
+    return refusePlace("inside_instafy_folder");
   }
   try {
     for (const link of walk.links) {
-      if (insideOwnedPath(link) || !ownedByUserOrRoot(files.lstatSync(link))) {
-        return false;
+      if (insideOwnedPath(link)) {
+        return refusePlace("inside_instafy_folder");
+      }
+      if (!ownedByUserOrRoot(files.lstatSync(link))) {
+        return refusePlace("foreign_owner");
       }
     }
     const stats = files.lstatSync(walk.target);
     const rightKind =
       CLAUDE_CODE_SHELL_SETTING_KINDS[setting] === "directory" ? stats.isDirectory() : stats.isFile();
-    return rightKind && ownedByUserOrRoot(stats) && (stats.mode & 0o022) === 0;
+    if (!rightKind) {
+      return refusePlace("not_a_file");
+    }
+    if (!ownedByUserOrRoot(stats)) {
+      return refusePlace("foreign_owner");
+    }
+    if ((stats.mode & 0o022) !== 0) {
+      return refusePlace("writable_by_others");
+    }
+    return Object.freeze({ ok: true as const, target: walk.target });
   } catch {
-    return false;
+    return refusePlace("missing");
   }
+}
+
+/** Whether a login-shell value passes {@link checkClaudeCodeShellSetting}. */
+export function claudeCodeShellSettingIsUsable(
+  setting: ClaudeCodeShellSetting,
+  value: unknown,
+  options: ClaudeCodeShellSettingValidationOptions,
+): boolean {
+  return checkClaudeCodeShellSetting(setting, value, options).ok;
+}
+
+/**
+ * Check a Claude Code login's folder as the `CLAUDE_CONFIG_DIR` it is
+ * granted as: a folder only this user or root can change, outside every
+ * folder Instafy owns. Nothing inside it is looked at.
+ */
+export function checkClaudeCodeConfigFolder(
+  folder: unknown,
+  options: ClaudeCodeShellSettingValidationOptions,
+): ClaudeCodePlaceCheck {
+  return checkClaudeCodeShellSetting("CLAUDE_CONFIG_DIR", folder, options);
+}
+
+/**
+ * Where a folder really is, its links followed one component at a time, so
+ * two logins that name one folder in two ways are seen to share it. A folder
+ * that is not there any more is taken as written.
+ */
+export function claudeCodeFolderRealPath(
+  folder: string,
+  files: ClaudeCodeFileSystem = fs,
+): string {
+  const walk = walkSymlinks(files, folder);
+  return "target" in walk ? walk.target : path.resolve(folder);
 }
 
 /** The first login-shell value in `env` that Desktop can't use, in the order runtime-agent checks them. */

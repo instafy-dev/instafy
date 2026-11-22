@@ -123,6 +123,19 @@ test("an extension call is keyed by the session the calling frame shows, never b
   assert.deepEqual([...new Set(requestReads)], ["controllerUrl"]);
 });
 
+test("an extension's folder picker is the native one, showing hidden folders and keeping a chosen link as itself", () => {
+  // Add a login's folder for "choose" (docs/Local-Engine-Turns.md 11.19).
+  const dialogs = functionBody("createDesktopExtensionDialogs");
+  const start = dialogs.indexOf("async pickFolder(");
+  assert.ok(start >= 0, "the extension host's dialogs have a folder picker");
+  const pickFolder = balancedBlock(dialogs, dialogs.indexOf("{", start));
+  assert.match(pickFolder, /properties: \["openDirectory", "showHiddenFiles", "noResolveAliases"\]/);
+  // macOS shows an open panel's message, not its title.
+  assert.match(pickFolder, /message: options\.message,/);
+  assert.match(pickFolder, /await dialog\.showOpenDialog\(parent, openDialogOptions\)/);
+  assert.match(pickFolder, /return result\.canceled \? null : \(result\.filePaths\[0\] \?\? null\);/);
+});
+
 test("the preload declares the controller an extension call names", () => {
   const options = preloadSource.slice(
     preloadSource.indexOf("export type DesktopExtensionInvokeOptions = {"),

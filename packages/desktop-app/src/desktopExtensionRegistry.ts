@@ -52,12 +52,25 @@ export type DesktopExtensionPickFileOptions = Readonly<{
   defaultPath?: string;
 }>;
 
+export type DesktopExtensionPickFolderOptions = Readonly<{
+  title?: string;
+  /** Shown above the folders on macOS, where an open panel shows no title. */
+  message?: string;
+  buttonLabel?: string;
+  defaultPath?: string;
+}>;
+
 /** Native dialogs shown by the main process, which web content cannot answer or fake. */
 export type DesktopExtensionDialogs = Readonly<{
   /** Resolves to the index of the button the person chose. */
   showMessageBox: (options: DesktopExtensionMessageBoxOptions) => Promise<number>;
   /** A file picker that returns a chosen symlink itself, not its target; null when cancelled. */
   pickFile: (options: DesktopExtensionPickFileOptions) => Promise<string | null>;
+  /**
+   * A folder picker that shows hidden folders and returns a chosen symlink
+   * itself, not its target; null when cancelled.
+   */
+  pickFolder: (options: DesktopExtensionPickFolderOptions) => Promise<string | null>;
 }>;
 
 /** What the shell knows about one call, before it is scoped to a module. */
@@ -537,7 +550,11 @@ const NO_DESKTOP_EXTENSION_HOST: DesktopExtensionHost = Object.freeze({
   session: null,
   controllerOrigin: null,
   consents: null,
-  dialogs: Object.freeze({ showMessageBox: refuseDialog, pickFile: refuseDialog }),
+  dialogs: Object.freeze({
+    showMessageBox: refuseDialog,
+    pickFile: refuseDialog,
+    pickFolder: refuseDialog,
+  }),
   desktopOwnedPaths: Object.freeze([]),
 });
 

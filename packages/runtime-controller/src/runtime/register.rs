@@ -44,27 +44,43 @@ pub(super) const RENEWED_RUNTIME_TOKEN_MIN_TTL_SECONDS: i64 = 3600;
 /// and the lease read it as the controller's.
 pub(super) const CLAUDE_CODE_CAPABILITY: &str = "claudeCode";
 const CLAUDE_CODE_CAPABILITY_SNAKE: &str = "claude_code";
-const CLAUDE_CODE_CAPABILITY_VERSION: u64 = 1;
-/// Why a runtime's Claude Code cannot take a turn, as runtime-agent's probe
-/// reports it (docs/Local-Engine-Turns.md 3.2): runtime-contracts' list,
-/// which the runtime and Studio are tested against too.
+/// The one version registration keeps (docs/Local-Engine-Turns.md 11.19): the
+/// program once, and each Claude Code login of the grant apart. A version 1
+/// capability, from a runtime older than the logins, is dropped, so that
+/// runtime takes no lane turn.
+const CLAUDE_CODE_CAPABILITY_VERSION: u64 = runtime_contracts::claude_code_lane::CAPABILITY_VERSION;
+/// The key of the capability's Claude Code logins, keyed by the login's id.
+const CLAUDE_CODE_LOGINS: &str = "logins";
+/// The most logins a capability lists, as a grant carries at most.
+const CLAUDE_CODE_MAX_LOGINS: usize = runtime_contracts::claude_code_lane::MAX_LOGINS;
+/// Why the `claude` program cannot take a turn, as runtime-agent's probe
+/// reports it (docs/Local-Engine-Turns.md 3.2, 11.19): runtime-contracts'
+/// list, which the runtime and Studio are tested against too.
+const CLAUDE_CODE_PROGRAM_NOT_READY_REASONS: [&str;
+    runtime_contracts::claude_code_lane::PROGRAM_NOT_READY_REASONS.len()] =
+    runtime_contracts::claude_code_lane::PROGRAM_NOT_READY_REASONS;
+/// Why one Claude Code login cannot take a turn: the program's reasons, and
+/// `plan_limit` while the login's hold lasts (11.11, 11.19).
 const CLAUDE_CODE_NOT_READY_REASONS: [&str;
     runtime_contracts::claude_code_lane::NOT_READY_REASONS.len()] =
     runtime_contracts::claude_code_lane::NOT_READY_REASONS;
-/// How far ahead a not-ready capability's `resetsAt` may be: a Claude plan's
-/// longest limit is weekly, and the runtime holds at most 7 days
+/// The one reason that carries a reset time: a Claude plan's limit (11.11).
+const CLAUDE_CODE_PLAN_LIMIT: &str = "plan_limit";
+/// How far ahead a held login's `resetsAt` may be: a Claude plan's longest
+/// limit is weekly, and the runtime holds at most 7 days
 /// (docs/Local-Engine-Turns.md 11.11).
 const CLAUDE_CODE_RESETS_AT_MAX_DAYS: i64 = 8;
 
 /// A runtime's `claudeCode` capability, read from what the runtime reported
-/// (docs/Local-Engine-Turns.md 2.10): version 1 with a boolean `ready`, and
-/// of the rest only the known fields, each kept only when well-formed. A
-/// path, or any other key, is never kept.
+/// (docs/Local-Engine-Turns.md 2.10, 11.19): version 2 with a boolean
+/// `ready`, and of the rest only the known fields, each kept only when
+/// well-formed. A path, or any other key, is never kept.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClaudeCodeCapability {
+    /// Whether the `claude` program can take a turn.
     pub(super) ready: bool,
-    /// Why it is not ready, from [`CLAUDE_CODE_NOT_READY_REASONS`]; never set
-    /// while ready.
+    /// Why the program is not ready, from
+    /// [`CLAUDE_CODE_PROGRAM_NOT_READY_REASONS`]; never set while ready.
     pub(super) reason: Option<&'static str>,
     /// The probed Claude Code version, as a semver such as `2.1.314`
     /// ([`is_claude_code_cli_version`]).
@@ -72,19 +88,36 @@ pub(super) struct ClaudeCodeCapability {
     /// Whether `cli` is at most the newest version Instafy verified
     /// (`CLAUDE_CODE_LANE_VERIFIED_THROUGH`).
     pub(super) verified: Option<bool>,
-    /// Whether the probe found a Claude plan sign-in.
-    pub(super) plan_sign_in: Option<bool>,
     /// Whether the runtime streams partial messages.
     pub(super) partial_messages: Option<bool>,
-    /// When a not-ready capability expects to be ready again, such as a
-    /// Claude plan's limit's reset (11.11), as an RFC 3339 UTC time; never
-    /// set while ready.
+    /// The Claude Code logins the runtime's grant holds, at most
+    /// [`CLAUDE_CODE_MAX_LOGINS`], by id, as the runtime listed them.
+    pub(super) logins: Vec<(Uuid, ClaudeCodeLoginCapability)>,
+}
+
+/// One Claude Code login of a runtime's `claudeCode` capability (11.19).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ClaudeCodeLoginCapability {
+    /// Whether a turn can run on this login now: never while the program
+    /// cannot.
+    pub(super) ready: bool,
+    /// Why it is not ready, from [`CLAUDE_CODE_NOT_READY_REASONS`]: the
+    /// program's reason while the program is not ready, else the login's own.
+    /// Never set while ready.
+    pub(super) reason: Option<&'static str>,
+    /// When the login's Claude plan limit resets (11.11), as an RFC 3339 UTC
+    /// time; set only with `plan_limit`.
     pub(super) resets_at: Option<String>,
+    /// Whether the probe found a Claude plan sign-in in the login's folder.
+    pub(super) plan_sign_in: Option<bool>,
+    /// How `claude auth status` exited for the login: true for 0, false for
+    /// 1; none when the probe could not tell.
+    pub(super) signed_in: Option<bool>,
 }
 
 impl ClaudeCodeCapability {
     /// The capability `reported` describes, or none: a value that is not
-    /// version 1 with a boolean `ready` is no capability at all.
+    /// version 2 with a boolean `ready` is no capability at all.
     pub(super) fn from_reported(reported: &JsonValue) -> Option<Self> {
         if reported.get("version").and_then(JsonValue::as_u64)
             != Some(CLAUDE_CODE_CAPABILITY_VERSION)
@@ -92,39 +125,40 @@ impl ClaudeCodeCapability {
             return None;
         }
         let ready = reported.get("ready")?.as_bool()?;
-        let reason = reported
-            .get("reason")
-            .and_then(JsonValue::as_str)
-            .filter(|_| !ready)
-            .and_then(|reason| {
-                CLAUDE_CODE_NOT_READY_REASONS
-                    .into_iter()
-                    .find(|known| *known == reason)
-            });
+        let reason = known_reason(reported, ready, &CLAUDE_CODE_PROGRAM_NOT_READY_REASONS);
         let cli = reported
             .get("cli")
             .and_then(JsonValue::as_str)
             .filter(|cli| is_claude_code_cli_version(cli))
             .map(str::to_string);
         let flag = |key: &str| reported.get(key).and_then(JsonValue::as_bool);
-        let resets_at = reported
-            .get("resetsAt")
-            .and_then(JsonValue::as_str)
-            .filter(|_| !ready)
-            .and_then(claude_code_resets_at);
+        let logins = reported
+            .get(CLAUDE_CODE_LOGINS)
+            .and_then(JsonValue::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, login)| {
+                let id = canonical_login_id(id)?;
+                Some((
+                    id,
+                    ClaudeCodeLoginCapability::from_reported(login, ready, reason)?,
+                ))
+            })
+            .take(CLAUDE_CODE_MAX_LOGINS)
+            .collect();
         Some(Self {
             ready,
             reason,
             cli,
             verified: flag("verified"),
-            plan_sign_in: flag("planSignIn"),
             partial_messages: flag("partialMessages"),
-            resets_at,
+            logins,
         })
     }
 
-    /// The value registration stores: version 1 and the fields this has.
-    fn to_json(&self) -> JsonValue {
+    /// The value registration stores, and the status route shows its owner:
+    /// version 2, the fields this has, and its logins, `{}` when it has none.
+    pub(super) fn to_json(&self) -> JsonValue {
         let mut capability = serde_json::Map::new();
         capability.insert("version".to_string(), json!(CLAUDE_CODE_CAPABILITY_VERSION));
         capability.insert("ready".to_string(), JsonValue::Bool(self.ready));
@@ -134,25 +168,102 @@ impl ClaudeCodeCapability {
         if let Some(cli) = &self.cli {
             capability.insert("cli".to_string(), json!(cli));
         }
-        if let Some(resets_at) = &self.resets_at {
-            capability.insert("resetsAt".to_string(), json!(resets_at));
-        }
         for (key, value) in [
             ("verified", self.verified),
-            ("planSignIn", self.plan_sign_in),
             ("partialMessages", self.partial_messages),
         ] {
             if let Some(value) = value {
                 capability.insert(key.to_string(), JsonValue::Bool(value));
             }
         }
+        capability.insert(
+            CLAUDE_CODE_LOGINS.to_string(),
+            JsonValue::Object(
+                self.logins
+                    .iter()
+                    .map(|(id, login)| (id.to_string(), login.to_json()))
+                    .collect(),
+            ),
+        );
         JsonValue::Object(capability)
     }
 }
 
-/// A not-ready capability's `resetsAt` as registration keeps it: an RFC 3339
-/// time no more than [`CLAUDE_CODE_RESETS_AT_MAX_DAYS`] ahead, written again
-/// in UTC to the second. Anything else is left off.
+impl ClaudeCodeLoginCapability {
+    /// The login `reported` describes, on a program that is `program_ready`
+    /// or not for `program_reason`, or none without a boolean `ready`. While
+    /// the program is not ready, neither is the login, for the program's
+    /// reason.
+    fn from_reported(
+        reported: &JsonValue,
+        program_ready: bool,
+        program_reason: Option<&'static str>,
+    ) -> Option<Self> {
+        let reported_ready = reported.get("ready")?.as_bool()?;
+        let ready = reported_ready && program_ready;
+        let reason = if program_ready {
+            known_reason(reported, ready, &CLAUDE_CODE_NOT_READY_REASONS)
+        } else {
+            program_reason
+        };
+        let resets_at = reported
+            .get("resetsAt")
+            .and_then(JsonValue::as_str)
+            .filter(|_| reason == Some(CLAUDE_CODE_PLAN_LIMIT))
+            .and_then(claude_code_resets_at);
+        let flag = |key: &str| reported.get(key).and_then(JsonValue::as_bool);
+        Some(Self {
+            ready,
+            reason,
+            resets_at,
+            plan_sign_in: flag("planSignIn"),
+            signed_in: flag("signedIn"),
+        })
+    }
+
+    fn to_json(&self) -> JsonValue {
+        let mut login = serde_json::Map::new();
+        login.insert("ready".to_string(), JsonValue::Bool(self.ready));
+        if let Some(reason) = self.reason {
+            login.insert("reason".to_string(), json!(reason));
+        }
+        if let Some(resets_at) = &self.resets_at {
+            login.insert("resetsAt".to_string(), json!(resets_at));
+        }
+        for (key, value) in [
+            ("planSignIn", self.plan_sign_in),
+            ("signedIn", self.signed_in),
+        ] {
+            if let Some(value) = value {
+                login.insert(key.to_string(), JsonValue::Bool(value));
+            }
+        }
+        JsonValue::Object(login)
+    }
+}
+
+/// `reported`'s `reason` when it is not `ready` and the reason is one of
+/// `known`; none otherwise.
+fn known_reason(reported: &JsonValue, ready: bool, known: &[&'static str]) -> Option<&'static str> {
+    let reason = reported
+        .get("reason")
+        .and_then(JsonValue::as_str)
+        .filter(|_| !ready)?;
+    known.iter().copied().find(|known| *known == reason)
+}
+
+/// A login's key as registration keeps it: a UUID written the canonical way,
+/// lowercase and hyphenated, as the controller writes login ids. Anything
+/// else is no login.
+fn canonical_login_id(key: &str) -> Option<Uuid> {
+    Uuid::parse_str(key)
+        .ok()
+        .filter(|id| id.as_hyphenated().to_string() == key)
+}
+
+/// A held login's `resetsAt` as registration keeps it: an RFC 3339 time no
+/// more than [`CLAUDE_CODE_RESETS_AT_MAX_DAYS`] ahead, written again in UTC
+/// to the second. Anything else is left off.
 fn claude_code_resets_at(text: &str) -> Option<String> {
     let at = chrono::DateTime::parse_from_rfc3339(text.trim())
         .ok()?
@@ -1711,21 +1822,29 @@ mod tests {
     /// controller attests as lane-capable (docs/Local-Engine-Turns.md 2.10).
     #[test]
     fn claude_code_capability_is_rebuilt_only_for_a_lane_attested_runtime() {
+        let login = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
         let ready = json!({
-            "version": 1,
+            "version": 2,
             "ready": true,
             "cli": "2.1.314",
             "verified": true,
             "planSignIn": true,
             "partialMessages": true,
             "reason": "binary_missing",
+            "resetsAt": "2026-11-22T18:00:00Z",
             "path": "/home/someone/.local/bin/claude",
             "env": { "CLAUDE_CONFIG_DIR": "/home/someone/.claude" },
+            "logins": { login: {
+                "ready": true,
+                "planSignIn": true,
+                "signedIn": true,
+                "configDir": "/home/someone/.claude-work",
+            } },
         });
         let reported = json!({
             "agent": true,
             "claudeCode": ready,
-            "claude_code": { "version": 1, "ready": true },
+            "claude_code": { "version": 2, "ready": true },
         });
 
         let unattested = attest_runtime_capabilities(
@@ -1748,15 +1867,17 @@ mod tests {
             None,
             true,
         );
+        // The program's `planSignIn` and `resetsAt` belong to a login now, and
+        // a folder is never kept.
         assert_eq!(
             attested["claudeCode"],
             json!({
-                "version": 1,
+                "version": 2,
                 "ready": true,
                 "cli": "2.1.314",
                 "verified": true,
-                "planSignIn": true,
                 "partialMessages": true,
+                "logins": { login: { "ready": true, "planSignIn": true, "signedIn": true } },
             })
         );
         assert!(attested.get("claude_code").is_none());
@@ -1774,38 +1895,51 @@ mod tests {
             .get("claudeCode")
             .cloned()
         };
-        // Not ready: the reason is kept only from the list.
+        // Not ready: the reason is kept only from the program's list.
         assert_eq!(
             lane(
-                json!({ "version": 1, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false })
+                json!({ "version": 2, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false, "logins": {} })
             ),
             Some(
-                json!({ "version": 1, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false })
+                json!({ "version": 2, "ready": false, "reason": "bare_default", "cli": "2.2.0", "verified": false, "logins": {} })
             )
         );
-        assert_eq!(
-            lane(json!({ "version": 1, "ready": false, "reason": "signed_out" })),
-            Some(json!({ "version": 1, "ready": false }))
-        );
-        // Ill-formed fields are dropped, and the rest kept.
+        for unknown in ["signed_out", "plan_limit"] {
+            assert_eq!(
+                lane(json!({ "version": 2, "ready": false, "reason": unknown, "logins": {} })),
+                Some(json!({ "version": 2, "ready": false, "logins": {} })),
+                "{unknown}"
+            );
+        }
+        // Ill-formed fields are dropped, and the rest kept, `logins` as `{}`
+        // when it is missing or not an object.
         assert_eq!(
             lane(json!({
-                "version": 1,
+                "version": 2,
                 "ready": true,
                 "cli": "/opt/homebrew/bin/claude",
                 "verified": "yes",
                 "planSignIn": 1,
                 "partialMessages": null,
+                "logins": ["6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01"],
             })),
-            Some(json!({ "version": 1, "ready": true }))
+            Some(json!({ "version": 2, "ready": true, "logins": {} }))
         );
-        // No capability at all without version 1 and a boolean `ready`.
+        assert_eq!(
+            lane(json!({ "version": 2, "ready": true })),
+            Some(json!({ "version": 2, "ready": true, "logins": {} }))
+        );
+        // No capability at all without version 2 and a boolean `ready`: a
+        // version 1 capability, from a runtime older than the logins,
+        // included.
         for malformed in [
-            json!({ "version": 2, "ready": true }),
-            json!({ "version": "1", "ready": true }),
-            json!({ "version": 1.5, "ready": true }),
-            json!({ "version": 1, "ready": "true" }),
-            json!({ "version": 1 }),
+            json!({ "version": 1, "ready": true }),
+            json!({ "version": 1, "ready": true, "logins": { login: { "ready": true } } }),
+            json!({ "version": 3, "ready": true, "logins": {} }),
+            json!({ "version": "2", "ready": true }),
+            json!({ "version": 2.5, "ready": true }),
+            json!({ "version": 2, "ready": "true" }),
+            json!({ "version": 2 }),
             json!({ "ready": true }),
             json!(true),
             json!("ready"),
@@ -1849,31 +1983,50 @@ mod tests {
         )));
     }
 
-    /// Every not-ready reason runtime-contracts lists is kept, so the reason
-    /// a runtime attests reaches Studio, which words each one. No other code
-    /// of the lane is a reason: a runtime's failure codes and the
-    /// controller's own stop and sweep codes are dropped.
+    /// Every not-ready reason runtime-contracts lists is kept where it
+    /// belongs, so the reason a runtime attests reaches Studio, which words
+    /// each one: the program's own reasons on the program, and all of them,
+    /// `plan_limit` included, on a login. No other code of the lane is a
+    /// reason: a runtime's failure codes and the controller's own stop and
+    /// sweep codes are dropped.
     #[test]
     fn claude_code_keeps_exactly_the_shared_not_ready_reasons() {
         use runtime_contracts::claude_code_lane::{
-            NOT_READY_REASONS, RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES,
+            NOT_READY_REASONS, PROGRAM_NOT_READY_REASONS, RUNTIME_FAILURE_CODES,
+            STOP_AND_SWEEP_FAILURE_CODES,
         };
-        let reason_of = |reason: &str| {
+        let login = Uuid::new_v4();
+        let program_reason_of = |reason: &str| {
             ClaudeCodeCapability::from_reported(
-                &json!({ "version": 1, "ready": false, "reason": reason }),
+                &json!({ "version": 2, "ready": false, "reason": reason, "logins": {} }),
             )
             .expect("a capability")
             .reason
         };
-        for reason in NOT_READY_REASONS {
-            assert_eq!(reason_of(reason), Some(reason));
+        let login_reason_of = |reason: &str| {
+            let capability = ClaudeCodeCapability::from_reported(&json!({
+                "version": 2,
+                "ready": true,
+                "logins": { login.to_string(): { "ready": false, "reason": reason } },
+            }))
+            .expect("a capability");
+            assert_eq!(capability.logins.len(), 1, "{reason}");
+            capability.logins[0].1.reason
+        };
+        for reason in PROGRAM_NOT_READY_REASONS {
+            assert_eq!(program_reason_of(reason), Some(reason));
         }
+        for reason in NOT_READY_REASONS {
+            assert_eq!(login_reason_of(reason), Some(reason));
+        }
+        assert_eq!(program_reason_of("plan_limit"), None);
         for code in RUNTIME_FAILURE_CODES
             .into_iter()
             .chain(STOP_AND_SWEEP_FAILURE_CODES)
             .filter(|code| !NOT_READY_REASONS.contains(code))
         {
-            assert_eq!(reason_of(code), None, "{code}");
+            assert_eq!(program_reason_of(code), None, "{code}");
+            assert_eq!(login_reason_of(code), None, "{code}");
         }
     }
 

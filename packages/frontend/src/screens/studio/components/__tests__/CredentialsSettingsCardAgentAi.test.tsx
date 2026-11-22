@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, type ComponentProps } from "react";
+import { act, type ComponentProps, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
 import type { AgentProfileModal } from "../AgentProfileModal";
+import type { FrontendTurnEngineAgentAiFieldsProps } from "../../../../features/frontendFeatureModule";
+import { setClaudeCodeLoginsLoaderForTests } from "../../../../features/claudeCode/claudeCodeLoginsStore";
 
 // docs/Local-Engine-Turns.md 11.3: every agent's AI, @octo's included, can be
 // Claude Code, beside Instafy AI and the person's own connections, offered
@@ -95,6 +97,10 @@ function agent(overrides: Record<string, unknown> = {}) {
 
 const OCTO = agent({ id: "agent-octo", handle: "octo", displayName: "Octo", avatarSeed: "octo" });
 
+// Two of the person's Claude Code logins, oldest first (docs/Local-Engine-Turns.md 11.19).
+const FIRST_LOGIN = { id: "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01", label: "Personal", createdAt: "2026-11-01T09:00:00Z" };
+const WORK_LOGIN = { id: "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02", label: "Work", createdAt: "2026-11-02T09:00:00Z" };
+
 async function flush() {
   for (let index = 0; index < 4; index += 1) {
     await Promise.resolve();
@@ -125,6 +131,7 @@ describe("Claude Code as an agent's AI in Your AI", () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [], preferredRuntimeId: null, claudeCodeLane: true });
     mocks.updateAgent.mockImplementation(async (id: string) => ({ success: true, agent: agent({ id }) }));
     mocks.createAgent.mockResolvedValue({ success: true, agent: agent({ id: "agent-new", handle: "builder" }) });
+    setClaudeCodeLoginsLoaderForTests(async () => ({ success: true, logins: [FIRST_LOGIN, WORK_LOGIN] }));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -134,6 +141,7 @@ describe("Claude Code as an agent's AI in Your AI", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    setClaudeCodeLoginsLoaderForTests(null);
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -167,6 +175,15 @@ describe("Claude Code as an agent's AI in Your AI", () => {
   }
 
   const choiceIds = () => mocks.agentProfileProps?.providerOptions?.map((option) => option.id) ?? [];
+  // The engine's own fields under its choice, as the editor renders them.
+  const engineFields = () =>
+    mocks.agentProfileProps?.aiFields as ReactElement<FrontendTurnEngineAgentAiFieldsProps> | null | undefined;
+  async function setEngineFields(fields: Record<string, unknown>) {
+    await act(async () => {
+      engineFields()!.props.onFieldsChange(fields);
+      await flush();
+    });
+  }
 
   it("offers Claude Code beside the connections where the switch covers the person, and only there", async () => {
     await renderAgents();
@@ -287,6 +304,76 @@ describe("Claude Code as an agent's AI in Your AI", () => {
     await save();
     expect(mocks.showStatus).toHaveBeenLastCalledWith("Claude Code turns aren't on for your account.", "error", 4500);
     expect(mocks.agentProfileProps?.isOpen).toBe(true);
+  });
+
+  // docs/Settings-UI.md, Bot profiles: the engine's own fields under its
+  // choice, such as which of the person's Claude Code logins the agent uses.
+  it("sends what the engine's own fields set with the agent's AI, and never in place of the editor's", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [OCTO, agent({ provider: "claude-code", claudeCodeLoginId: null })] });
+    await renderAgents();
+    await open("bots-edit-agent-1");
+    expect(engineFields()?.props.agent?.id).toBe("agent-1");
+    expect(engineFields()?.props.fields).toBeNull();
+    expect(mocks.agentProfileProps?.dirty).toBe(false);
+
+    await setEngineFields({ claudeCodeLoginId: WORK_LOGIN.id, provider: "openai", handle: "someone-else" });
+    expect(mocks.agentProfileProps?.dirty).toBe(true);
+    expect(engineFields()?.props.fields).toMatchObject({ claudeCodeLoginId: WORK_LOGIN.id });
+    await save();
+    const body = mocks.updateAgent.mock.lastCall?.[1];
+    expect(body).toMatchObject({ claudeCodeLoginId: WORK_LOGIN.id, handle: "reviewer" });
+    // The AI stays the one chosen: the editor sends no provider for an unchanged one.
+    expect(body).not.toHaveProperty("provider");
+  });
+
+  it("sends the engine's fields when the agent is made, and drops them once another AI is chosen", async () => {
+    await renderAgents();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="bots-create"]')!.click();
+      await flush();
+    });
+    expect(engineFields()).toBeNull();
+    await choose("claude-code");
+    expect(engineFields()?.props.agent).toBeNull();
+    await setEngineFields({ claudeCodeLoginId: WORK_LOGIN.id });
+    await act(async () => mocks.agentProfileProps!.onHandleChange("@builder"));
+    await save();
+    expect(mocks.createAgent.mock.lastCall?.[0]).toMatchObject({
+      provider: "claude-code",
+      handle: "builder",
+      claudeCodeLoginId: WORK_LOGIN.id,
+    });
+
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [OCTO, agent({ provider: "claude-code" })] });
+    await renderAgents();
+    await open("bots-edit-agent-1");
+    await setEngineFields({ claudeCodeLoginId: WORK_LOGIN.id });
+    await choose("openai");
+    expect(engineFields()).toBeNull();
+    await choose("claude-code");
+    expect(engineFields()?.props.fields).toBeNull();
+    await choose("openai");
+    await save();
+    expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ credentialId: "cred-old" });
+    expect(mocks.updateAgent.mock.lastCall?.[1]).not.toHaveProperty("claudeCodeLoginId");
+  });
+
+  it("names the login an agent uses in the list once the person has more than one", async () => {
+    mocks.listAgents.mockResolvedValue({
+      success: true,
+      agents: [
+        { ...OCTO, provider: "claude-code", claudeCodeLoginId: null },
+        agent({ provider: "claude-code", claudeCodeLoginId: WORK_LOGIN.id }),
+      ],
+    });
+    await renderAgents();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.textContent).toContain("Reviewer · Claude Code (Work)");
+    // An agent that names no login runs on the first one, and reads as before.
+    expect(container.textContent).toContain("Octo · Claude Code");
+    expect(container.textContent).not.toContain("Octo · Claude Code (");
   });
 
   it("asks nothing of a space's status where no space is open", async () => {

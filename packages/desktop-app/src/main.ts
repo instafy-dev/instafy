@@ -2162,6 +2162,23 @@ function createDesktopExtensionDialogs(window: BrowserWindow | null): DesktopExt
         : await dialog.showOpenDialog(openDialogOptions);
       return result.canceled ? null : (result.filePaths[0] ?? null);
     },
+    async pickFolder(options) {
+      const openDialogOptions: Electron.OpenDialogOptions = {
+        title: options.title,
+        message: options.message,
+        buttonLabel: options.buttonLabel,
+        defaultPath: options.defaultPath,
+        // Configuration folders are usually hidden. A chosen symlink comes
+        // back as itself, as a picked file does; the caller checks each
+        // link on the way.
+        properties: ["openDirectory", "showHiddenFiles", "noResolveAliases"],
+      };
+      const parent = owner();
+      const result = parent
+        ? await dialog.showOpenDialog(parent, openDialogOptions)
+        : await dialog.showOpenDialog(openDialogOptions);
+      return result.canceled ? null : (result.filePaths[0] ?? null);
+    },
   });
 }
 

@@ -563,6 +563,7 @@ printf '{{"previewId":"preview-porto","description":"Livraria Lello","takenAt":%
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
     job.proxy = Some(job_grant(
         &job,

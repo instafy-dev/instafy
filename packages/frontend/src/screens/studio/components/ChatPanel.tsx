@@ -3626,6 +3626,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         startOnThisComputer={startWaitingTurnSpaceHere}
         starting={spaceStartOnThisComputer.starting}
         resolveControllerUrl={resolveTurnEngineControllerUrl}
+        runMetadata={activeConversationRun?.metadata ?? null}
       />
     ) : null;
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({

@@ -453,6 +453,7 @@ mod tests {
             description: None,
             avatar_seed: None,
             claude_code: false,
+            claude_code_login_ids: Vec::new(),
         }
     }
 

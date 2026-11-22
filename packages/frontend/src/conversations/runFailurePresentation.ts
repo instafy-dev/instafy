@@ -180,22 +180,24 @@ export function turnEngineTurnOwner(
 /**
  * The turn engine a turn runs on, by the controller's stamp on its run, or,
  * until the page has that run's metadata (a teammate's page may have none
- * while it runs), on its prompt. A run whose `aiAccessMode` carries no
- * engine's stamp runs on none.
+ * while it runs), on its prompt, with the metadata that carries the stamp. A
+ * run whose `aiAccessMode` carries no engine's stamp runs on none.
  */
 function turnEngineOfTurn(turn: {
   runMetadata?: unknown;
   promptMetadata?: unknown;
-}): FrontendTurnEnginePresentation | null {
+}): { presentation: FrontendTurnEnginePresentation; stamped: Record<string, unknown> } | null {
   const run = isRecord(turn.runMetadata) ? turn.runMetadata : null;
   const stampedRun = readControllerStampedTurnEngine(run);
-  if (stampedRun) {
-    return stampedRun.presentation;
+  if (stampedRun && run) {
+    return { presentation: stampedRun.presentation, stamped: run };
   }
   if (typeof run?.["aiAccessMode"] === "string") {
     return null;
   }
-  return readControllerStampedTurnEngine(turn.promptMetadata)?.presentation ?? null;
+  const prompt = isRecord(turn.promptMetadata) ? turn.promptMetadata : null;
+  const stampedPrompt = readControllerStampedTurnEngine(prompt);
+  return stampedPrompt && prompt ? { presentation: stampedPrompt.presentation, stamped: prompt } : null;
 }
 
 /**
@@ -213,13 +215,13 @@ export function turnEngineStartingLine(turn: {
   owner?: TurnEngineTurnOwner | null;
   runtimes?: readonly ControllerRuntimeStatusEntry[] | null;
 }): string | null {
-  const presentation = turnEngineOfTurn(turn);
-  if (!presentation) {
+  const engine = turnEngineOfTurn(turn);
+  if (!engine) {
     return null;
   }
   return turn.runStatus === "queued"
-    ? presentation.describeWaiting(turn.owner ?? null, turn.runtimes ?? [])
-    : presentation.describeStart(turn.owner ?? null);
+    ? engine.presentation.describeWaiting(turn.owner ?? null, turn.runtimes ?? [], engine.stamped)
+    : engine.presentation.describeStart(turn.owner ?? null);
 }
 
 /**

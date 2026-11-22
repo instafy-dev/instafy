@@ -17,8 +17,13 @@
 //! another engine. An admitted target's job is stamped `agent_jobs.engine =
 //! 'claude-code'` ([`ENGINE`]), whose CHECK forbids a credential, grants and a
 //! plan role. It has no runtime pin: it waits, queued, until one of its
-//! person's own runtimes in its space with Claude Code ready leases it, and one
-//! runs at a time for each person ([`ONE_RUNNING_TURN_INDEX`]).
+//! person's own runtimes in its space with Claude Code ready on the job's
+//! Claude Code login leases it, and one runs at a time on each login
+//! ([`ONE_RUNNING_TURN_INDEX`], 11.19). Dispatch writes the logins a job may
+//! run on (`agent_jobs.claude_code_login_ids`), and the lease the one it took
+//! (`agent_jobs.claude_code_login_id`). A person's logins are rows of the
+//! table `claude_code_logins`, which their own session keeps through
+//! `crate::claude_code_logins`.
 //!
 //! The rest of an admitted job's life reads that column, never payload
 //! metadata (docs/Local-Engine-Turns.md 2.4-2.9, 11.7):
@@ -68,9 +73,12 @@ pub(crate) const READ_ONLY_WORKSPACE_MODE: &str = crate::dispatch::WORKSPACE_MOD
 /// automation's read-only `plan_only`.
 const EXECUTION_MODE_PLAN_ONLY: &str = "plan_only";
 /// The controller's stamp on a lane turn's run, messages, job and reply:
-/// `{"version": 1}`. A client's copy never survives intake.
+/// `{"version": 1}`, with `"loginId": "<uuid>"` where a Claude Code login is
+/// known (11.19, [`stamp`]). A client's copy never survives intake.
 pub(crate) const STAMP_KEY: &str = "claudeCode";
 const STAMP_VERSION: u64 = 1;
+/// The Claude Code login a stamp or a lane conversation state names.
+const LOGIN_ID_KEY: &str = "loginId";
 /// The failure code the controller copies onto a lane turn's failure message.
 /// Only the controller writes it.
 pub(crate) const FAILURE_KEY: &str = "claudeCodeFailure";
@@ -86,13 +94,16 @@ const CONTROLLER_KEYS: [&str; 6] = [
 ];
 /// Nested copies of a message's metadata a client could also fill in.
 const NESTED_METADATA_KEYS: [&str; 3] = ["prompt_metadata", "promptMetadata", "details"];
-/// The partial unique index that lets one lane turn run at a time for each
-/// person (11.7): any number may wait.
-pub(crate) const ONE_RUNNING_TURN_INDEX: &str = "agent_jobs_one_running_claude_code_turn_idx";
+/// The partial unique index that lets one lane turn run at a time on each
+/// Claude Code login, across its person's computers (11.19): any number may
+/// wait, and turns on different logins run at once.
+pub(crate) const ONE_RUNNING_TURN_INDEX: &str = "agent_jobs_one_running_claude_code_login_turn_idx";
 /// The runtime capability that registration attests for a lane-capable
-/// runtime, and its one version.
+/// runtime, its one version (runtime-contracts' `CAPABILITY_VERSION`), and
+/// the key of the Claude Code logins it attests (11.19).
 const CAPABILITY_KEY: &str = "claudeCode";
-const CAPABILITY_VERSION: f64 = 1.0;
+const CAPABILITY_VERSION: u64 = runtime_contracts::claude_code_lane::CAPABILITY_VERSION;
+const CAPABILITY_LOGINS_KEY: &str = "logins";
 /// The controller's attestation of a private self-hosted runtime's owner, as
 /// registration writes it (`runtime::set_self_hosted_access_attestation`) and
 /// the lease reads it.
@@ -181,7 +192,12 @@ const PAYLOAD_METADATA_KEYS: [&str; 7] = [
 /// on the dispatch's own request when every target is one. Never from a
 /// request body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LaneAdmission;
+pub(crate) struct LaneAdmission {
+    /// The Claude Code login the stamps of what it marks name (11.19): a
+    /// target's first login, or, on the dispatch's own request, the first
+    /// login every target shares. None when there is no such login.
+    pub(crate) login_id: Option<Uuid>,
+}
 
 /// What dispatch knows of a target that is a Claude Code agent when
 /// [`check_target`] runs.
@@ -415,16 +431,22 @@ fn check_prompt_text(prompt_text: &str) -> Result<(), Refusal> {
 }
 
 /// Whether one of `person`'s own runtimes in `project_id` could take a lane
-/// turn now, by the lease clause's runtime conditions: private self-hosted,
-/// attested as theirs, without a Personal Browser, dispatch-ready, and with
-/// an attested `claudeCode` capability that is ready. An ambient evaluation
-/// that none could take is never queued (11.7).
+/// turn on `login` now, by the lease clause's runtime conditions: private
+/// self-hosted, attested as theirs, without a Personal Browser,
+/// dispatch-ready, and with an attested `claudeCode` capability of version 2
+/// whose entry for `login` is ready. `login` is the one the turn's job would
+/// take, its first login (11.19): a person with none has no computer that
+/// could. An ambient evaluation that none could take is never queued (11.7).
 pub(crate) async fn a_computer_is_ready(
     state: &AppState,
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     person: Uuid,
+    login: Option<Uuid>,
 ) -> Result<bool, Refusal> {
+    let Some(login) = login else {
+        return Ok(false);
+    };
     let rows = transaction
         .query(
             "select id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
@@ -433,8 +455,8 @@ pub(crate) async fn a_computer_is_ready(
               where project_id = $1
                 and capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
                 and capabilities #>> '{_instafySelfHostedAccess,ownerUserId}' = $2
-                and capabilities #> '{claudeCode,ready}' = 'true'::jsonb",
-            &[project_id, &person.to_string()],
+                and capabilities #> array['claudeCode', 'logins', $3, 'ready'] = 'true'::jsonb",
+            &[project_id, &person.to_string(), &login.to_string()],
         )
         .await
         .map_err(|error| {
@@ -464,7 +486,7 @@ pub(crate) async fn a_computer_is_ready(
             idle_ttl_seconds: record.idle_ttl_seconds,
             display_name: record.display_name.clone(),
         };
-        runtime_takes_lane_turns(state, &record, person)
+        runtime_takes_lane_turns(state, &record, person, login)
             && crate::dispatch::runtime_not_dispatch_ready_detail(&record, Some(&candidate), now)
                 .is_none()
     }))
@@ -473,11 +495,14 @@ pub(crate) async fn a_computer_is_ready(
 /// The lease clause's runtime conditions over a runtime row, apart from
 /// readiness to take jobs: private self-hosted, its attested owner `person`
 /// and never the service runtime user, no Personal Browser, and an attested
-/// `claudeCode` capability of version 1 that is ready.
+/// `claudeCode` capability of version 2, ready, whose entry for `login` is
+/// ready (11.19). Registration never attests a login ready while the program
+/// is not, so the program's `ready` only repeats what the login's says.
 fn runtime_takes_lane_turns(
     state: &AppState,
     record: &runtime::RuntimeRecord,
     person: Uuid,
+    login: Uuid,
 ) -> bool {
     let capabilities = &record.capabilities;
     if !runtime::runtime_is_private_self_hosted(state, &record.provider, capabilities) {
@@ -500,23 +525,45 @@ fn runtime_takes_lane_turns(
     {
         return false;
     }
-    let capability = capabilities.get(CAPABILITY_KEY);
+    let Some(capability) = capabilities.get(CAPABILITY_KEY) else {
+        return false;
+    };
+    let ready = |value: Option<&JsonValue>| {
+        value.and_then(|value| value.get("ready")) == Some(&JsonValue::Bool(true))
+    };
+    // As the lease reads it: a JSON number equal to 2, as `'2'::jsonb` is.
     capability
-        .and_then(|capability| capability.get("version"))
+        .get("version")
         .and_then(JsonValue::as_f64)
-        .is_some_and(|version| version == CAPABILITY_VERSION)
-        && capability.and_then(|capability| capability.get("ready")) == Some(&JsonValue::Bool(true))
+        .is_some_and(|version| version == CAPABILITY_VERSION as f64)
+        && ready(Some(capability))
+        && ready(
+            capability
+                .get(CAPABILITY_LOGINS_KEY)
+                .and_then(|logins| logins.get(login.to_string())),
+        )
 }
 
 /// Stamps a lane turn's metadata as only the controller does:
-/// `claudeCode: {"version": 1}`, `aiAccessMode: "claude-code"` and
-/// `managedAiUsed: false`. Dispatch stamps each Claude Code target's run, and
-/// the person's message and prompt when every target is one; the job payload
-/// ([`payload_metadata`]) and the reply
-/// (`agent::stamp_ai_access_mode_from_job_payload`) are stamped again by their
-/// own builders.
-pub(crate) fn stamp(map: &mut JsonMap<String, JsonValue>) {
-    map.insert(STAMP_KEY.to_string(), json!({ "version": STAMP_VERSION }));
+/// `claudeCode: {"version": 1, "loginId": "<uuid>"}`, `aiAccessMode:
+/// "claude-code"` and `managedAiUsed: false`. `login` is the Claude Code login
+/// the turn runs on (11.19), and the stamp names none without one. Dispatch
+/// stamps each Claude Code target's run with its first login, and the
+/// person's message and prompt when every target is one; the reply
+/// (`agent::stamp_ai_access_mode_from_job_payload`) and a failure message
+/// ([`stamp_failure`]) are stamped with the login the turn's lease took. The
+/// job payload ([`payload_metadata`]) names none: its runtime is told the
+/// login with the lease.
+pub(crate) fn stamp(map: &mut JsonMap<String, JsonValue>, login: Option<Uuid>) {
+    let mut stamp = JsonMap::new();
+    stamp.insert("version".to_string(), json!(STAMP_VERSION));
+    if let Some(login) = login {
+        stamp.insert(
+            LOGIN_ID_KEY.to_string(),
+            JsonValue::String(login.to_string()),
+        );
+    }
+    map.insert(STAMP_KEY.to_string(), JsonValue::Object(stamp));
     map.insert(
         "aiAccessMode".to_string(),
         JsonValue::String(AI_ACCESS_MODE.to_string()),
@@ -545,7 +592,7 @@ pub(crate) fn payload_metadata(
             JsonValue::String(EXECUTION_MODE_PLAN_ONLY.to_string()),
         );
     }
-    stamp(&mut map);
+    stamp(&mut map, None);
     map
 }
 
@@ -593,7 +640,7 @@ pub(crate) async fn a_turn_waits_in(
 }
 
 /// Whether `error`, from leasing a lane job, is the one-running-turn index
-/// refusing a person's second running turn: 23505 on
+/// refusing a second running turn on one Claude Code login: 23505 on
 /// [`ONE_RUNNING_TURN_INDEX`]. That lease takes nothing.
 pub(crate) fn is_second_running_turn(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&SqlState::UNIQUE_VIOLATION)
@@ -818,16 +865,19 @@ pub(crate) fn without_lane_claims(proxy_metadata: &Option<JsonValue>) -> Option<
 /// The conversation state a completion keeps (docs/Local-Engine-Turns.md
 /// 2.6). For a lane job, only the lane's two shapes, rebuilt from their known
 /// fields: a session `{"provider": "claude-code", "version": 1, "sessionId":
-/// <uuid>, "runtimeId": <uuid>}` on the runtime that ran it
-/// (`leased_runtime`), or the reset `{"provider": "claude-code", "version": 1,
-/// "reset": true}`. For any other job, everything but a state that names the
-/// lane's provider: Codex writes a `provider` of its own and never checks it
-/// on resume, so the controller is where the engines are kept apart.
+/// <uuid>, "runtimeId": <uuid>, "loginId": <uuid>}` on the runtime that ran it
+/// (`leased_runtime`), whose `loginId` is the Claude Code login its lease took
+/// (`leased_login`, the job's column, 11.19) and never one the runtime
+/// reports, or the reset `{"provider": "claude-code", "version": 1, "reset":
+/// true}`. For any other job, everything but a state that names the lane's
+/// provider: Codex writes a `provider` of its own and never checks it on
+/// resume, so the controller is where the engines are kept apart.
 pub(crate) fn completion_conversation_state(
     job_id: &Uuid,
     lane: bool,
     state: Option<JsonValue>,
     leased_runtime: Option<Uuid>,
+    leased_login: Option<Uuid>,
 ) -> Option<JsonValue> {
     let state = state?;
     if lane {
@@ -835,9 +885,11 @@ pub(crate) fn completion_conversation_state(
             LaneState::Session {
                 session_id,
                 runtime_id,
+                ..
             } if Some(runtime_id) == leased_runtime => Some(LaneState::Session {
                 session_id,
                 runtime_id,
+                login_id: leased_login,
             }),
             LaneState::Session { .. } => None,
             LaneState::Reset => Some(LaneState::Reset),
@@ -862,9 +914,15 @@ pub(crate) fn completion_conversation_state(
 }
 
 /// A lane conversation state, as [`completion_conversation_state`] keeps it.
+/// A session's `login_id` is the Claude Code login whose folder holds it
+/// (11.19); a session a job saved before its lease named a login has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LaneState {
-    Session { session_id: Uuid, runtime_id: Uuid },
+    Session {
+        session_id: Uuid,
+        runtime_id: Uuid,
+        login_id: Option<Uuid>,
+    },
     Reset,
 }
 
@@ -874,12 +932,19 @@ impl LaneState {
             Self::Session {
                 session_id,
                 runtime_id,
-            } => json!({
-                "provider": PROVIDER,
-                "version": CONVERSATION_STATE_VERSION,
-                "sessionId": session_id.to_string(),
-                "runtimeId": runtime_id.to_string(),
-            }),
+                login_id,
+            } => {
+                let mut state = json!({
+                    "provider": PROVIDER,
+                    "version": CONVERSATION_STATE_VERSION,
+                    "sessionId": session_id.to_string(),
+                    "runtimeId": runtime_id.to_string(),
+                });
+                if let Some(login_id) = login_id {
+                    state[LOGIN_ID_KEY] = JsonValue::String(login_id.to_string());
+                }
+                state
+            }
             Self::Reset => json!({
                 "provider": PROVIDER,
                 "version": CONVERSATION_STATE_VERSION,
@@ -890,7 +955,8 @@ impl LaneState {
 }
 
 /// `state` when it is exactly one of the lane's two shapes: no other key, the
-/// lane's provider, version 1, and either two UUIDs or `reset: true`.
+/// lane's provider, version 1, and either a session's two UUIDs, with a
+/// login's third or without it, or `reset: true`.
 fn lane_state(state: &JsonValue) -> Option<LaneState> {
     let map = state.as_object()?;
     if map.get("provider").and_then(JsonValue::as_str) != Some(PROVIDER)
@@ -898,19 +964,22 @@ fn lane_state(state: &JsonValue) -> Option<LaneState> {
     {
         return None;
     }
-    let uuid = |key: &str| {
-        map.get(key)
-            .and_then(JsonValue::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-    };
-    match map.len() {
-        3 if map.get("reset") == Some(&JsonValue::Bool(true)) => Some(LaneState::Reset),
-        4 => Some(LaneState::Session {
-            session_id: uuid("sessionId")?,
-            runtime_id: uuid("runtimeId")?,
-        }),
-        _ => None,
+    let uuid = |value: &JsonValue| value.as_str().and_then(|value| Uuid::parse_str(value).ok());
+    if map.len() == 3 && map.get("reset") == Some(&JsonValue::Bool(true)) {
+        return Some(LaneState::Reset);
     }
+    let login_id = match map.get(LOGIN_ID_KEY) {
+        Some(value) => Some(uuid(value)?),
+        None => None,
+    };
+    if map.len() != 4 + usize::from(login_id.is_some()) {
+        return None;
+    }
+    Some(LaneState::Session {
+        session_id: uuid(map.get("sessionId")?)?,
+        runtime_id: uuid(map.get("runtimeId")?)?,
+        login_id,
+    })
 }
 
 /// Drops every Codex run log from a lane job's `artifacts`, the only artifact
@@ -1030,34 +1099,39 @@ pub(crate) fn reported_failure_code(artifacts: &JsonValue) -> Option<&'static st
 
 /// Stamps the failure message of a lane turn with what its author's Studio
 /// words it by (docs/Local-Engine-Turns.md 5.5): the controller's own stamps
-/// ([`stamp`]: `claudeCode`, `aiAccessMode: "claude-code"` and
-/// `managedAiUsed: false`) and the failure code as [`FAILURE_KEY`]. Every
-/// writer of such a message stamps it so, the sweeps and a runtime stop
-/// included: a message a member records keeps only `aiAccessMode`, so
-/// Studio, which shows a lane failure only for a message with the
-/// controller's stamp, never takes one for a turn's failure.
-pub(crate) fn stamp_failure(map: &mut JsonMap<String, JsonValue>, code: &str) {
-    stamp(map);
+/// ([`stamp`]: `claudeCode`, with `login`, the Claude Code login the turn's
+/// lease took, `aiAccessMode: "claude-code"` and `managedAiUsed: false`) and
+/// the failure code as [`FAILURE_KEY`]. Every writer of such a message stamps
+/// it so, the sweeps and a runtime stop included: a message a member records
+/// keeps only `aiAccessMode`, so Studio, which shows a lane failure only for
+/// a message with the controller's stamp, never takes one for a turn's
+/// failure.
+pub(crate) fn stamp_failure(map: &mut JsonMap<String, JsonValue>, code: &str, login: Option<Uuid>) {
+    stamp(map, login);
     map.insert(FAILURE_KEY.to_string(), JsonValue::String(code.to_string()));
 }
 
 /// The conversation state the next lane turn resumes
-/// (docs/Local-Engine-Turns.md 2.7, 11.9): that of the latest lane job, of
-/// those that saved a lane-shaped one, in `conversation_id` of `project_id`,
-/// for `agent_id` and of `person` (`payload.user_id`), whichever computer ran
-/// it. A job that saved none, such as a stopped turn or one a sweep or runtime
-/// stop failed, is passed over. None when there is no such job, or when its
-/// state is the reset: the next turn then starts a new session. The runtime
-/// resumes the session where its computer holds it, and starts a new one in
-/// the same turn where it does not.
+/// (docs/Local-Engine-Turns.md 2.7, 11.9, 11.19): that of the latest lane
+/// job, of those that saved a lane-shaped one, in `conversation_id` of
+/// `project_id`, for `agent_id`, of `person` (`payload.user_id`) and on
+/// `login`, the Claude Code login the next turn's job expects (its first),
+/// whichever computer ran it. A session lives in one login's folder, so
+/// another login never resumes it, and a turn whose job names no login has
+/// none to resume. A job that saved none, such as a stopped turn or one a
+/// sweep or runtime stop failed, is passed over. None when there is no such
+/// job, or when its state is the reset: the next turn then starts a new
+/// session. The runtime resumes the session where its computer holds it, and
+/// starts a new one in the same turn where it does not.
 pub(crate) async fn load_session(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
     person: &Uuid,
     agent_id: Option<&Uuid>,
+    login: Option<&Uuid>,
 ) -> Result<Option<JsonValue>, Refusal> {
-    let Some(agent_id) = agent_id else {
+    let (Some(agent_id), Some(login)) = (agent_id, login) else {
         return Ok(None);
     };
     let row = transaction
@@ -1069,6 +1143,7 @@ pub(crate) async fn load_session(
                 and j.engine = 'claude-code'
                 and (j.payload ->> 'user_id') = $3
                 and (j.payload #>> '{metadata,agent,id}') = $4
+                and j.claude_code_login_id = $6
                 and j.proxy_metadata -> 'conversation' is not null
                 and j.proxy_metadata -> 'conversation' <> 'null'::jsonb
                 and (j.proxy_metadata #>> '{conversation,provider}') = $5
@@ -1080,6 +1155,7 @@ pub(crate) async fn load_session(
                 &person.to_string(),
                 &agent_id.to_string(),
                 &PROVIDER,
+                login,
             ],
         )
         .await
@@ -1505,26 +1581,51 @@ mod tests {
     }
 
     /// A lane job keeps only a well-formed session on the runtime that ran
-    /// it, or the reset, rebuilt from its known fields; any other job keeps
-    /// its state unless it names the lane's provider.
+    /// it, with the login its lease took whatever login the runtime names, or
+    /// the reset, rebuilt from their known fields; any other job keeps its
+    /// state unless it names the lane's provider.
     #[test]
     fn only_well_formed_lane_states_are_kept() {
         let (job, runtime, session) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let login = Uuid::new_v4();
         let lane_session = json!({
             "provider": "claude-code",
             "version": 1,
             "sessionId": session.to_string(),
             "runtimeId": runtime.to_string(),
         });
+        let kept_session = with_key(&lane_session, "loginId", json!(login.to_string()));
         let reset = json!({ "provider": "claude-code", "version": 1, "reset": true });
         let keep = |lane: bool, state: JsonValue| {
-            completion_conversation_state(&job, lane, Some(state), Some(runtime))
+            completion_conversation_state(&job, lane, Some(state), Some(runtime), Some(login))
         };
-        assert_eq!(keep(true, lane_session.clone()), Some(lane_session.clone()));
+        assert_eq!(keep(true, lane_session.clone()), Some(kept_session.clone()));
         assert_eq!(keep(true, reset.clone()), Some(reset.clone()));
+        // The login is the lease's, never the runtime's.
+        assert_eq!(
+            keep(
+                true,
+                with_key(&lane_session, "loginId", json!(Uuid::new_v4().to_string()))
+            ),
+            Some(kept_session.clone())
+        );
+        // A lease that took no login keeps a session without one.
+        assert_eq!(
+            completion_conversation_state(
+                &job,
+                true,
+                Some(lane_session.clone()),
+                Some(runtime),
+                None
+            ),
+            Some(lane_session.clone())
+        );
         for malformed in [
             with_key(&lane_session, "extra", json!(true)),
             with_key(&lane_session, "sessionId", json!("not-a-uuid")),
+            with_key(&lane_session, "loginId", json!("not-a-uuid")),
+            with_key(&lane_session, "loginId", JsonValue::Null),
+            with_key(&kept_session, "extra", json!(true)),
             with_key(
                 &lane_session,
                 "runtimeId",
@@ -1534,6 +1635,7 @@ mod tests {
             with_key(&lane_session, "provider", json!("codex")),
             with_key(&reset, "reset", json!(false)),
             with_key(&reset, "sessionId", json!(session.to_string())),
+            with_key(&reset, "loginId", json!(login.to_string())),
             json!({ "provider": "codex", "threadId": "t" }),
             json!("claude-code"),
             JsonValue::Null,
@@ -1541,13 +1643,24 @@ mod tests {
             assert_eq!(keep(true, malformed.clone()), None, "{malformed}");
         }
         assert_eq!(
-            completion_conversation_state(&job, true, Some(lane_session.clone()), None),
+            completion_conversation_state(
+                &job,
+                true,
+                Some(lane_session.clone()),
+                None,
+                Some(login)
+            ),
             None,
             "a session on no runtime"
         );
         assert_eq!(
-            completion_conversation_state(&job, true, None, Some(runtime)),
+            completion_conversation_state(&job, true, None, Some(runtime), Some(login)),
             None
+        );
+        // What the loader reads back is what completion kept.
+        assert_eq!(
+            lane_state(&kept_session).map(LaneState::to_json),
+            Some(kept_session.clone())
         );
 
         let codex = json!({ "provider": "codex", "threadId": "thread-1" });
@@ -1679,22 +1792,29 @@ mod tests {
         );
 
         // A failure message carries the controller's stamps beside its code,
-        // over anything the message's own metadata said.
+        // the login its lease took among them, over anything the message's
+        // own metadata said.
+        let login = Uuid::new_v4();
         let mut map = JsonMap::new();
         map.insert("source".to_string(), json!("controller"));
         map.insert("aiAccessMode".to_string(), json!("managed"));
         map.insert("managedAiUsed".to_string(), json!(true));
-        stamp_failure(&mut map, MACHINE_STOPPED);
+        map.insert("claudeCode".to_string(), json!({ "version": 9 }));
+        stamp_failure(&mut map, MACHINE_STOPPED, Some(login));
         assert_eq!(
             JsonValue::Object(map),
             json!({
                 "source": "controller",
-                "claudeCode": { "version": 1 },
+                "claudeCode": { "version": 1, "loginId": login.to_string() },
                 "aiAccessMode": "claude-code",
                 "managedAiUsed": false,
                 "claudeCodeFailure": MACHINE_STOPPED,
             })
         );
+        // Without a login, the stamp names none.
+        let mut map = JsonMap::new();
+        stamp_failure(&mut map, MACHINE_STOPPED, None);
+        assert_eq!(map["claudeCode"], json!({ "version": 1 }));
     }
 
     /// The codes only the controller writes, a runtime stop's and the

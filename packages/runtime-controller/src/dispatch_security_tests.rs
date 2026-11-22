@@ -405,6 +405,7 @@ async fn dispatch_security_jobs_never_pin_the_reserved_credential_id() -> anyhow
         &Uuid::new_v4(),
         None,
         Some(crate::config::managed_ai_credential_id()),
+        &[],
         None,
         None,
     )

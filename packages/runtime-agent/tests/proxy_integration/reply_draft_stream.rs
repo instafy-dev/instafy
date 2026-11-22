@@ -287,6 +287,7 @@ async fn run_turn(plain: bool) -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
 
     // Every draft the job writes, and when.

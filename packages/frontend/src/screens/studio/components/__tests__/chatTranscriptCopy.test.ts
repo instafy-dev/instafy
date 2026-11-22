@@ -299,7 +299,7 @@ describe("chatTranscriptCopy", () => {
       turnEngineOwnerOf: () => ({ isViewer: true, name: "Sam" }),
       runtimeStatuses: [{
         runtimeId: "runtime-sam",
-        claudeCode: { ready: true, reason: null, cli: "2.2.0", verified: false, planSignIn: true },
+        claudeCode: { ready: true, reason: null, cli: "2.2.0", verified: false, logins: {} },
       } as ControllerRuntimeStatusEntry],
     };
     expect(resolveCopyableMessageContent(planLimit, sender)).toMatch(

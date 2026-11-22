@@ -219,6 +219,12 @@ pub struct LeaseJob {
     /// for every other job. A value this runtime does not know never runs as anything else.
     #[serde(default)]
     pub engine: Option<String>,
+    /// The Claude Code login a local-engine turn's lease took (the controller's
+    /// `agent_jobs.claude_code_login_id`, docs/Local-Engine-Turns.md 11.19): the turn runs with
+    /// that login's folder of this computer's grant, and a turn whose login the grant does not
+    /// have runs nothing (`claude_code::job`). Absent for every other job.
+    #[serde(default, rename = "claude_code_login_id")]
+    pub claude_code_login_id: Option<Uuid>,
 }
 
 impl LeaseJob {

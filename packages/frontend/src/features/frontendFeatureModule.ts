@@ -4,7 +4,12 @@ import {
   type ComponentType,
   type ReactNode,
 } from "react";
-import type { AssistantProviderDefinition } from "@instafy/sdk/agents";
+import type {
+  AssistantProviderDefinition,
+  ControllerAgentProfile,
+  CreateMyAgentInput,
+  UpdateMyAgentInput,
+} from "@instafy/sdk/agents";
 import type {
   CapabilityExecutorProviderDefinition,
   CapabilityProviderDefinition,
@@ -118,9 +123,15 @@ export interface FrontendTurnEnginePresentation {
    * What one of the engine's turns reads while it waits for a computer to
    * take it (its run is queued, docs/Local-Engine-Turns.md 11.14), in the same
    * places. `runtimes` are the space's status entries the viewer has, of which
-   * only the viewer's own say anything about the engine.
+   * only the viewer's own say anything about the engine. `metadata` is the
+   * metadata that carries the controller's stamp: the run's, or until the page
+   * has it, its prompt's.
    */
-  describeWaiting(owner: TurnEngineTurnOwner | null, runtimes: readonly ControllerRuntimeStatusEntry[]): string;
+  describeWaiting(
+    owner: TurnEngineTurnOwner | null,
+    runtimes: readonly ControllerRuntimeStatusEntry[],
+    metadata?: Readonly<Record<string, unknown>> | null,
+  ): string;
   /** The sentence the person whose turn failed reads. */
   describeTurnFailure(failure: TurnEngineFailureInput): string;
   /** What everyone else reads for a failed turn; `ownerName` is null when the chat does not know it. */
@@ -133,8 +144,19 @@ export interface FrontendTurnEnginePresentation {
   describeSendRefusal(refusal: { code: string; details: unknown }): string | null;
   /** The sentence for a refused Steer into one of the engine's turns, or null. */
   describeSteerRefusal(code: string): string | null;
-  /** The plain-text line under a reply's header; `owner` is null when the chat cannot tell whose turn it was. */
-  describeSpeaker(owner: TurnEngineTurnOwner | null): string;
+  /**
+   * The plain-text line under a reply's header; `owner` is null when the chat
+   * cannot tell whose turn it was. `metadata` is the reply's, with the
+   * controller's stamp.
+   */
+  describeSpeaker(owner: TurnEngineTurnOwner | null, metadata?: Readonly<Record<string, unknown>> | null): string;
+  /**
+   * For words that read what the engine loads for the viewer, such as their
+   * own sign-ins: called while a line of the engine's shows, with `onChange`
+   * for when its lines may read differently. Returns the call that stops it.
+   * Without it, a line reads the same until what it is given changes.
+   */
+  subscribe?(onChange: () => void): () => void;
 }
 
 /** What a waiting turn's row gives the engine's note for the person whose turn it is. */
@@ -152,12 +174,72 @@ export interface FrontendTurnEngineWaitingNoteProps {
   starting: boolean;
   /** The controller this Studio talks to now, or null when it has none. */
   resolveControllerUrl: () => Promise<string | null>;
+  /** The waiting run's metadata, with the controller's stamp, when the chat has it. */
+  runMetadata?: Readonly<Record<string, unknown>> | null;
 }
 
 /** What the agent editor gives the engine's note under its choice. */
 export interface FrontendTurnEngineAgentAiNoteProps {
   /** The controller this Studio talks to now, or null when it has none. */
   resolveControllerUrl: () => Promise<string | null>;
+}
+
+/** The fields of an agent the editor itself sends: its profile, and which AI it uses. */
+export const AGENT_EDITOR_OWN_FIELDS = [
+  "handle",
+  "displayName",
+  "description",
+  "bio",
+  "avatarSeed",
+  "provider",
+  "credentialId",
+  "model",
+  "reasoningEffort",
+  "projectId",
+  "runtimeId",
+] as const;
+
+/**
+ * Fields an engine adds to the request that saves an agent whose AI it is
+ * (`POST /me/agents`, `PATCH /me/agents/:id`), named as the controller names
+ * them. The editor sends them beside the engine's id, never one of its own
+ * fields ({@link AGENT_EDITOR_OWN_FIELDS}).
+ */
+export type TurnEngineAgentAiRequestFields = Readonly<
+  Omit<Partial<CreateMyAgentInput & UpdateMyAgentInput>, (typeof AGENT_EDITOR_OWN_FIELDS)[number]>
+>;
+
+const AGENT_EDITOR_OWN_FIELD_NAMES: ReadonlySet<string> = new Set(AGENT_EDITOR_OWN_FIELDS);
+
+/** An engine's fields as the editor sends them: without any field the editor sends itself. */
+export function turnEngineAgentAiRequestFields(
+  fields: TurnEngineAgentAiRequestFields | null | undefined,
+): TurnEngineAgentAiRequestFields {
+  if (!fields) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(fields).filter(([name]) => !AGENT_EDITOR_OWN_FIELD_NAMES.has(name)),
+  ) as TurnEngineAgentAiRequestFields;
+}
+
+/** What the agent editor gives the engine's own fields while it is the agent's AI. */
+export interface FrontendTurnEngineAgentAiFieldsProps {
+  /** The agent being edited, as the agents list returned it; null while a new one is made. */
+  agent: ControllerAgentProfile | null;
+  /** What the fields set since the editor opened (or since the engine was chosen), or null for nothing yet. */
+  fields: TurnEngineAgentAiRequestFields | null;
+  /** Sets what saving sends; setting anything makes the editor's draft one to save. */
+  onFieldsChange: (fields: TurnEngineAgentAiRequestFields) => void;
+  /** The editor is saving. */
+  disabled: boolean;
+  /** The controller this Studio talks to now, or null when it has none. */
+  resolveControllerUrl: () => Promise<string | null>;
+}
+
+/** What a list of agents gives the engine's name for one agent's AI. */
+export interface FrontendTurnEngineAgentAiLabelProps {
+  agent: ControllerAgentProfile;
 }
 
 /**
@@ -181,6 +263,18 @@ export interface FrontendTurnEngineAgentAi {
   describeSaveRefusal(refusal: { code: string; details: unknown }): string | null;
   /** Under the choice while it is chosen: what it still needs, such as setting it up here; often nothing. */
   Note?: ComponentType<FrontendTurnEngineAgentAiNoteProps>;
+  /**
+   * More of the agent's AI under the choice while it is chosen, such as which
+   * of the person's sign-ins the agent's turns run on: fields the editor
+   * shows and whose values saving sends. Renders nothing where there is
+   * nothing to choose.
+   */
+  Fields?: ComponentType<FrontendTurnEngineAgentAiFieldsProps>;
+  /**
+   * The AI's name for one agent, wherever an agent's AI is listed, when
+   * `label` alone does not say all of it; plain text. Without it, `label`.
+   */
+  AgentLabel?: ComponentType<FrontendTurnEngineAgentAiLabelProps>;
 }
 
 /** What Your AI gives a turn engine's row (docs/Local-Engine-Turns.md 5.3). */

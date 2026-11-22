@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ControllerRuntimeClaudeCode,
+  ControllerRuntimeClaudeCodeLogin,
   ControllerRuntimeStatusEntry,
 } from "../../../services/runtimeController/runtimes";
 import { ClaudeCodeWaitingNote } from "../ClaudeCodeWaitingNote";
@@ -18,8 +19,20 @@ const CONTROLLER_URL = "https://controller.example.test";
 const PROJECT_ID = "11111111-2222-4333-8444-555555555555";
 const OTHER_PROJECT_ID = "22222222-2222-4333-8444-555555555555";
 const RUNTIME_ID = "99999999-8888-4777-8666-555555555555";
+// Two of the person's Claude Code logins (docs/Local-Engine-Turns.md 11.19).
+const WORK = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+const PERSONAL = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+const READY_LOGIN: ControllerRuntimeClaudeCodeLogin = { ready: true, reason: null, resetsAt: null, planSignIn: true, signedIn: true };
+// The run's stamp, with the login its job runs on.
+const RAN_ON_WORK = { aiAccessMode: "claude-code", claudeCode: { version: 1, loginId: WORK } };
 
-type DesktopStatus = { supported: boolean; found: boolean; consented: boolean; path?: string };
+type DesktopStatus = {
+  supported: boolean;
+  found: boolean;
+  consented: boolean;
+  path?: string;
+  logins?: Array<{ id: string; folder: string | null }>;
+};
 
 let desktopStatus: DesktopStatus;
 let desktopRuntime: { running: boolean; projectId?: string; runtimeId?: string };
@@ -29,7 +42,7 @@ function entry(claudeCode: Partial<ControllerRuntimeClaudeCode> | null): Control
     runtimeId: RUNTIME_ID,
     status: "online",
     claudeCode: claudeCode
-      ? { ready: true, reason: null, cli: "2.1.325", verified: true, planSignIn: true, resetsAt: null, ...claudeCode }
+      ? { ready: true, reason: null, cli: "2.1.325", verified: true, logins: { [WORK]: READY_LOGIN }, ...claudeCode }
       : null,
   } as ControllerRuntimeStatusEntry;
 }
@@ -42,7 +55,13 @@ describe("the note under a waiting Claude Code turn", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     forgetClaudeCodeDesktopRefusalForTests();
-    desktopStatus = { supported: true, found: true, consented: true, path: "/opt/homebrew/bin/claude" };
+    desktopStatus = {
+      supported: true,
+      found: true,
+      consented: true,
+      path: "/opt/homebrew/bin/claude",
+      logins: [{ id: WORK, folder: null }],
+    };
     desktopRuntime = { running: false };
     startOnThisComputer = vi.fn<() => void>();
     Object.assign(window, {
@@ -67,10 +86,12 @@ describe("the note under a waiting Claude Code turn", () => {
     runtimes = [],
     start = startOnThisComputer,
     starting = false,
+    runMetadata = RAN_ON_WORK,
   }: {
     runtimes?: ControllerRuntimeStatusEntry[];
     start?: (() => void) | null;
     starting?: boolean;
+    runMetadata?: Record<string, unknown> | null;
   } = {}) {
     await act(async () => {
       root.render(
@@ -80,6 +101,7 @@ describe("the note under a waiting Claude Code turn", () => {
           startOnThisComputer={start}
           starting={starting}
           resolveControllerUrl={async () => CONTROLLER_URL}
+          runMetadata={runMetadata}
         />,
       );
     });
@@ -149,7 +171,35 @@ describe("the note under a waiting Claude Code turn", () => {
 
   it("leaves a plan's limit to the line, which says when it resets", async () => {
     const resetsAt = new Date(Date.now() + 60 * 60_000).toISOString();
-    await render({ runtimes: [entry({ ready: false, reason: null, resetsAt })] });
+    const held = { ...READY_LOGIN, ready: false, reason: "plan_limit" as const, resetsAt };
+    await render({ runtimes: [entry({ logins: { [WORK]: held } })] });
+    expect(container.innerHTML).toBe("");
+    // As the line does, the note reads the turn's own login: another one held
+    // isn't what this turn waits for.
+    await render({ runtimes: [entry({ logins: { [WORK]: READY_LOGIN, [PERSONAL]: held } })] });
+    expect(note()).toContain("Start this space on this computer to run it.");
+  });
+
+  // 11.19: a computer runs a turn only on a login set up there.
+  it("says the turn's login isn't set up here, rather than offering a start that wouldn't run it", async () => {
+    desktopStatus = { ...desktopStatus, logins: [{ id: PERSONAL, folder: "/Users/sam/.claude-personal" }] };
+    await render();
+    expect(note()).toBe(
+      "The Claude Code login this turn runs on isn't set up on this computer. Set it up in Your AI to run it here.",
+    );
+    expect(startButton()).toBeNull();
+    // A stamp without a login says nothing of one.
+    await render({ runMetadata: { aiAccessMode: "claude-code", claudeCode: { version: 1 } } });
+    expect(note()).toContain("Start this space on this computer to run it.");
+  });
+
+  it("says what keeps the turn's login on this computer from taking it", async () => {
+    desktopRuntime = { running: true, projectId: PROJECT_ID, runtimeId: RUNTIME_ID };
+    const unsafe = { ...READY_LOGIN, ready: false, reason: "binary_unsafe" as const };
+    await render({ runtimes: [entry({ logins: { [WORK]: unsafe, [PERSONAL]: READY_LOGIN } })] });
+    expect(note()).toContain("Instafy Desktop won't start this copy of Claude Code");
+    // Another login's trouble is not this turn's.
+    await render({ runtimes: [entry({ logins: { [WORK]: READY_LOGIN, [PERSONAL]: unsafe } })] });
     expect(container.innerHTML).toBe("");
   });
 
