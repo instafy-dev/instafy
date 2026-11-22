@@ -46,7 +46,7 @@ endpoints, token, jobs and event stream.
 | `serve <dir\|gallery>` | Static server + binder. Flags: `--port 4180`, `--host 127.0.0.1`, `--preview` (no token, for Studio's preview card: answers localhost and the private preview `instafy preview open --port <port>` opened for this port; see Security), `--no-token` (localhost only), `--agent-executor` (the owner's opt-in: run agent intents as Octo turns on their own login, for clicks on this machine only; with `--space <id>` where the site's Octo thread is created, `--conversation <id>` that thread's parent, `--agent-conversation <id>` an existing conversation instead, `--agent-budget 20` Octo turns per site per hour, repairs included, `--server-url <url>`), `--dry-run` (print those prompts instead), `--confirm`, `--allow-local`, `--allow-env NAME` (pass a credential-like env name to handlers), `--public-url <url>` (extra accepted Origin and Host behind a tunnel; it needs the viewer token, also with `--preview`, and `serve` prints its `#k=` link), `--trust-proxy` (believe `x-forwarded-host`/`-proto`), `--json` (NDJSON log), `--verbose` |
 | `init <dir>` | Writes a starter `bound.json`, `index.html` and `handlers/hello.mjs`. Keeps existing files unless `--force` |
 | `init <dir> --starter <name>` | A themed page instead: `compare`, `ranked`, `timeline`, `checklist` or `blank`, with the shared `theme.css` and `site.js` (sources in `src/starters`; `npm run test:starters` checks them in Chrome) |
-| `card <dir> [--json]` | In a space, the card step a check that passes takes, without the check: for a page whose card was never opened (the space's record of its pages doesn't hold it), while no preview shows it, serves the page and posts its card, titled from the page. As for a check, none for a page that loads files from outside its folder, or that says "checked &lt;date&gt;" in typed words (it answers with the check's lines for them, `typed` in `--json`). Exit 0 posted, 1 the card's command failed, 2 no card to post. Instafy's runtime runs it for a page a turn made and left without a card |
+| `card <dir> [--json]` | In a space, the card step a check that passes takes, without the check: for a page whose card was never opened (the space's record of its pages doesn't hold it), while no preview shows it, serves the page and posts its card, titled from the page. As for a check, none for a page that loads files from outside its folder, or that says "checked &lt;date&gt;" or "seen &lt;date&gt;" in typed words (it answers with the check's lines for them, `typed` in `--json`). Exit 0 posted, 1 the card's command failed, 2 no card to post. Instafy's runtime runs it for a page a turn made and left without a card |
 | `command <dir> <name> [json-args]` | Pushes `select`, `highlight`, `toast` or `reload` to every open viewer |
 | `confirm <dir> <job\|all> [--no]` | Approves or declines jobs waiting in `needs_confirm` (also: type `y <job>` in the `serve` terminal; the job id is required there) |
 | `doctor [dir]` | Checks Node, `bound.json`, handlers, the controller settings (with `--agent-executor`), and lints the site: client not loaded, quoted `{{placeholders}}`, free-text params in agent prompts, URL params without `allowed_origins`, agent intents without a `ref` param, `www.` sources, records files missing from `results.files`, credential-like `env` names. Never prints tokens |
@@ -235,10 +235,11 @@ cannot read (a name, a function of the page's own) may link its page, so the che
 "checked <date>" or "seen <date>" in typed words fails the check too, linked or not, in a page's HTML, its own scripts
 or `data.json`: `site.trust` and `site.cite` write those words themselves, from how a fact's page was read (its
 `viewer`), so a page nobody read, or a form that was never sent, is linked by its name alone. For each such line the
-check says the words to delete, which is always the fix, and for a line a fact of `data.json` holds that says how its
-page was read, that the helper writes its caption already; it quotes nothing the helpers draw. A second check that
-finds typed words says that rewording never passes (the check keeps its last count in the site's `.bind/check.json`,
-which is never served or saved with the space's files). The date is a day and a
+check says the words to delete, read from the whole line however long it is, which is always the fix, and for a line
+a fact of `data.json` holds that says how its page was read, that the helper writes its caption already; it quotes
+nothing the helpers draw, and says each time that rewording a line around those words never passes. A fact's
+`viewer` names its reader and is never drawn, so it is never such a line; a page's `<meta name="description">`, which
+its card shows under its title, is read as one. The date is a day and a
 month by name, or a whole date in numbers, with or without a colon or a weekday before it ("Last checked: Thu 20 Nov").
 A fact `site.trust` or `site.cite` draws is never named, whatever its value says, nor a line that says the opposite
 ("never checked 20 Nov") or tells a visitor when ("can be seen 3 Oct to 15 Jan", "bags must be checked"). In a space's
@@ -251,7 +252,9 @@ page (`data.json`'s title, else the page's own), and says what it answered; any 
 check never holds the card back, except for two findings. A page with typed "checked <date>" or "seen <date>" words
 says on a page to share that something was read, so its card waits until they are deleted: its check ends with that
 step and no card command, `instafy bind card` posts none, and the card's own command (`instafy preview open` for a
-page `instafy bind serve` serves) answers with the same lines, exit 1, and starts nothing. The other is files from
+page `instafy bind serve` serves, also one already running, which it reads from the process on the port or, where
+that can't be read, from the server's own `.bind/server.json`) answers with the same lines, exit 1, and starts
+nothing; it reads its `--summary` the same way. The other is files from
 outside the page's folder (below). A page the record holds had its card, in this chat or another, and may have been
 stopped on purpose, so its check only names the command. A page is served from its own folder, so a page that loads a
 file from outside it fails the check: `../another-page/site.js` in an element, a style or a script (also through a

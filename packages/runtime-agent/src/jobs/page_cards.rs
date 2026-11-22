@@ -94,10 +94,13 @@ const NOT_READY_TO_OPEN_SEVERAL: &str =
 /// The binder's reason for holding back the card of a page that says "checked <date>" or "seen
 /// <date>" in typed words, as `instafy bind card --json` answers it (the binder's own test pins
 /// these words).
-const SAYS_CHECKED_IN_TYPED_WORDS: &str = "it says \"checked <date>\" in typed words";
-/// The line under the reply of a turn that left such a page, and of one that left several.
-const NOT_READY_CHECKED: &str = "The new page isn't ready to open: a line on it says \"checked\" with a date, which has to be fixed first.";
-const NOT_READY_CHECKED_SEVERAL: &str = "The new pages aren't ready to open: lines on them say \"checked\" with a date, which has to be fixed first.";
+const SAYS_CHECKED_IN_TYPED_WORDS: &str =
+    "it says \"checked <date>\" or \"seen <date>\" in typed words";
+/// The line under the reply of a turn that left such a page, and of one that left several. Both
+/// words, as the binder holds the card for either: a page that says only "seen 20 Nov" has no
+/// line that says "checked".
+const NOT_READY_CHECKED: &str = "The new page isn't ready to open: a line on it says \"checked\" or \"seen\" with a date, which has to be fixed first.";
+const NOT_READY_CHECKED_SEVERAL: &str = "The new pages aren't ready to open: lines on them say \"checked\" or \"seen\" with a date, which has to be fixed first.";
 
 /// Posts the card of each page the turn left without one ([`pages_without_a_card`]), before the
 /// reply. `files` are the turn's files as its save lists them, `events` its Codex events, from
@@ -105,7 +108,7 @@ const NOT_READY_CHECKED_SEVERAL: &str = "The new pages aren't ready to open: lin
 /// all; a Stop ends it. Returns the lines that go under the reply: [`NOT_READY_TO_OPEN`] when the
 /// binder held back the card of a page nobody can open, [`NOT_READY_TO_OPEN_SEVERAL`] when it held
 /// back more than one, and [`NOT_READY_CHECKED`] or [`NOT_READY_CHECKED_SEVERAL`] the same way for
-/// pages that say "checked <date>" in typed words.
+/// pages that say "checked <date>" or "seen <date>" in typed words.
 pub(super) async fn post_missing_cards(
     workspace_dir: &Path,
     project_id: &Uuid,
@@ -394,7 +397,8 @@ enum Posted {
     No,
     /// The binder held the card back for what the page does: nobody can open it.
     HeldBack,
-    /// The binder held the card back for what the page says: "checked <date>" in typed words.
+    /// The binder held the card back for what the page says: "checked <date>" or "seen <date>" in
+    /// typed words.
     SaysChecked,
     Stopped,
 }
@@ -501,8 +505,8 @@ async fn post_card(
             if status.code() == Some(2) {
                 info!(folder, said = %said, "no card to post for a page the turn left without one");
                 // Served from its own folder, it can't load files from outside it: nobody can open
-                // it. Nor one whose card waits for typed "checked <date>" words to be deleted. Any
-                // other answer says it has its card, or that none can be posted here.
+                // it. Nor one whose card waits for typed "checked <date>" or "seen <date>" words to
+                // be deleted. Any other answer says it has its card, or that none can be posted here.
                 if said == LOADS_FILES_FROM_OUTSIDE {
                     return Posted::HeldBack;
                 }
@@ -739,7 +743,7 @@ case "$3" in
   ./sites/hangs) sleep 300 & echo "helper=$!" >> "$seen"; sleep 300 ;;
   ./sites/none) echo '{{"posted":false,"reason":"a preview shows it"}}'; exit 2 ;;
   ./sites/borrow*) echo '{{"posted":false,"reason":"it loads files from outside its folder"}}'; exit 2 ;;
-  ./sites/type*) echo '{{"posted":false,"reason":"it says \"checked <date>\" in typed words","typed":[{{"file":"index.html","line":"Specs are checked 20 Nov 2026"}}]}}'; exit 2 ;;
+  ./sites/type*) echo '{{"posted":false,"reason":"it says \"checked <date>\" or \"seen <date>\" in typed words","typed":[{{"file":"index.html","line":"Prices seen 20 Nov","words":["seen 20 Nov"]}}]}}'; exit 2 ;;
 esac
 echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer":{{"status":"live"}}}}'
 "#,
@@ -999,7 +1003,7 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         );
         assert_eq!(
             NOT_READY_CHECKED,
-            "The new page isn't ready to open: a line on it says \"checked\" with a date, which has to be fixed first."
+            "The new page isn't ready to open: a line on it says \"checked\" or \"seen\" with a date, which has to be fixed first."
         );
         let said = run(
             made(&["typed", "types"]),
@@ -1010,7 +1014,7 @@ echo '{{"posted":true,"title":"A page","command":"instafy preview open","answer"
         assert_eq!(said, vec![NOT_READY_CHECKED_SEVERAL.to_string()]);
         assert_eq!(
             NOT_READY_CHECKED_SEVERAL,
-            "The new pages aren't ready to open: lines on them say \"checked\" with a date, which has to be fixed first."
+            "The new pages aren't ready to open: lines on them say \"checked\" or \"seen\" with a date, which has to be fixed first."
         );
         let lines = seen();
         assert_eq!(

@@ -78,9 +78,9 @@ check      Does the site show every item the request named (each product, stop o
            before telling anyone the page is done. In a space, while no preview shows the site, a check that
            passes on a new page (one whose card was never opened) serves it and posts its card itself, and any
            other check ends with the command that does: a failing check never holds the card back, except for a
-           page that loads files from outside its folder and one with typed "checked <date>" words, whose card
-           waits until they are deleted (a second check that finds them says rewording never passes; the card's
-           own command names them too, and posts no card). An item whose words a script holds where the check
+           page that loads files from outside its folder and one with typed "checked <date>" or "seen <date>"
+           words, whose card waits until they are deleted (rewording never passes; the card's own command names
+           them too, and posts no card). An item whose words a script holds where the check
            cannot place them (or fetches from another site) is looked for on the page as drawn, in the same step:
            where the page is served (a new page's card is posted first, as a passing check posts it), the page
            check (\`instafy preview check\`) loads it, and the check answers with what it drew, failing (1) for
@@ -89,8 +89,8 @@ check      Does the site show every item the request named (each product, stop o
 card       The card step a check that passes takes, without the check: in a space, for a page whose card was
            never opened, while no preview shows it, it serves the page and posts its card, titled from the page.
            As for a check, none for a page that loads files from outside its folder, or that says "checked
-           <date>" in typed words (it answers with the check's lines for them). Exit 0 when it posted the card,
-           1 when the card's command failed, 2 when there is no card to post.
+           <date>" or "seen <date>" in typed words (it answers with the check's lines for them). Exit 0 when it
+           posted the card, 1 when the card's command failed, 2 when there is no card to post.
 command    Push a command (select, highlight, toast, reload) to every open viewer. Uses the
            admin token in .bind/admin-token.
 confirm    Approve (or --no: decline) jobs waiting for confirmation.
@@ -410,7 +410,7 @@ function postCard(dir) {
  *  check, its card waits until it loads its own. Nor for a page that says "checked <date>" or "seen <date>" in typed
  *  words: as for the check, its card waits until they are deleted, and the answer is the check's own lines for them
  *  (`typed` in --json). `{ exit, lines }`: 0 posted, 1 its command failed, 2 no card to post, with why. */
-const TYPED_WORDS_HOLD = 'it says "checked <date>" in typed words';
+const TYPED_WORDS_HOLD = 'it says "checked <date>" or "seen <date>" in typed words';
 function cardReport(dir, { json = false } = {}) {
   const none = !inSpace(dir)
     ? "the folder is not in a space"
@@ -660,8 +660,8 @@ async function main() {
       // shows the folder (a page made before: an edit needs no new card); anywhere else the binder runs on its own, and
       // serving the site is the next step. A page with content to check gets its card from the check: one that passes
       // posts it, and one that fails names its command, so it never holds the card back (but for the two findings whose
-      // card waits: files from outside the folder, and typed "checked <date>" words). Named here as well, the card
-      // was asked for twice, the second time under another title.
+      // card waits: files from outside the folder, and typed "checked <date>" or "seen <date>"). Named here as well, the
+      // card was asked for twice, the second time under another title.
       const content = flags.starter ? path.join(rest[0], flags.starter === "blank" ? "app.js" : "data.json") : null;
       if (inSpace(rest[0])) {
         const steps = [

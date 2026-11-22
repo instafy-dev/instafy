@@ -31,7 +31,7 @@ Instafy's browser cannot show a space's own sites: its safety policy blocks the 
    <date>" in typed words has its card held back the same way, by its check, by this step and by `instafy preview
    open` itself for a page `instafy bind serve` serves (only `site.trust` and `site.cite` write those words, from a
    fact that says how its page was read); its reply gets the line "The new page isn't ready to open: a line on it
-   says "checked" with a date, which has to be fixed first."
+   says "checked" or "seen" with a date, which has to be fixed first."
 2. The CLI checks that something is listening, asks the controller for a preview, starts a rathole client for it and
    tells the controller it is ready. It never prints a URL. Its JSON output has ids, the port, the path, a status and
    `viewerHostSuffix` (for a dev server's allowed-hosts list).

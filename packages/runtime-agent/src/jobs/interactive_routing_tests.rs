@@ -287,8 +287,9 @@ fn a_pages_card_comes_from_its_check_and_never_waits_for_one_that_fails() {
 /// and the card's command joined by ";". A later turn changed the page and ran no check, and
 /// left "…; I didn't find a confirmed route." on it. A failing check still never holds the card
 /// back (the test above): the hub now names the two findings that do, says a typed "checked" is
-/// deleted, never reworded, what a tool nobody ran is captioned, that a page never says "I", and
-/// that an edit is followed by the check.
+/// deleted, never reworded (a day that is the page's own goes in a cell of its own, as the check
+/// says), what a tool nobody ran is captioned, that a page never says "I", and that an edit is
+/// followed by the check.
 #[test]
 fn a_typed_checked_holds_the_card_and_a_tool_nobody_ran_says_not_run() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -296,7 +297,7 @@ fn a_typed_checked_holds_the_card_and_a_tool_nobody_ran_says_not_run() {
         "../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md"
     ));
     for needle in [
-        "A failing check never holds the card back: it names the card's command. Only two findings hold it until they are fixed: files loaded from outside the page's folder, and a typed \"checked <date>\" or \"seen <date>\", which is always deleted, never reworded (then the card's own command posts no card either).",
+        "A failing check never holds the card back: it names the card's command. Only two findings hold it until they are fixed: files loaded from outside the page's folder, and a typed \"checked <date>\" or \"seen <date>\": delete those words, never reword them (a day that is the page's own content goes in a cell of its own). Until then the card's own command posts no card either.",
         "A tool or step nobody ran (a planner whose form was never sent) gets a caption that links it by its name and says \"not run\", with no day.",
         "A page says what it shows, never \"I\".",
         "4. After any edit, check again. No new card is needed: once your change is saved, every open view of the page loads it again by itself.",
