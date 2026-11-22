@@ -52,12 +52,12 @@ const HOTEL_OPENED: &str =
 const STAND_ALONE: &str =
     "If this card is refused too, only your words show: make them stand alone.";
 /// A price question whose first attempt read the shop's page, which the reader refused, then
-/// wrote a card naming no page. The command stands in for the read and writes nothing, so the
-/// turn changed no file.
+/// wrote a card naming no page. The command reads as the reader's, so the runtime counts it as a
+/// read; it finds no reader on its `PATH`, so nothing goes out, prints what stands in for the
+/// read and writes nothing, so the turn changed no file.
 const PRICE_REQUEST: &str = "What does the vacuum cost at the shop?";
 const READ_OUTPUT: &str = "SHOP_PAGE_NOT_READ: the search page of the shop refused a direct read";
-const READ_COMMAND: &str =
-    "printf 'SHOP_PAGE_NOT_READ: the search page of the shop refused a direct read'";
+const READ_COMMAND: &str = "PATH=/nonexistent instafy web read 'https://shop.example/search?q=vacuum' --json 2>/dev/null || printf 'SHOP_PAGE_NOT_READ: the search page of the shop refused a direct read'";
 const PRICE_HAND_OVER: &str = "I'm handing the shop's page to the browser to check the price.";
 const PRICE_NO_PAGE: &str = "Check the vacuum's price at the shop.";
 /// The retry's card names the shop's home page, as told for a page whose address would be a guess.

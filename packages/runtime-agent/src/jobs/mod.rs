@@ -33265,6 +33265,9 @@ mod tests {
         // Each way of looking up counts.
         for looked_up in [
             command("instafy web read https://shop.example/help/returns --json"),
+            command(
+                "PATH=/nonexistent instafy web read 'https://shop.example/help/returns' --json 2>/dev/null || printf 'not read'",
+            ),
             command("instafy web search \"shop return policy\" --json"),
             completed(json!({"type": "web_search", "id": "ws_1", "query": "shop return policy"})),
             completed(
