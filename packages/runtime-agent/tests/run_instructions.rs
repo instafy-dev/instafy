@@ -3551,7 +3551,7 @@ fn check_browser_turns_go_on_past_a_page(harness: &Harness) -> Result<()> {
             // it a third way.
             let input = input_text(request);
             ensure!(
-                input.contains("A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task."),
+                input.contains("A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task."),
                 "{label}#{index} never read what comes after a failed page"
             );
             ensure!(

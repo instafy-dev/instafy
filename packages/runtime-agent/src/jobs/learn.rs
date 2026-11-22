@@ -754,6 +754,11 @@ const LEGACY_BROWSER_AUTOMATION_SHA256: &[&str] = &[
     // and the person's own steps named the final button that pays or books and a sign-in their
     // request needs.
     "b3a2cf3065fc8baa1150eaa850a2db58017f5e8e62da86fe32d82fd3fc59c92c", // v48
+    // From before the routing section put in braces the words that hold only until research
+    // that ends in a page searches first (where it does, the routing step reads the section
+    // without them), a page that reads as only its menu ended that page, and a browser turn's
+    // reply gave each fact its page's link and the day it was read, and a status its time.
+    "81901158dd35ed874b51ceb50194ef7f6e7e0818e3a69fcea62ff6dd479b8641", // v49
 ];
 /// What a turn with a shell reads of the browser skill only when it needs it: how to write a
 /// learned block for a site and the cues a run reports for one, the owner-local `observe` tool,

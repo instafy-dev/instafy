@@ -63,11 +63,12 @@ pub struct Case {
     #[serde(default)]
     pub history: Vec<JsonValue>,
     /// Whether Octo's turn for the message can search the web, as the job's grant lets it: the
-    /// routing input then says so, after the browser skill's routing section.
+    /// routing input then says so, above the browser skill's routing section.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub integrated_search: bool,
     /// Whether research that ends in a page searches first there too, on a runtime with
-    /// `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: the routing input then says so in a second line.
+    /// `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: the routing input then says so in a second line,
+    /// and reads the section without the words it puts in braces.
     /// Only with `integratedSearch`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub research_pages_search_first: bool,
@@ -773,6 +774,18 @@ mod tests {
     const SHIPPED_CASES: &str = include_str!("../../tests/fixtures/routing-check-cases.json");
     const SHIPPED_BROWSER_SKILL: &str =
         include_str!("../../assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md");
+
+    /// The words a skill's routing section puts in braces, in order.
+    fn marked_words(skill: &str) -> Vec<&str> {
+        let (_, section) = skill
+            .split_once("\n## Routing preflight\n")
+            .expect("the routing section");
+        section
+            .split('{')
+            .skip(1)
+            .map(|rest| rest.split_once('}').expect("a closing brace").0)
+            .collect()
+    }
 
     fn shipped() -> Vec<Case> {
         parse_cases(SHIPPED_CASES).expect("the shipped case file parses")
@@ -1496,17 +1509,20 @@ mod tests {
     /// routing alone (a skill's other sections, a browser turn's run text, a section only a turn
     /// reads) keeps both hashes. A change that means to move routes updates them, and its pull
     /// request carries the routing check's table. A message whose turn can search the web shares
-    /// a start of its own: the same, with the line that says so after the browser skill's
+    /// a start of its own: the same, with the line that says so above the browser skill's
     /// routing section and, after it, the line that says research that ends in a page doesn't
-    /// search first; on a runtime where such research searches first, that second line says so
-    /// instead. The space's pages, which differ from chat to chat, come after it.
+    /// search first. On a runtime where such research searches first, that second line says so
+    /// instead, the section is read without the words it puts in braces (those that hold only
+    /// until then), and `browser_then_build`'s own line stops at the build. Without search the
+    /// start is byte for byte what it was before the section had braces: its hash is the same.
+    /// The space's pages, which differ from chat to chat, come after it.
     #[test]
     fn the_routing_input_is_byte_identical_to_its_pinned_hashes() {
         use sha2::{Digest, Sha256};
         const SHARED_START_SHA256: &str =
             "ae070fe68e8531847ddd9cfc92b81b3f6ceec61d8795c71d78a21508badc7885";
         const CASE_PROMPTS_SHA256: &str =
-            "0dc6f3392e5a7ee021bed4ab774803532d2e87307ee8b97131a83734b46867c1";
+            "f63a858d8d2b4e431aefe03d88cae17230402a16e2e7ef1d08c73333971ba61c";
         const COUNTS_LINE: &str = "History projection metadata (counts only):\n";
         let digest = |text: &str| format!("{:x}", Sha256::digest(text.as_bytes()));
         let without_counts = |prompt: &str| match prompt.split_once(COUNTS_LINE) {
@@ -1565,10 +1581,13 @@ mod tests {
         let search_start = start_where(true, false);
         let pages_start = start_where(true, true);
         // Two lines are all that tell the first two apart: that Octo can search the web, and
-        // that research that ends in a page doesn't search first. The second line alone tells the
-        // last two apart: it says such research searches first, or that it doesn't.
+        // that research that ends in a page doesn't search first, a paragraph of their own
+        // above the browser skill's section. The last two differ in the second line, which says
+        // such research searches first or that it doesn't, and in what follows from it: where
+        // it does, the words the section puts in braces are left out, and `browser_then_build`'s
+        // own line stops at the build.
         let lines = format!(
-            "{}{}",
+            "\n{}{}",
             super::super::ROUTING_SEARCH_FACT,
             super::super::ROUTING_NO_SEARCH_FIRST_FACT
         );
@@ -1586,14 +1605,39 @@ mod tests {
                 .count(),
             1
         );
+        let marked = marked_words(SHIPPED_BROWSER_SKILL);
         assert_eq!(
-            pages_start.replacen(
-                super::super::ROUTING_SEARCH_FIRST_FACT,
-                super::super::ROUTING_NO_SEARCH_FIRST_FACT,
+            marked,
+            [
+                " when it searches first",
+                " So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).",
+            ]
+        );
+        let mut without = search_start.replacen(
+            super::super::ROUTING_NO_SEARCH_FIRST_FACT,
+            super::super::ROUTING_SEARCH_FIRST_FACT,
+            1,
+        );
+        for words in &marked {
+            assert_eq!(search_start.matches(words).count(), 1, "{words}");
+            assert_eq!(start.matches(words).count(), 1, "{words}");
+            assert!(!pages_start.contains(words), "{words}");
+            without = without.replacen(words, "", 1);
+        }
+        assert_eq!(
+            without.replacen(
+                "- `browser_then_build`: the same, then a build from what it found.\n",
+                "- `browser_then_build`: the same, then a build.\n",
                 1
             ),
-            search_start
+            pages_start
         );
+        for start in [start, search_start, pages_start] {
+            assert!(!start.contains(['{', '}']), "no brace is read");
+        }
+        assert!(pages_start.contains(
+            ", or that ends in a page, stays `direct` unless the message names the browser,"
+        ));
         assert!(!start.contains(super::super::ROUTING_SEARCH_FACT));
         assert!(!start.contains(super::super::ROUTING_NO_SEARCH_FIRST_FACT));
         assert!(!search_start.contains(super::super::ROUTING_SEARCH_FIRST_FACT));
@@ -1748,10 +1792,14 @@ mod tests {
         let cases = shipped();
         let workspace = tempdir().unwrap();
         prepare_workspace(workspace.path()).unwrap();
-        let section = SHIPPED_BROWSER_SKILL
+        // The section as the routing step reads it: where research that ends in a page doesn't
+        // search first (and without search), and where it does.
+        let written = SHIPPED_BROWSER_SKILL
             .split_once("\n## Routing preflight\n")
             .map(|(_, section)| section)
             .expect("the routing section");
+        let section = super::super::browser_routing_section_for_search_state(written, false);
+        let searching_first = super::super::browser_routing_section_for_search_state(written, true);
         let rules: &[(&str, &str, &[&str])] = &[
             (
                 "name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it)",
@@ -1780,7 +1828,7 @@ mod tests {
                 &["hotel-for-dates-nobody-named-searching"],
             ),
             (
-                "or that ends in a page when it searches first, stays `direct`",
+                "or that ends in a page, stays `direct`",
                 "direct",
                 &[
                     "news-then-page-searching",
@@ -1918,19 +1966,31 @@ mod tests {
             ),
         ];
         let mut covered = HashSet::new();
+        const SECTION_OPENS: &str = "\nFocused browser routing skill snapshot:\n";
         for (rule, route, ids) in rules {
-            assert!(section.contains(rule), "the section says: {rule}");
+            assert!(
+                section.contains(rule) || searching_first.contains(rule),
+                "the section says: {rule}"
+            );
             for id in *ids {
                 let case = case(&cases, id);
                 assert_eq!(&case.expect.route, route, "{id}");
                 let input = routing_input(&case, workspace.path()).unwrap();
                 assert!(input.browser_routes_offered, "{id}");
                 assert!(input.prompt.contains(rule), "{id} reads: {rule}");
+                // Each case reads the section for its own search state, whole, and no brace.
+                let read = if case.research_pages_search_first {
+                    &searching_first
+                } else {
+                    &section
+                };
+                assert!(input.prompt.contains(read.trim_end()), "{id}");
+                assert!(!input.shared_start.contains(['{', '}']), "{id}");
                 // Whether Octo can search the web for the message is one line of the routing
-                // input, after the section, there exactly when the case says so, and whether
+                // input, above the section, there exactly when the case says so, and whether
                 // research that ends in a page searches first is the line after it, which says
                 // that it does or that it doesn't.
-                let fact = format!("```\n{}", super::super::ROUTING_SEARCH_FACT);
+                let fact = format!("```\n\n{}", super::super::ROUTING_SEARCH_FACT);
                 assert_eq!(input.prompt.contains(&fact), case.integrated_search, "{id}");
                 assert_eq!(
                     input
@@ -1941,7 +2001,7 @@ mod tests {
                     "{id}"
                 );
                 let both = format!(
-                    "```\n{}{}",
+                    "```\n\n{}{}{SECTION_OPENS}",
                     super::super::ROUTING_SEARCH_FACT,
                     super::super::ROUTING_SEARCH_FIRST_FACT
                 );
@@ -1960,7 +2020,7 @@ mod tests {
                 );
                 let not_first = case.integrated_search && !case.research_pages_search_first;
                 let alone = format!(
-                    "```\n{}{}",
+                    "```\n\n{}{}{SECTION_OPENS}",
                     super::super::ROUTING_SEARCH_FACT,
                     super::super::ROUTING_NO_SEARCH_FIRST_FACT
                 );
@@ -1980,11 +2040,16 @@ mod tests {
         // where it doesn't: a case filed under either sentence has the line that says research
         // that ends in a page searches first exactly when that sentence says so. The line that
         // Octo can search the web is not it: the line after it then says such research doesn't.
+        // Each state reads its own sentence and not the other's: where such research searches
+        // first, that it stays `direct`, said plainly, and nothing of browsing first; in the two
+        // other states, both sentences with their conditions, as before.
+        assert!(
+            !searching_first.contains("searches first"),
+            "{searching_first}"
+        );
+        assert!(section.contains("or that ends in a page when it searches first, stays `direct`"));
         for (sentence, searches_first) in [
-            (
-                "or that ends in a page when it searches first, stays `direct`",
-                true,
-            ),
+            ("or that ends in a page, stays `direct`", true),
             (
                 "So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).",
                 false,
@@ -1994,6 +2059,8 @@ mod tests {
                 .iter()
                 .find(|(rule, ..)| *rule == sentence)
                 .expect(sentence);
+            assert_eq!(searching_first.contains(sentence), searches_first);
+            assert_eq!(section.contains(sentence), !searches_first);
             for id in *ids {
                 assert_eq!(
                     case(&cases, id).research_pages_search_first,
@@ -2001,6 +2068,27 @@ mod tests {
                     "{id} is filed under: {sentence}"
                 );
             }
+        }
+        // The route's own line follows the same state: where such research searches first it
+        // stops at the build, and everywhere else it is as it was.
+        for case in &cases {
+            let input = routing_input(case, workspace.path()).unwrap();
+            assert_eq!(
+                input
+                    .shared_start
+                    .contains("- `browser_then_build`: the same, then a build.\n"),
+                case.research_pages_search_first,
+                "{}",
+                case.id
+            );
+            assert_eq!(
+                input.shared_start.contains(
+                    "- `browser_then_build`: the same, then a build from what it found.\n"
+                ),
+                !case.research_pages_search_first,
+                "{}",
+                case.id
+            );
         }
         // Each case that can search has a twin rule on the same kind of message without it: news,
         // a comparison and a page of places put on a page browse first unless Octo can search the
