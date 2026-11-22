@@ -576,13 +576,22 @@ async fn run_case(case: Case) -> Result<()> {
             // The line names the rule the card broke and what the retry names instead.
             assert_eq!(
                 retry_lines,
-                ["Retrying: the browser card named no page by its address. The retry names each page it opens, or the site's home page for an address it would only guess."]
+                [
+                    "Retrying: the browser card named no page by its address. The retry names each page it opens, or the site's home page for an address it would only guess."
+                ]
             );
-            assert_eq!(requests.len(), 3, "the read, the first answer, then the retry's");
+            assert_eq!(
+                requests.len(),
+                3,
+                "the read, the first answer, then the retry's"
+            );
             let retry = &requests[2];
             let retry_input = retry["input"].to_string();
             // The first attempt's own thread: what it read is in the retry's input.
-            assert!(retry_input.contains(READ_OUTPUT), "retry input: {retry_input}");
+            assert!(
+                retry_input.contains(READ_OUTPUT),
+                "retry input: {retry_input}"
+            );
             for words in [
                 "- It named no page it opens.",
                 "name that site's home page",

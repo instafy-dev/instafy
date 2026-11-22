@@ -32024,9 +32024,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/assets/instafy/.agents/skills/instafy-web-research/SKILL.md"
         ));
-        assert!(research.contains(
-            "or that you hand them over: the card says what happens next."
-        ));
+        assert!(research.contains("or that you hand them over: the card says what happens next."));
         let evaluated = test_lease_job(
             Some("feature"),
             json!({ "metadata": { "groupParticipation": {
@@ -32741,9 +32739,7 @@ mod tests {
     fn a_refused_cards_retry_names_the_rule_it_broke_and_what_to_name_instead() {
         use browser_request::{HOLDS_AN_EMAIL_ADDRESS, NAMES_NO_PAGE};
         let card = |task: &str| json!({"type": "request_browser", "task": task});
-        let answer = |cards: Vec<JsonValue>| {
-            json!({"summary": "I'm checking the three shops' prices.", "files": [], "actions": cards})
-        };
+        let answer = |cards: Vec<JsonValue>| json!({"summary": "I'm checking the three shops' prices.", "files": [], "actions": cards});
         let no_page = card("Check the vacuum's price at the three shops.");
         let email = card("Open https://shop.example/help/returns for ana@example.com.");
         let named = card("Open https://shop.example and find the vacuum's price.");
@@ -32793,8 +32789,15 @@ mod tests {
             for words in fix_only_the_card.iter().chain(&rules) {
                 assert!(retry.contains(words), "{broken:?}: {words}\n{retry}");
             }
-            for (rule, words) in [(NAMES_NO_PAGE, no_page_rule), (HOLDS_AN_EMAIL_ADDRESS, email_rule)] {
-                assert_eq!(retry.contains(words), broken.contains(&rule), "{broken:?}: {rule}");
+            for (rule, words) in [
+                (NAMES_NO_PAGE, no_page_rule),
+                (HOLDS_AN_EMAIL_ADDRESS, email_rule),
+            ] {
+                assert_eq!(
+                    retry.contains(words),
+                    broken.contains(&rule),
+                    "{broken:?}: {rule}"
+                );
             }
             // Nothing in it sends the retry back to its lookup.
             let requirement = &retry[request.len()..];
@@ -32809,8 +32812,12 @@ mod tests {
             assert_eq!(refused_card_retry_message(&broken), line);
         }
         // A card whose rules aren't known names both, as before.
-        let unknown = codex_fallback_retry_prompt(request, CodexFallbackSummaryKind::RefusedBrowserCard);
-        assert!(unknown.contains(no_page_rule) && unknown.contains(email_rule), "{unknown}");
+        let unknown =
+            codex_fallback_retry_prompt(request, CodexFallbackSummaryKind::RefusedBrowserCard);
+        assert!(
+            unknown.contains(no_page_rule) && unknown.contains(email_rule),
+            "{unknown}"
+        );
         assert_eq!(
             codex_fallback_retry_message(CodexFallbackSummaryKind::RefusedBrowserCard),
             refused_card_retry_message(&[NAMES_NO_PAGE, HOLDS_AN_EMAIL_ADDRESS])
@@ -32849,15 +32856,23 @@ mod tests {
             "defaultThreadId": "019a0000-0000-7000-8000-0000000000c1",
             "defaultRolloutPath": rollout.display().to_string(),
         });
-        let read = vec![json!({"type": "item.completed", "item": {"type": "command_execution",
+        let read = vec![
+            json!({"type": "item.completed", "item": {"type": "command_execution",
             "command": "instafy web read https://shop.example/vacuum --json", "exit_code": 0,
-            "status": "completed", "aggregated_output": "<untrusted_page_content url=\"https://shop.example/vacuum\" read_at=\"2026-11-20T15:47:10Z\" viewer=\"network\">\nIn stock\n</untrusted_page_content>"}})];
+            "status": "completed", "aggregated_output": "<untrusted_page_content url=\"https://shop.example/vacuum\" read_at=\"2026-11-20T15:47:10Z\" viewer=\"network\">\nIn stock\n</untrusted_page_content>"}}),
+        ];
 
         let mut retry = first.clone();
         refused_card_retry_options(&mut retry, Some(&first_thread));
         let (retry, prompt) = recovery_retry(&first, retry, None, "The request.".into(), &read);
-        assert!(retry.resumes_provider_thread(), "the first attempt's own thread");
-        assert_eq!(retry.provider_conversation_state, Some(first_thread.clone()));
+        assert!(
+            retry.resumes_provider_thread(),
+            "the first attempt's own thread"
+        );
+        assert_eq!(
+            retry.provider_conversation_state,
+            Some(first_thread.clone())
+        );
         assert!(retry.disable_native_web_search, "no new search");
         assert!(retry.disable_shell_tool, "no new read or keyed search");
         assert!(!retry.require_first_tool_call);
@@ -32873,7 +32888,10 @@ mod tests {
         assert!(!retry.resumes_provider_thread());
         assert_eq!(retry.provider_conversation_state, None);
         assert!(retry.disable_native_web_search && retry.disable_shell_tool);
-        assert!(prompt.contains("What an earlier attempt at this request found:"), "{prompt}");
+        assert!(
+            prompt.contains("What an earlier attempt at this request found:"),
+            "{prompt}"
+        );
         assert!(prompt.contains("The vacuum costs 499 pounds."), "{prompt}");
         assert!(prompt.contains("In stock"), "{prompt}");
     }
