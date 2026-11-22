@@ -892,7 +892,7 @@ describe("Claude Code in Your AI", () => {
       // A name that is not one never reaches the controller.
       await type("credentials-claude-code-login-add-name", "Work\u0007");
       await submit();
-      expect(text("credentials-claude-code-error")).toBe("A login's name is 1 to 60 characters, on one line.");
+      expect(text("credentials-claude-code-error")).toBe("A login's name is 1 to 60 characters on one line, and can't hold double quotes or invisible characters.");
       expect(loginsClient.createClaudeCodeLogin).toHaveBeenCalledTimes(4);
       expect(bannedWordIn(text("credentials-claude-code-row") ?? "")).toBeNull();
     });

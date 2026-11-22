@@ -180,7 +180,7 @@ export const CLAUDE_CODE_COPY = {
       deleteConfirm: "Agents that use it switch to your first login.",
       errors: {
         notAllowed: "Claude Code turns aren't on for your account.",
-        labelInvalid: "A login's name is 1 to 60 characters, on one line.",
+        labelInvalid: "A login's name is 1 to 60 characters on one line, and can't hold double quotes or invisible characters.",
         labelTaken: "You already have a login with this name. Choose another.",
         limit: "You have 10 Claude Code logins, the most you can have.",
         notFound: "That login is gone. It may have been deleted on another computer.",

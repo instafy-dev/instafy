@@ -282,10 +282,12 @@ pub fn resolve_author_pseudonym_keys(
 
 /// Unicode format characters (general category Cf): zero-width space, soft
 /// hyphen, bidirectional marks, embeddings, overrides and isolates, tags.
-/// They render invisible or reorder text in `git log` and History. The
-/// zero-width non-joiner and joiner (U+200C, U+200D) are kept: names in
-/// Persian and other scripts, and emoji sequences, need them.
-fn is_format_character(ch: char) -> bool {
+/// They render invisible or reorder text in `git log` and History, and in
+/// the consent dialog where Desktop shows a Claude Code login's name
+/// (`claude_code_logins`). The zero-width non-joiner and joiner (U+200C,
+/// U+200D) are kept: names in Persian and other scripts, and emoji
+/// sequences, need them.
+pub(crate) fn is_format_character(ch: char) -> bool {
     matches!(
         ch as u32,
         0x00AD

@@ -639,6 +639,84 @@ pub(crate) async fn a_turn_waits_in(
         .get(0))
 }
 
+/// The Claude Code login a lane job takes when a lease takes it
+/// (docs/Local-Engine-Turns.md 11.19), as `job_login.lane_login_id`: the
+/// first of its `claude_code_login_ids` that is still one of its person's
+/// logins, else, when none is, their first login, the oldest. None for a
+/// person with no login, whose turns wait, and for every job that is not a
+/// lane job. A `left join lateral` on the `agent_jobs` row `aj`: the lease
+/// and the idle poll read the job's login alike ([`lane_turn_runs_on`]).
+macro_rules! lane_job_login {
+    () => {
+        "left join lateral (
+            select lane_login.id as lane_login_id
+              from claude_code_logins lane_login
+              left join unnest(aj.claude_code_login_ids) with ordinality
+                   as wanted_login(id, position)
+                on wanted_login.id = lane_login.id
+             where lane_login.user_id = case
+                       when aj.engine is not null
+                        and aj.payload #>> '{user_id}'
+                            ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                       then (aj.payload #>> '{user_id}')::uuid
+                   end
+             order by wanted_login.position nulls last,
+                      lane_login.created_at,
+                      lane_login.id
+             limit 1
+        ) job_login on true"
+    };
+}
+pub(crate) use lane_job_login;
+
+/// Whether the runtime row `$runtime` (an alias of `runtimes`) takes the lane
+/// job `aj` now, on the login [`lane_job_login`] picks for it
+/// (docs/Local-Engine-Turns.md 11.7, 11.19): the job has a login; the runtime
+/// is private, attested as the job's person's own, with a `claudeCode`
+/// capability of version 2 whose program is ready and whose entry for that
+/// login is ready; and no leased lane job holds the login. A lane job leased
+/// with no login, by a controller older than the logins, holds every login of
+/// its person's until it ends. And the runtime holds no leased lane job
+/// itself: a computer runs one lane turn at a time, whatever its logins
+/// (D47), which runtime-agent keeps too. A SQL condition: the lease and the
+/// idle poll read it alike, so a poll idles while every lane job of the
+/// space waits for what this runtime cannot give it.
+macro_rules! lane_turn_runs_on {
+    ($runtime:literal) => {
+        concat!(
+            "(job_login.lane_login_id is not null
+              and ", $runtime, ".capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
+              and ", $runtime, ".capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
+                  = aj.payload #>> '{user_id}'
+              and ", $runtime, ".capabilities #> '{claudeCode,version}' = '2'::jsonb
+              and ", $runtime, ".capabilities #> '{claudeCode,ready}' = 'true'::jsonb
+              and ", $runtime, ".capabilities
+                  #> array['claudeCode', 'logins', job_login.lane_login_id::text, 'ready']
+                  = 'true'::jsonb
+              and not exists (
+                  select 1 from agent_jobs running_lane_turn
+                   where running_lane_turn.engine = 'claude-code'
+                     and running_lane_turn.status = 'leased'
+                     and running_lane_turn.claude_code_login_id = job_login.lane_login_id
+              )
+              and not exists (
+                  select 1 from agent_jobs loginless_lane_turn
+                   where loginless_lane_turn.engine = 'claude-code'
+                     and loginless_lane_turn.status = 'leased'
+                     and loginless_lane_turn.claude_code_login_id is null
+                     and (loginless_lane_turn.payload ->> 'user_id') = (aj.payload ->> 'user_id')
+              )
+              and not exists (
+                  select 1 from agent_jobs held_lane_turn
+                   where held_lane_turn.engine = 'claude-code'
+                     and held_lane_turn.status = 'leased'
+                     and held_lane_turn.leased_by_runtime_id = ", $runtime, ".id
+              ))"
+        )
+    };
+}
+pub(crate) use lane_turn_runs_on;
+
 /// Whether `error`, from leasing a lane job, is the one-running-turn index
 /// refusing a second running turn on one Claude Code login: 23505 on
 /// [`ONE_RUNNING_TURN_INDEX`]. That lease takes nothing.

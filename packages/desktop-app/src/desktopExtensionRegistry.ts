@@ -194,6 +194,12 @@ export type DesktopExtensionRegistry = Readonly<{
   /** Whether an extension declared a method as one that changes no consent record. */
   methodIsReadOnly: (extensionId: string, methodId: string) => boolean;
   moduleContributesLaunchGrants: (moduleId: string) => boolean;
+  /**
+   * Run one of a module's consent changes once every one queued before it
+   * has settled, made or put back, so its changes never interleave with
+   * another's. A read never waits here.
+   */
+  queueConsentChange: <R>(moduleId: string, change: () => Promise<R>) => Promise<R>;
   /** Every registered contribution with nothing granted: what a start that may not be granted anything passes. */
   launchGrantsWithoutValues: () => readonly DesktopRuntimeResolvedLaunchGrant[];
   resolveLaunchGrants: (request: {
@@ -558,14 +564,34 @@ const NO_DESKTOP_EXTENSION_HOST: DesktopExtensionHost = Object.freeze({
   desktopOwnedPaths: Object.freeze([]),
 });
 
+// A Unicode format character (category Cf) other than the joiners ZWJ and
+// ZWNJ: invisible, and the text-direction marks, embeddings, overrides and
+// isolates among them can make the text around them read as other words.
+const NON_JOINER_FORMAT_CHARACTER = /(?![\u{200c}\u{200d}])\p{Cf}/u;
+
+/**
+ * Whether text holds a Unicode format character other than ZWJ and ZWNJ.
+ * What Desktop names in a native dialog, such as the account's email in a
+ * consent question, never holds one.
+ */
+export function hasNonJoinerFormatCharacter(value: string): boolean {
+  return NON_JOINER_FORMAT_CHARACTER.test(value);
+}
+
 /** Scope what the shell knows about a call to one feature module. */
 export function createDesktopExtensionHostContext(
   host: DesktopExtensionHost,
   moduleId: string,
 ): DesktopExtensionHostContext {
   const userId = normalizeInstafyUserId(host.session?.userId);
+  // An email with such a character names no account a dialog could show as
+  // it is, so a method sees no email and names no account.
+  const email = host.session?.email?.trim() || null;
   const session = userId
-    ? Object.freeze({ userId, email: host.session?.email?.trim() || null })
+    ? Object.freeze({
+        userId,
+        email: email && !hasNonJoinerFormatCharacter(email) ? email : null,
+      })
     : null;
   const controllerOrigin =
     host.controllerOrigin && isControllerOrigin(host.controllerOrigin)
@@ -641,6 +667,8 @@ export function createDesktopExtensionRegistry(
     return extension;
   };
   const launchGrantsWithoutValues = () => Object.freeze(launchGrants.map(ungranted));
+  // The last consent change queued for each module; it never rejects.
+  const consentChangeTails = new Map<string, Promise<void>>();
 
   return Object.freeze({
     extensionIds: Object.freeze([...extensions.keys()]),
@@ -683,6 +711,21 @@ export function createDesktopExtensionRegistry(
       requireExtension(extensionId).readOnlyMethods.has(methodId),
     moduleContributesLaunchGrants: (moduleId: string) =>
       launchGrants.some((grant) => grant.moduleId === moduleId),
+    queueConsentChange<R>(moduleId: string, change: () => Promise<R>): Promise<R> {
+      const previous = consentChangeTails.get(moduleId) ?? Promise.resolve();
+      const run = previous.then(() => change());
+      const tail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      consentChangeTails.set(moduleId, tail);
+      void tail.then(() => {
+        if (consentChangeTails.get(moduleId) === tail) {
+          consentChangeTails.delete(moduleId);
+        }
+      });
+      return run;
+    },
     launchGrantsWithoutValues,
     async resolveLaunchGrants(request) {
       const userId = normalizeInstafyUserId(request.instafyUserId);
@@ -809,7 +852,9 @@ export type DesktopExtensionRunningRuntime<T> = Readonly<{
  * resolve that grant again for the running runtime once the method returns,
  * and replace the runtime only when the grant changed. If the person keeps
  * the running work instead, put the module's consent records back as they
- * were before the method ran and report the change as not made.
+ * were before the method ran and report the change as not made. The
+ * module's other methods that change consent wait for all of that, so the
+ * records put back hold no other call's change.
  *
  * A method the extension declares read-only runs inside the runtime lock, so
  * it answers only once every consent change queued before it has settled. A
@@ -876,13 +921,21 @@ export async function invokeDesktopExtensionWithLaunchGrants<T>(options: {
       return result;
     });
   }
-  const before = snapshotDesktopExtensionConsents(consents, moduleId);
-  const result = await invoke();
-  await options.withRuntimeLock(async () => {
-    if (await keptRunningWork()) {
-      restoreDesktopExtensionConsents(consents, before);
-      throw new DesktopExtensionChangeNotMadeError();
-    }
+  // One consent change of this module at a time, end to end: its dialogs, its
+  // write and the replacement it may need. So putting the records back when
+  // the person keeps the running work undoes this call's change and nothing
+  // else, since no other change of the module ran in between. The runtime
+  // lock is taken only after the method returns, as before, so a read still
+  // waits only for that.
+  return await registry.queueConsentChange(moduleId, async () => {
+    const before = snapshotDesktopExtensionConsents(consents, moduleId);
+    const result = await invoke();
+    await options.withRuntimeLock(async () => {
+      if (await keptRunningWork()) {
+        restoreDesktopExtensionConsents(consents, before);
+        throw new DesktopExtensionChangeNotMadeError();
+      }
+    });
+    return result;
   });
-  return result;
 }

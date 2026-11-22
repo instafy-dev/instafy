@@ -113,7 +113,8 @@ fn label_invalid() -> Refusal {
     refusal(
         StatusCode::BAD_REQUEST,
         LABEL_INVALID,
-        "A login's name is 1 to 60 characters on one line.",
+        "A login's name is 1 to 60 characters on one line, and can't hold double quotes or \
+         invisible characters.",
     )
 }
 
@@ -140,31 +141,31 @@ fn login_not_found() -> Refusal {
     not_found("Claude Code login not found")
 }
 
-/// A character a label never holds: a control character, a line or
-/// paragraph separator, or a bidirectional control, which could make the
-/// label read as other words where Desktop shows it, quoted, in the consent
-/// dialog for the login.
-fn is_label_control(ch: char) -> bool {
+/// A character a label never holds, as Desktop refuses it in the name it
+/// shows, quoted, in the consent dialog for the login
+/// (packages/desktop-app/src/claudeCode/consent.ts): a control character or
+/// a line or paragraph separator, which would break the dialog's line; a
+/// Unicode format character other than the zero-width joiner and non-joiner,
+/// which is invisible, and among which the text-direction marks, embeddings,
+/// overrides and isolates can make the dialog's question read as other words
+/// (`author_identity::is_format_character`); and a double quote, since the
+/// dialog quotes the name. A Rust string holds no surrogate, the one other
+/// kind Desktop refuses. A name of any of these could be kept here but set
+/// up on no computer.
+fn is_label_refused(ch: char) -> bool {
     ch.is_control()
-        || matches!(
-            ch,
-            '\u{2028}'
-                | '\u{2029}'
-                | '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
+        || matches!(ch, '\u{2028}' | '\u{2029}' | '"')
+        || crate::author_identity::is_format_character(ch)
 }
 
 /// `label` as a login keeps it: trimmed, 1 to [`LABEL_MAX_CHARS`] characters,
-/// on one line, with no control character (docs/Local-Engine-Turns.md
-/// 11.19). The table's own check holds the trim and the length too.
+/// on one line, with none of the characters Desktop refuses
+/// ([`is_label_refused`], docs/Local-Engine-Turns.md 11.19). The table's own
+/// check holds the trim and the length too.
 fn normalize_label(label: Option<&str>) -> Result<String, Refusal> {
     let label = label.map(str::trim).unwrap_or_default();
     let chars = label.chars().count();
-    if !(1..=LABEL_MAX_CHARS).contains(&chars) || label.chars().any(is_label_control) {
+    if !(1..=LABEL_MAX_CHARS).contains(&chars) || label.chars().any(is_label_refused) {
         return Err(label_invalid());
     }
     Ok(label.to_string())
@@ -357,6 +358,17 @@ mod tests {
             ("Work", "Work"),
             ("  Personal plan \t", "Personal plan"),
             ("Écrire 🚀", "Écrire 🚀"),
+            // An emoji joined by a zero-width joiner, and a name a zero-width
+            // non-joiner parts, as Persian writes it.
+            (
+                "Coding \u{1F469}\u{200D}\u{1F4BB}",
+                "Coding \u{1F469}\u{200D}\u{1F4BB}",
+            ),
+            (
+                "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}",
+                "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}",
+            ),
+            ("Work 'plan'", "Work 'plan'"),
         ] {
             assert_eq!(normalize_label(Some(raw)).expect(raw), kept);
         }
@@ -372,6 +384,16 @@ mod tests {
                 Some("Work\u{2028}Home".to_string()),
                 Some("Work \u{202e}emoH".to_string()),
                 Some("\u{2066}Work\u{2069}".to_string()),
+                // What Desktop refuses in the name its consent dialog quotes:
+                // a format character other than the joiners, invisible, such
+                // as a zero-width space, a soft hyphen or the tags of a
+                // subdivision flag, and a double quote.
+                Some("Work\u{200B}plan".to_string()),
+                Some("Work\u{00AD}plan".to_string()),
+                Some("\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}".to_string()),
+                Some("Work \"plan\"".to_string()),
+                Some("\u{FEFF}Work".to_string()),
+                Some("Work\u{2060}".to_string()),
             ])
         {
             let refusal = normalize_label(raw.as_deref()).expect_err("refused");
@@ -381,6 +403,65 @@ mod tests {
                 "{raw:?}"
             );
         }
+    }
+
+    /// A label's characters are refused exactly as Desktop's consent dialog
+    /// refuses them: every control and format character but the two
+    /// joiners, the line and paragraph separators, and the double quote.
+    #[test]
+    fn a_label_refuses_what_desktop_refuses() {
+        for ch in ['\u{0000}', '\u{001F}', '\u{007F}', '\u{0085}', '\u{009F}'] {
+            assert!(is_label_refused(ch), "{:04X}", ch as u32);
+        }
+        for ch in [
+            '\u{00AD}',
+            '\u{0600}',
+            '\u{061C}',
+            '\u{06DD}',
+            '\u{070F}',
+            '\u{180E}',
+            '\u{200B}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{206F}',
+            '\u{FEFF}',
+            '\u{FFF9}',
+            '\u{110BD}',
+            '\u{13430}',
+            '\u{1BCA0}',
+            '\u{1D173}',
+            '\u{E0001}',
+            '\u{E0020}',
+            '\u{E007F}',
+            '\u{2028}',
+            '\u{2029}',
+            '"',
+        ] {
+            assert!(is_label_refused(ch), "{:04X}", ch as u32);
+        }
+        for ch in [
+            '\u{200C}',
+            '\u{200D}',
+            'a',
+            ' ',
+            '\'',
+            '\u{00A0}',
+            '\u{FE0F}',
+            '\u{1F3F4}',
+            '\u{E0100}',
+        ] {
+            assert!(!is_label_refused(ch), "{:04X}", ch as u32);
+        }
+        assert_eq!(
+            label_invalid().1 .0.message,
+            "A login's name is 1 to 60 characters on one line, and can't hold double quotes or \
+             invisible characters."
+        );
     }
 
     #[test]

@@ -687,13 +687,13 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
 }
 
 /// A login whose folder fails its checks is not ready, as `binary_unsafe`, and only it (11.19):
-/// the program and the other login stay ready, nothing runs with that folder, and the timed probe
-/// notices once the person fixes it. When every login's folder fails, nothing runs at all.
+/// the program and the other login stay ready, and nothing runs with that folder. When every
+/// login's folder fails, nothing runs at all.
 #[tokio::test]
-async fn a_login_whose_folder_fails_its_checks_is_the_only_one_not_ready_until_it_passes() {
+async fn a_login_whose_folder_fails_its_checks_is_the_only_one_not_ready() {
     let machine = Machine::new();
     chmod(&machine.work_folder(), 0o770);
-    let lane = Arc::new(machine.lane());
+    let lane = machine.lane();
     assert!(lane.probe_and_publish_all().await);
     let capability = lane.capability().unwrap();
     assert_eq!(capability["ready"], true, "{capability}");
@@ -723,26 +723,6 @@ async fn a_login_whose_folder_fails_its_checks_is_the_only_one_not_ready_until_i
         Some(NotReadyReason::BinaryUnsafe)
     );
     assert_eq!(machine.calls().len(), before);
-
-    let mut updates = lane.subscribe();
-    updates.borrow_and_update();
-    let reprobes = tokio::spawn({
-        let lane = lane.clone();
-        async move {
-            lane.reprobe_while_not_ready(Duration::from_millis(50))
-                .await
-        }
-    });
-    chmod(&machine.work_folder(), 0o700);
-    tokio::time::timeout(Duration::from_secs(10), updates.changed())
-        .await
-        .expect("a timed probe published the fixed folder")
-        .unwrap();
-    assert_eq!(
-        updates.borrow_and_update().clone(),
-        Some(ready_capability())
-    );
-    reprobes.abort();
 
     // A grant whose every login's folder fails its checks runs nothing, and the program is not
     // ready either.
@@ -775,6 +755,79 @@ async fn a_login_whose_folder_fails_its_checks_is_the_only_one_not_ready_until_i
     );
     assert_eq!(machine.calls().len(), before, "nothing ran");
     chmod(&machine.work_folder(), 0o700);
+}
+
+/// A login whose folder fails its checks, here one that was deleted, is looked at again on the
+/// timer alone (3.2, 11.19): each interval runs that folder's checks, which start nothing, and
+/// neither the program's commands nor the other login's `auth status` run again, however long it
+/// stays granted, and nothing is published. Once the person puts the folder back, the timer
+/// probes that login alone, publishes it ready, and then leaves the probing to the turns.
+#[tokio::test]
+async fn the_timed_probe_checks_a_failing_folder_alone_until_it_passes_and_probes_only_its_login() {
+    let machine = Machine::new();
+    std::fs::remove_dir(machine.work_folder()).unwrap();
+    let lane = Arc::new(machine.lane());
+    assert!(lane.probe_and_publish_all().await);
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true, "{capability}");
+    assert_eq!(capability["logins"][WORK]["reason"], "binary_unsafe");
+    assert_eq!(capability["logins"][USUAL]["ready"], true);
+    let mut updates = lane.subscribe();
+    updates.borrow_and_update();
+    let started = machine.calls().len();
+    let reprobes = tokio::spawn({
+        let lane = lane.clone();
+        async move {
+            lane.reprobe_while_not_ready(Duration::from_millis(50))
+                .await
+        }
+    });
+
+    // A dozen intervals: nothing runs, and nothing is published.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let calls = machine.calls();
+    let usual_sign_ins = |calls: &[Call]| {
+        calls
+            .iter()
+            .filter(|call| call.argv == ["auth", "status"] && call.config_dir().is_none())
+            .count()
+    };
+    assert_eq!(usual_sign_ins(&calls), 1, "only the first probe's");
+    assert_eq!(calls.len(), started, "{:?}", &calls[started..]);
+    assert!(!updates.has_changed().unwrap());
+
+    // The folder is back: that login alone is probed, and published ready.
+    folder(&machine.work_folder(), 0o700);
+    tokio::time::timeout(Duration::from_secs(10), updates.changed())
+        .await
+        .expect("the timer published the folder that passes again")
+        .unwrap();
+    assert_eq!(
+        updates.borrow_and_update().clone(),
+        Some(ready_capability())
+    );
+    let work = machine.work_folder().display().to_string();
+    let probed = &machine.calls()[started..];
+    assert_eq!(
+        probed
+            .iter()
+            .map(|call| call.argv.clone())
+            .collect::<Vec<_>>(),
+        args(&[&["--version"], &["auth", "status"]]),
+        "{probed:?}"
+    );
+    assert!(
+        probed
+            .iter()
+            .all(|call| call.config_dir() == Some(work.as_str())),
+        "{probed:?}"
+    );
+
+    // Then the timer leaves the probing to the turns.
+    let settled = machine.calls().len();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(machine.calls().len(), settled);
+    reprobes.abort();
 }
 
 /// After a turn on a login failed at its Claude plan's limit, that login holds until the limit

@@ -11,7 +11,7 @@ import { controllerJsonRequest } from "./client";
 export interface ControllerClaudeCodeLogin {
   /** A lowercase UUID. */
   id: string;
-  /** The name the person gave it: 1-60 characters, on one line. */
+  /** The name the person gave it: 1-60 characters, on one line, with no double quote or invisible character. */
   label: string;
   createdAt: string;
 }
@@ -37,14 +37,20 @@ export const CLAUDE_CODE_MAX_LOGINS = 10;
 export const CLAUDE_CODE_LOGIN_LABEL_MAX_LENGTH = 60;
 
 const LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// What the controller keeps out of a name: control characters, line and
-// paragraph separators, and bidirectional controls, which could make a name
-// read as other words where Desktop shows it, quoted, in its consent dialog.
-const CONTROL_CHARACTER = /[\p{Cc}\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+// What a name never holds, as Desktop refuses it in the name its consent
+// dialog shows, quoted, and the controller with it: a control character or a
+// line or paragraph separator, which would break the dialog's line; half of
+// a surrogate pair; a Unicode format character other than the zero-width
+// joiner and non-joiner, which is invisible, and among which the
+// text-direction marks, embeddings, overrides and isolates can make the
+// dialog's question read as other words; and a double quote, since the
+// dialog quotes the name. A name with any of them could be kept but set up
+// on no computer.
+const REFUSED_CHARACTER = /[\p{Cc}\p{Cs}\u2028\u2029"]|(?![\u200c\u200d])\p{Cf}/u;
 
 /**
- * A name as the controller takes one: trimmed, 1-60 characters, on one line
- * and with no control character; null for anything else.
+ * A name as the controller takes one: trimmed, 1-60 characters, on one line,
+ * with no double quote and no invisible character; null for anything else.
  */
 export function normalizeClaudeCodeLoginLabel(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -52,7 +58,7 @@ export function normalizeClaudeCodeLoginLabel(value: unknown): string | null {
   }
   const label = value.trim();
   const length = Array.from(label).length;
-  return length >= 1 && length <= CLAUDE_CODE_LOGIN_LABEL_MAX_LENGTH && !CONTROL_CHARACTER.test(label)
+  return length >= 1 && length <= CLAUDE_CODE_LOGIN_LABEL_MAX_LENGTH && !REFUSED_CHARACTER.test(label)
     ? label
     : null;
 }

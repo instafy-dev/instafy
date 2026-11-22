@@ -1976,6 +1976,10 @@ test("Locate without a Find reads the login shell, so the grant carries its PATH
 
 // ------------------------------------------------------------ logins (11.19)
 
+// What Desktop says of a name it won't show in its consent dialog.
+const LABEL_REFUSAL =
+  "A Claude Code login's name must be 1 to 60 characters on one line, with no double quotes or invisible characters. Rename the login, then try again.";
+
 test("Use Claude Code on this computer sets up the first login in the login shell's CLAUDE_CONFIG_DIR, or the usual folder, and records it alone", async () => {
   const context = setup();
   const dialogs = fakeDialogs();
@@ -2073,7 +2077,7 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
     LOGIN_1.replace(/-/g, ""),
     `${LOGIN_1.slice(0, -1)}g`,
     // Full-width digits and letters look like hex but are not.
-    LOGIN_1.replace(/c/g, "ｃ"),
+    LOGIN_1.replace(/c/g, "\u{ff43}"),
   ];
   const badLabels = [
     undefined,
@@ -2089,8 +2093,8 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
     "Wo\u0000rk",
     "Wo\u007frk",
     "Wo\u0085rk",
-    "Wo rk",
-    "Wo rk",
+    "Wo\u{2028}rk",
+    "Wo\u{2029}rk",
     "Wo\ud800rk",
     "x".repeat(61),
     "\u{1F4BC}".repeat(61),
@@ -2112,7 +2116,7 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
     await assert.rejects(
       context.invoke("enable", host, { loginId: LOGIN_1, label }),
       (error) => {
-        assert.equal(error.message, "A Claude Code login's name must be 1 to 60 characters, on one line.");
+        assert.equal(error.message, LABEL_REFUSAL);
         return true;
       },
       JSON.stringify(label),
@@ -2124,7 +2128,9 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
   // The longest name, counted in characters rather than UTF-16 units, passes, quoted as given.
   const longest = "\u{1F4BC}".repeat(60);
   assert.equal(consent.parseClaudeCodeLoginLabel(longest), longest);
-  assert.equal(consent.parseClaudeCodeLoginLabel('Work "A" & co.'), 'Work "A" & co.');
+  assert.equal(consent.parseClaudeCodeLoginLabel("Kim's work & co."), "Kim's work & co.");
+  // The dialog quotes the name, so a double quote in it is refused.
+  assert.equal(consent.parseClaudeCodeLoginLabel('Work "A" & co.'), null);
   await context.invoke("enable", host, { loginId: LOGIN_1, label: longest });
   assert.equal(dialogs.shown[0].message, loginQuestion(longest));
 
@@ -2141,7 +2147,7 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
   for (const label of badLabels) {
     await assert.rejects(
       context.invoke("addLogin", host, { loginId: LOGIN_2, label, folder: "usual" }),
-      /1 to 60 characters/,
+      (error) => error.message === LABEL_REFUSAL,
     );
   }
   for (const folder of [
@@ -2165,6 +2171,144 @@ test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters;
   assert.equal(dialogs.shown.length, 1);
   assert.equal(dialogs.folderPicks.length, 0);
   assert.deepEqual(context.consents.read(), before);
+});
+
+test("a login's name holds no format character but the joiners, and no double quote, so the dialog's question reads as it is", async () => {
+  // The reviewer's name: a right-to-left override, then words it turns
+  // around into `Personal" for you@corp.example?`, so the question would
+  // seem to name that account, with the real one reversed after it.
+  const reversed = '\u{202e}?elpmaxe.proc@uoy rof "lanosreP';
+  // Each kind of format character (Unicode category Cf).
+  const formatCharacters = {
+    "embeddings and overrides": [0x202a, 0x202b, 0x202c, 0x202d, 0x202e],
+    isolates: [0x2066, 0x2067, 0x2068, 0x2069],
+    "direction marks": [0x200e, 0x200f, 0x61c],
+    "zero-width characters": [0x200b, 0x2060, 0xfeff],
+    "other format characters": [0xad, 0x600, 0x6dd, 0x180e, 0x2061, 0x206a, 0xfff9, 0x110bd, 0x1d173, 0xe0001, 0xe0067],
+  };
+  for (const [kind, codes] of Object.entries(formatCharacters)) {
+    for (const code of codes) {
+      assert.equal(
+        consent.parseClaudeCodeLoginLabel(`Wo${String.fromCodePoint(code)}rk`),
+        null,
+        `${kind}: U+${code.toString(16)}`,
+      );
+    }
+  }
+  // Every format character there is, but the two joiners.
+  let formatCount = 0;
+  for (let code = 0; code <= 0x10ffff; code += 1) {
+    if (code >= 0xd800 && code <= 0xdfff) {
+      continue;
+    }
+    const character = String.fromCodePoint(code);
+    if (!/\p{Cf}/u.test(character)) {
+      continue;
+    }
+    formatCount += 1;
+    const passes = consent.parseClaudeCodeLoginLabel(`Wo${character}rk`) !== null;
+    assert.equal(passes, code === 0x200c || code === 0x200d, `U+${code.toString(16)}`);
+  }
+  assert.ok(formatCount > 150, `${formatCount} format characters`);
+  for (const label of [
+    reversed,
+    "\u{202e}?elpmaxe.proc@uoy rof lanosreP",
+    'Personal" for you@corp.example? Not "x',
+    '"Work"',
+    "\u{2066}Work\u{2069}",
+  ]) {
+    assert.equal(consent.parseClaudeCodeLoginLabel(label), null, JSON.stringify(label));
+  }
+  // Names some people need pass, as given: an emoji sequence joined by ZWJ,
+  // a word parted by ZWNJ, a variation selector, a combining mark and a
+  // typographic apostrophe.
+  const kept = [
+    "\u{1f469}\u{200d}\u{1f4bb} Dev",
+    "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}",
+    "\u{2764}\u{fe0f} Home",
+    "Cafe\u{301}",
+    "Kim\u{2019}s work",
+  ];
+  for (const label of kept) {
+    assert.equal(consent.parseClaudeCodeLoginLabel(label), label, JSON.stringify(label));
+  }
+
+  // Through the methods: refused with a plain sentence, before any picker or dialog.
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  await context.invoke("detect", host);
+  for (const label of [reversed, "Wo\u{200b}rk", 'Work "A"']) {
+    await assert.rejects(
+      context.invoke("enable", host, { loginId: LOGIN_1, label }),
+      (error) => {
+        assert.equal(error.message, LABEL_REFUSAL);
+        return true;
+      },
+      JSON.stringify(label),
+    );
+  }
+  assert.deepEqual(context.consents.read(), {});
+  await context.invoke("enable", host, { loginId: LOGIN_1, label: kept[0] });
+  for (const label of [reversed, "Wo\u{2066}rk"]) {
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId: LOGIN_2, label, folder: "choose" }),
+      (error) => {
+        assert.equal(error.message, LABEL_REFUSAL);
+        return true;
+      },
+      JSON.stringify(label),
+    );
+  }
+  assert.equal(dialogs.folderPicks.length, 0);
+  assert.deepEqual(dialogs.shown.map((dialog) => dialog.message), [loginQuestion(kept[0])]);
+});
+
+test("an email with an invisible format character names no account, so no consent dialog is shown for it", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  await consentAs(context, hostFor({ consents: context.consents, dialogs }));
+  const emailRefusal = "Instafy couldn't read this account's email. Sign in again, then try again.";
+  for (const email of [
+    // The reviewer's trick on the email itself: an address reversed after an override.
+    "\u{202e}tset.elpmaxe@a-nosrep",
+    "person-a@example.test\u{200e}",
+    "person\u{200b}-a@example.test",
+    "person-a@exa\u{feff}mple.test",
+    "\u{2066}person-a@example.test\u{2069}",
+  ]) {
+    const host = hostFor({ consents: context.consents, dialogs, email });
+    // The account is still the session's, so what Desktop has for it reads as before.
+    assert.equal((await context.invoke("status", host)).consented, true, JSON.stringify(email));
+    for (const [method, payload] of [
+      ["enable", undefined],
+      ["addLogin", { loginId: LOGIN_2, label: "Personal", folder: "choose" }],
+    ]) {
+      await assert.rejects(
+        context.invoke(method, host, payload),
+        (error) => {
+          assert.equal(error.message, emailRefusal);
+          return true;
+        },
+        `${method} ${JSON.stringify(email)}`,
+      );
+    }
+  }
+  assert.equal(dialogs.shown.length, 1, "only the first login's dialog");
+  assert.equal(dialogs.folderPicks.length, 0);
+
+  // An account with no record gets no first login's dialog either.
+  const fresh = setup();
+  const freshDialogs = fakeDialogs();
+  const freshHost = hostFor({
+    consents: fresh.consents,
+    dialogs: freshDialogs,
+    email: "\u{202e}tset.elpmaxe@a-nosrep",
+  });
+  await fresh.invoke("detect", freshHost);
+  await assert.rejects(fresh.invoke("enable", freshHost, FIRST_LOGIN), (error) => error.message === emailRefusal);
+  assert.equal(freshDialogs.shown.length, 0);
+  assert.deepEqual(fresh.consents.read(), {});
 });
 
 test("Add a login needs the lane on, opens a native folder picker for another folder, and adds the login once its own dialog is confirmed", async () => {
@@ -2509,6 +2653,8 @@ function runtimeHarness(context) {
       launchGrants: context.extensions.launchGrantsWithoutValues(),
     },
     decision: "replaced",
+    // Answers for the next replacements, in order, before `decision`.
+    decisions: [],
   };
   const invoke = (methodId, host, payload = {}) =>
     registry.invokeDesktopExtensionWithLaunchGrants({
@@ -2521,7 +2667,8 @@ function runtimeHarness(context) {
       runningRuntime: () => state.runtime,
       replaceRuntime: async (current) => {
         replaced.push(current.handle);
-        if (state.decision === "kept") {
+        const decision = state.decisions.length > 0 ? state.decisions.shift() : state.decision;
+        if (decision === "kept") {
           return "kept";
         }
         const launchGrants = await context.extensions.resolveLaunchGrants({
@@ -2641,6 +2788,152 @@ test("Add a login and Remove from this computer change the grant, so they replac
   await harness.invoke("removeLogin", host, { loginId: LOGIN_1 });
   assert.equal(harness.replaced.length, 6);
   assert.equal(harness.state.runtime.launchGrants[0].grant, null);
+});
+
+// Native dialogs a test answers one at a time, in the order they opened,
+// and a folder picker that hands out the folders given, in order.
+function heldDialogs(folders = []) {
+  const dialogs = {
+    shown: [],
+    open: [],
+    folderPicks: 0,
+    picks: 0,
+    async showMessageBox(options) {
+      dialogs.shown.push(options);
+      return await new Promise((resolve) => dialogs.open.push(resolve));
+    },
+    async pickFile() {
+      dialogs.picks += 1;
+      return null;
+    },
+    async pickFolder() {
+      dialogs.folderPicks += 1;
+      return folders.shift() ?? null;
+    },
+    answer(button) {
+      dialogs.open.shift()(button);
+    },
+  };
+  return dialogs;
+}
+
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+async function untilOpen(dialogs, count) {
+  while (dialogs.open.length < count) {
+    await nextTurn();
+  }
+}
+
+// Long enough for a call that may not start yet to have started if it could.
+async function aWhile() {
+  for (let turn = 0; turn < 20; turn += 1) {
+    await nextTurn();
+  }
+}
+
+// A record of these logins, and a runtime started with its grant.
+async function runningWithLogins(context, logins) {
+  const { claude, binDir } = context.fixture;
+  writeConsentRecord(context, { binaryPath: claude, pathEntries: [binDir], env: {}, logins });
+  const harness = runtimeHarness(context);
+  harness.state.runtime.launchGrants = await context.extensions.resolveLaunchGrants({
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    consents: context.consents,
+  });
+  return {
+    harness,
+    recorded: () => (readConsentRecord(context)?.logins ?? []).map((login) => login.id),
+    running: () => grantedLogins(harness.state.runtime.launchGrants[0].grant).map((login) => login.id),
+  };
+}
+
+const outcome = (call) =>
+  call.then(
+    () => "made",
+    (error) => error.code ?? error.message,
+  );
+
+test("Keep working on one consent change never undoes another, since a module's consent changes run one at a time", async () => {
+  const context = setup();
+  const { secondConfigDir, home } = context.fixture;
+  const teamFolder = path.join(home, ".claude-team");
+  fs.mkdirSync(teamFolder, { mode: 0o700 });
+  const { harness, recorded, running } = await runningWithLogins(context, [
+    recordLogin(LOGIN_1),
+    recordLogin(LOGIN_2, secondConfigDir),
+  ]);
+  const dialogs = heldDialogs([teamFolder]);
+  const host = hostFor({ consents: context.consents, dialogs });
+
+  // The reviewer's case. Add a login for L3, its consent dialog open.
+  const adding = outcome(harness.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "choose" }));
+  await untilOpen(dialogs, 1);
+  // Remove from this computer for L2 waits for it, end to end.
+  const removing = outcome(harness.invoke("removeLogin", host, { loginId: LOGIN_2 }));
+  await aWhile();
+  assert.deepEqual(recorded(), [LOGIN_1, LOGIN_2]);
+  assert.equal(harness.replaced.length, 0);
+  // A status read does not wait for the dialog.
+  assert.deepEqual(
+    (await harness.invoke("status", host)).logins.map((login) => login.id),
+    [LOGIN_1, LOGIN_2],
+  );
+
+  // The person confirms L3 while a turn runs and keeps working, so L3 is put
+  // back. Only then does the removal run, and its replacement is made.
+  harness.state.decisions = ["kept", "replaced"];
+  dialogs.answer(0);
+  assert.equal(await adding, "desktop_extension_change_not_made");
+  assert.equal(await removing, "made");
+  assert.deepEqual(recorded(), [LOGIN_1]);
+  assert.deepEqual(running(), [LOGIN_1]);
+  assert.equal(harness.replaced.length, 2);
+  // The removed login stays removed: a status read replaces nothing and grants it nowhere.
+  await harness.invoke("status", host);
+  assert.equal(harness.replaced.length, 2);
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)).map((login) => login.id), [LOGIN_1]);
+});
+
+test("two Add a login calls run one after the other, so keeping the work on either undoes only that one", async () => {
+  for (const [first, second, left] of [
+    ["kept", "replaced", [LOGIN_1, LOGIN_3]],
+    ["replaced", "kept", [LOGIN_1, LOGIN_2]],
+  ]) {
+    const context = setup();
+    const { secondConfigDir, home } = context.fixture;
+    const teamFolder = path.join(home, ".claude-team");
+    fs.mkdirSync(teamFolder, { mode: 0o700 });
+    const { harness, recorded, running } = await runningWithLogins(context, [recordLogin(LOGIN_1)]);
+    harness.state.decisions = [first, second];
+    const dialogs = heldDialogs([secondConfigDir, teamFolder]);
+    const host = hostFor({ consents: context.consents, dialogs });
+    const outcomeOf = (decision) => (decision === "kept" ? "desktop_extension_change_not_made" : "made");
+
+    const adding = outcome(harness.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" }));
+    await untilOpen(dialogs, 1);
+    const addingAnother = outcome(
+      harness.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "choose" }),
+    );
+    await aWhile();
+    // The second has asked nothing yet: no folder picker, no dialog.
+    assert.equal(dialogs.folderPicks, 1, first);
+    assert.equal(dialogs.shown.length, 1, first);
+
+    dialogs.answer(0);
+    assert.equal(await adding, outcomeOf(first), first);
+    // Only now does the second pick its folder and ask, about the record the first left.
+    await untilOpen(dialogs, 1);
+    assert.equal(dialogs.folderPicks, 2, first);
+    assert.equal(dialogs.shown[1].message, loginQuestion("Team"), first);
+    assert.deepEqual(recorded(), first === "kept" ? [LOGIN_1] : [LOGIN_1, LOGIN_2], first);
+    dialogs.answer(0);
+    assert.equal(await addingAnother, outcomeOf(second), first);
+    assert.deepEqual(recorded(), left, first);
+    assert.deepEqual(running(), left, first);
+  }
 });
 
 test("confirming a moved CA file for the program in use replaces the runtime that holds the old place", async () => {

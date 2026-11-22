@@ -218,7 +218,11 @@ function requireLogin(payload: unknown): LoginRequest {
   const id = requireLoginId(payload);
   const label = parseClaudeCodeLoginLabel(payloadFields(payload).label);
   if (!label) {
-    throw new Error("A Claude Code login's name must be 1 to 60 characters, on one line.");
+    // A name the controller keeps can still hold a double quote or an
+    // invisible character, which Desktop won't show in its dialog.
+    throw new Error(
+      "A Claude Code login's name must be 1 to 60 characters on one line, with no double quotes or invisible characters. Rename the login, then try again.",
+    );
   }
   return Object.freeze({ id, label });
 }

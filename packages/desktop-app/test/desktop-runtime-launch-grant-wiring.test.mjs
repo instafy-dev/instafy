@@ -123,6 +123,16 @@ test("an extension call is keyed by the session the calling frame shows, never b
   assert.deepEqual([...new Set(requestReads)], ["controllerUrl"]);
 });
 
+test("the session email an extension may name in a dialog holds no invisible format character", () => {
+  // A text-direction mark could make a consent question name another account.
+  const normalize = functionBody("normalizeDesktopSessionEmail");
+  assert.match(normalize, /if \(hasNonJoinerFormatCharacter\(email\)\) \{\s*return null;\s*\}/);
+  assert.match(
+    functionBody("resolveDesktopExtensionHost"),
+    /email: normalizeDesktopSessionEmail\(visibleSession\?\.email\),/,
+  );
+});
+
 test("an extension's folder picker is the native one, showing hidden folders and keeping a chosen link as itself", () => {
   // Add a login's folder for "choose" (docs/Local-Engine-Turns.md 11.19).
   const dialogs = functionBody("createDesktopExtensionDialogs");

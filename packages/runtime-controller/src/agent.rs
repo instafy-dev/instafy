@@ -1495,11 +1495,15 @@ struct LeasingRuntime {
 ///   (`device_grants::run_once_job_cannot_start`), and of those only one that
 ///   targets this runtime, targets none, or carries runtime routing metadata
 ///   (a spread job may run on a runtime it does not target). A local-engine
-///   turn counts only for a runtime its person owns with Claude Code ready, as
-///   the lease clause reads them, since it waits unpinned for its person's
-///   computer, possibly for days, and must not keep every other runtime of the
-///   space from this read meanwhile. This read counts every other such job,
-///   whatever the lease query's other filters would say about it.
+///   turn counts only when this runtime could lease it now, by the lease
+///   clause's own lane conditions (`claude_code_lane::lane_turn_runs_on`):
+///   its person's runtime with Claude Code ready on the turn's login, a login
+///   no other turn holds, while this runtime runs no lane turn. Such a turn
+///   waits unpinned for its person's computer, possibly for days, held at a
+///   plan's limit or for a login set up on another computer, and must not
+///   keep this runtime, or any other of the space, from this read meanwhile.
+///   This read counts every other such job, whatever the lease query's other
+///   filters would say about it.
 ///
 /// Anything else, a failed check or a failed read included, takes the leasing
 /// transaction. Every lease and every refusal therefore still happens under
@@ -1530,6 +1534,9 @@ async fn idle_lease_poll_finds_no_work(
                     exists (
                         select 1
                         from agent_jobs aj
+                        ",
+                crate::claude_code_lane::lane_job_login!(),
+                "
                         where aj.project_id = r.project_id
                           and aj.status = 'queued'
                           and not ",
@@ -1543,11 +1550,9 @@ async fn idle_lease_poll_finds_no_work(
                           )
                           and (
                               aj.engine is null
-                              or (
-                                  r.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
-                                      = aj.payload #>> '{user_id}'
-                                  and r.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
-                              )
+                              or ",
+                crate::claude_code_lane::lane_turn_runs_on!("r"),
+                "
                           )
                     ) as has_queued_work
              from runtimes r
@@ -5145,29 +5150,9 @@ pub(crate) async fn lease_next_agent_job(
                        nullif(aj.payload #>> '{metadata,multiAgentPlan,parentRuntimeId}', '') as multi_agent_parent_runtime_id,
                        job_login.lane_login_id
                 from agent_jobs aj
-                -- The Claude Code login a local-engine turn takes
-                -- (docs/Local-Engine-Turns.md 11.19): the first of its
-                -- claude_code_login_ids that is still one of its person's
-                -- logins, else, when none is, their first login, the oldest.
-                -- None for a person with no login, whose turns wait, and for
-                -- every other job.
-                left join lateral (
-                    select lane_login.id as lane_login_id
-                      from claude_code_logins lane_login
-                      left join unnest(aj.claude_code_login_ids) with ordinality
-                           as wanted_login(id, position)
-                        on wanted_login.id = lane_login.id
-                     where lane_login.user_id = case
-                               when aj.engine is not null
-                                and aj.payload #>> '{user_id}'
-                                    ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                               then (aj.payload #>> '{user_id}')::uuid
-                           end
-                     order by wanted_login.position nulls last,
-                              lane_login.created_at,
-                              lane_login.id
-                     limit 1
-                ) job_login on true
+                -- The Claude Code login a local-engine turn takes, as
+                -- job_login.lane_login_id (`claude_code_lane::lane_job_login`).
+                ", crate::claude_code_lane::lane_job_login!(), "
                 where aj.project_id = $1
                   and status = 'queued'
                   -- A job holding device grants is leased once, only within
@@ -5188,35 +5173,21 @@ pub(crate) async fn lease_next_agent_job(
                   -- own in its space: a private runtime the controller
                   -- attested as theirs, with the `claudeCode` capability of
                   -- version 2 registration attested as ready on the turn's
-                  -- Claude Code login. It waits, queued, until one is, and
-                  -- while another turn runs on that login: one runs at a time
-                  -- on each login, and turns on a person's other logins run
-                  -- meanwhile (`claude_code_lane.rs`,
+                  -- Claude Code login. It waits, queued, until one is, while
+                  -- another turn runs on that login, and while this runtime
+                  -- runs another: one runs at a time on each login and on
+                  -- each computer, and turns on a person's other logins run
+                  -- meanwhile on their other computers
+                  -- (`claude_code_lane::lane_turn_runs_on`,
                   -- docs/Local-Engine-Turns.md 11.7, 11.19). A hosted runtime
                   -- has no owner filter below, so this is what keeps it out.
                   and (
                         aj.engine is null
-                        or (
-                            job_login.lane_login_id is not null
-                            and exists (
-                                select 1 from runtimes lane_runtime
-                                 where lane_runtime.id = $2
-                                   and lane_runtime.project_id = $1
-                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
-                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
-                                       = aj.payload #>> '{user_id}'
-                                   and lane_runtime.capabilities #> '{claudeCode,version}' = '2'::jsonb
-                                   and lane_runtime.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
-                                   and lane_runtime.capabilities
-                                       #> array['claudeCode', 'logins', job_login.lane_login_id::text, 'ready']
-                                       = 'true'::jsonb
-                            )
-                            and not exists (
-                                select 1 from agent_jobs running_lane_turn
-                                 where running_lane_turn.engine = 'claude-code'
-                                   and running_lane_turn.status = 'leased'
-                                   and running_lane_turn.claude_code_login_id = job_login.lane_login_id
-                            )
+                        or exists (
+                            select 1 from runtimes lane_runtime
+                             where lane_runtime.id = $2
+                               and lane_runtime.project_id = $1
+                               and ", crate::claude_code_lane::lane_turn_runs_on!("lane_runtime"), "
                         )
                   )
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')

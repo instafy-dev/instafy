@@ -113,35 +113,36 @@ export function parseClaudeCodeLoginId(value: unknown): string | null {
   return typeof value === "string" && PAGE_LOGIN_ID_PATTERN.test(value) ? value.toLowerCase() : null;
 }
 
-// A character a login's name may hold: no control character (C0, DEL, C1),
-// nothing that breaks the dialog's line (the line and paragraph separators
-// too), and no half of a surrogate pair, which no name the controller keeps
-// can hold.
-function isLoginLabelCharacter(character: string): boolean {
-  const code = character.codePointAt(0) ?? 0;
-  return !(
-    code <= 0x1f ||
-    (code >= 0x7f && code <= 0x9f) ||
-    code === 0x2028 ||
-    code === 0x2029 ||
-    (code >= 0xd800 && code <= 0xdfff)
-  );
-}
+// What a login's name never holds:
+// - a control character (C0, DEL, C1) or a line or paragraph separator,
+//   which would break the dialog's line;
+// - half of a surrogate pair, which no name the controller keeps can hold;
+// - a Unicode format character (category Cf) other than the joiners. These
+//   are invisible, and the text-direction marks, embeddings, overrides and
+//   isolates among them can make the dialog's question read as other words,
+//   such as an email the page chose with the real one reversed after it.
+//   ZWJ and ZWNJ only join or part the letters beside them, as emoji
+//   sequences and some scripts need. The variation selectors are combining
+//   marks, not format characters, and pass as well;
+// - a double quote, since the dialog quotes the name.
+const LOGIN_LABEL_REFUSED = /[\p{Cc}\p{Cs}\u{2028}\u{2029}"]|(?![\u{200c}\u{200d}])\p{Cf}/u;
 
 /**
  * A login's name from the page, as the controller keeps it: trimmed, on one
  * line, 1 to 60 characters, with no control characters. Desktop only shows
  * it, quoted, in the consent dialog beside the folder it checked itself, and
- * keeps it nowhere. Null for anything else.
+ * keeps it nowhere, so it also refuses what could make that dialog read as
+ * other words: a format character other than the joiners, and a double
+ * quote. Null for anything else.
  */
 export function parseClaudeCodeLoginLabel(value: unknown): string | null {
   if (typeof value !== "string" || value.trim() !== value) {
     return null;
   }
-  const characters = Array.from(value);
-  return characters.length >= 1 &&
-    characters.length <= CLAUDE_CODE_LOGIN_LABEL_MAX_CHARS &&
-    characters.every(isLoginLabelCharacter)
+  const characters = Array.from(value).length;
+  return characters >= 1 &&
+    characters <= CLAUDE_CODE_LOGIN_LABEL_MAX_CHARS &&
+    !LOGIN_LABEL_REFUSED.test(value)
     ? value
     : null;
 }

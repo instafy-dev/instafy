@@ -1021,7 +1021,7 @@ async fn update_my_agent(
 
     let existing = transaction
         .query_opt(
-            "select handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id
+            "select handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id
              from user_agents
              where id = $1 and user_id = $2 and deleted_at is null
              limit 1",
@@ -1042,7 +1042,6 @@ async fn update_my_agent(
     let existing_model: Option<String> = existing.get("model");
     let existing_reasoning_effort: Option<String> = existing.get("reasoning_effort");
     let existing_credential_id: Option<Uuid> = existing.get("credential_id");
-    let existing_claude_code_login_id: Option<Uuid> = existing.get("claude_code_login_id");
 
     let next_handle = desired_handle.unwrap_or_else(|| existing_handle.clone());
     if next_handle != existing_handle {
@@ -1135,17 +1134,22 @@ async fn update_my_agent(
         }
         None => existing_provider,
     };
-    // The login a Claude Code agent's turns run on (11.19): kept, cleared or
-    // set as the body says while the agent's AI is Claude Code, and cleared
-    // whenever it no longer is, as choosing a connection or Instafy AI does.
-    let next_claude_code_login_id = match body.claude_code_login_id.as_ref() {
-        Some(Some(raw)) => {
-            Some(resolve_claude_code_login(&transaction, &user_id, &next_provider, raw).await?)
-        }
-        Some(None) => None,
-        None if next_provider == PROVIDER_CLAUDE_CODE => existing_claude_code_login_id,
-        None => None,
+    // The login a Claude Code agent's turns run on (11.19): set or cleared as
+    // the body says while the agent's AI is Claude Code, and cleared whenever
+    // it no longer is, as choosing a connection or Instafy AI does. Otherwise
+    // the update leaves the column as the row holds it then, never as this
+    // request read it: a delete of the login since then has cleared it, and
+    // writing the old id back would name a login that is gone.
+    let claude_code_login_update: Option<Option<Uuid>> = match body.claude_code_login_id.as_ref() {
+        Some(Some(raw)) => Some(Some(
+            resolve_claude_code_login(&transaction, &user_id, &next_provider, raw).await?,
+        )),
+        Some(None) => Some(None),
+        None if next_provider == PROVIDER_CLAUDE_CODE => None,
+        None => Some(None),
     };
+    let update_claude_code_login = claude_code_login_update.is_some();
+    let next_claude_code_login_id = claude_code_login_update.flatten();
 
     let next_model = match body.model {
         None => existing_model,
@@ -1285,7 +1289,7 @@ async fn update_my_agent(
                  model = $9,
                  reasoning_effort = $10,
                  bio = case when $12 then $11 else bio end,
-                 claude_code_login_id = $13,
+                 claude_code_login_id = case when $14 then $13 else claude_code_login_id end,
                  updated_at = now()
              where id = $1 and user_id = $2 and deleted_at is null
              returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, deleted_at, created_at, updated_at",
@@ -1303,6 +1307,7 @@ async fn update_my_agent(
                 &next_bio,
                 &update_bio,
                 &next_claude_code_login_id,
+                &update_claude_code_login,
             ],
         )
         .await

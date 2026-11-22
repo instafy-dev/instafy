@@ -64,6 +64,7 @@ import {
   desktopRuntimeLaunchGrantsEqual,
   desktopRuntimeLaunchGrantsForStart,
   desktopRuntimeLaunchGrantsHeld,
+  hasNonJoinerFormatCharacter,
   invokeDesktopExtensionWithLaunchGrants,
   type DesktopExtensionConsentBackend,
   type DesktopExtensionDialogs,
@@ -2099,6 +2100,11 @@ function normalizeDesktopSessionEmail(value: unknown): string | null {
     if (code <= 0x1f || code === 0x7f) {
       return null;
     }
+  }
+  // An invisible format character, such as a text-direction mark, names no
+  // account: a consent dialog naming this email would read as other words.
+  if (hasNonJoinerFormatCharacter(email)) {
+    return null;
   }
   return email;
 }

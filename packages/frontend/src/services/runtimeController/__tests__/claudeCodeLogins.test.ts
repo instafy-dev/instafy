@@ -140,6 +140,32 @@ describe("the person's Claude Code logins", () => {
       expect(normalizeClaudeCodeLoginLabel(label), String(label)).toBeNull();
     }
   });
+
+  it("refuses what Desktop's consent dialog refuses in a name: a double quote and invisible characters", () => {
+    for (const label of [
+      // A right-to-left override, which can turn the dialog's words around.
+      "Work \u202eemoH",
+      // A zero-width space and a soft hyphen, invisible.
+      "Work\u200bplan",
+      "Work\u00adplan",
+      // A double quote, which the dialog wraps the name in.
+      'Work "plan"',
+      // England's flag: a black flag and tag characters, a format character each.
+      "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+      // A byte order mark inside the name, and a lone half of a surrogate pair.
+      "Wo\ufeffrk",
+      "Work\ud800",
+    ]) {
+      expect(normalizeClaudeCodeLoginLabel(label), JSON.stringify(label)).toBeNull();
+    }
+    // The joiners stay: an emoji joined by a zero-width joiner, and a name a
+    // zero-width non-joiner parts, as Persian writes it.
+    expect(normalizeClaudeCodeLoginLabel("Coding \u{1F469}\u200d\u{1F4BB}")).toBe("Coding \u{1F469}\u200d\u{1F4BB}");
+    expect(normalizeClaudeCodeLoginLabel("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645")).toBe(
+      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+    );
+    expect(normalizeClaudeCodeLoginLabel("Work 'plan'")).toBe("Work 'plan'");
+  });
 });
 
 describe("an agent's Claude Code login", () => {

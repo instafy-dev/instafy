@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use runtime_contracts::claude_code_lane::{CAPABILITY_VERSION, MAX_LOGINS};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::watch;
@@ -1187,39 +1188,49 @@ fn parse_granted_env(json: &OsStr) -> Result<Vec<(&'static str, OsString)>, NotR
     Ok(env)
 }
 
+/// One entry of `INSTAFY_CLAUDE_CODE_LOGINS_JSON`, as Desktop writes it (11.19). Read into this
+/// shape, an entry with another key, a key twice (which a JSON object read as a map would let
+/// through, keeping its last value), no `configDir`, or a value of another type fails.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantedLogin {
+    id: String,
+    /// Required, though it may be `null`: an `Option` read the usual way would take a missing
+    /// `configDir` for `null`, Claude Code's usual folder.
+    #[serde(rename = "configDir", deserialize_with = "Option::deserialize")]
+    config_dir: Option<String>,
+}
+
 /// `INSTAFY_CLAUDE_CODE_LOGINS_JSON` (11.19), read strictly: a list of one to [`MAX_LOGINS`]
 /// objects with exactly an `id`, a UUID in its hyphenated form, and a `configDir`, an absolute
-/// path or `null` for Claude Code's usual folder; no id twice, and no folder twice (the usual one
-/// included), as paths compare on a Mac. Anything else, an absent value included, makes the whole
-/// grant malformed (`binary_unsafe`): a list the runtime only half understood could start `claude`
-/// with a folder the person never consented to.
+/// path or `null` for Claude Code's usual folder, each key once; no id twice, and no folder twice
+/// (the usual one included), as paths compare on a Mac. Anything else, an absent value included,
+/// makes the whole grant malformed (`binary_unsafe`): a list the runtime only half understood
+/// could start `claude` with a folder the person never consented to.
 fn parse_logins(json: Option<&OsStr>) -> Result<Vec<Login>, NotReadyReason> {
     let malformed = NotReadyReason::BinaryUnsafe;
-    let entries: Vec<Value> = json
-        .and_then(OsStr::to_str)
-        .and_then(|text| serde_json::from_str(text).ok())
-        .ok_or(malformed)?;
+    let text = json.and_then(OsStr::to_str).ok_or(malformed)?;
+    // Each entry is an object: serde reads a struct from a list of its fields' values too.
+    let shapes: Vec<Value> = serde_json::from_str(text).map_err(|_| malformed)?;
+    if !shapes.iter().all(Value::is_object) {
+        return Err(malformed);
+    }
+    let entries: Vec<GrantedLogin> = serde_json::from_str(text).map_err(|_| malformed)?;
     if entries.is_empty() || entries.len() > MAX_LOGINS {
         return Err(malformed);
     }
     let mut logins: Vec<Login> = Vec::with_capacity(entries.len());
-    for entry in &entries {
-        let entry = entry.as_object().ok_or(malformed)?;
-        if entry.len() != 2 {
-            return Err(malformed);
-        }
-        let id = entry
-            .get("id")
-            .and_then(Value::as_str)
+    for entry in entries {
+        let id = Some(entry.id.as_str())
             .filter(|id| id.len() == 36)
             .and_then(|id| Uuid::parse_str(id).ok())
             .ok_or(malformed)?;
-        let config_dir = match entry.get("configDir").ok_or(malformed)? {
-            Value::Null => None,
-            Value::String(folder) if !folder.contains('\0') && Path::new(folder).is_absolute() => {
+        let config_dir = match entry.config_dir {
+            None => None,
+            Some(folder) if !folder.contains('\0') && Path::new(&folder).is_absolute() => {
                 Some(PathBuf::from(folder))
             }
-            _ => return Err(malformed),
+            Some(_) => return Err(malformed),
         };
         let taken = logins.iter().any(|login| {
             login.id == id
@@ -1615,34 +1626,47 @@ impl LaneState {
         Some(capability)
     }
 
-    /// What the timed re-probe has to probe now (3.2, 11.11).
+    /// What the timed re-probe has to look at now (3.2, 11.11, 11.19).
     fn reprobe_due(&self, now: chrono::DateTime<chrono::Utc>) -> Reprobe {
-        let program_ready = matches!(self.program, Some(Ok(_)));
-        if !program_ready || self.logins.iter().any(|login| login.folder.is_err()) {
+        if !matches!(self.program, Some(Ok(_))) {
             return Reprobe::Everything;
         }
+        let folders: Vec<Uuid> = self
+            .logins
+            .iter()
+            .filter(|login| login.folder.is_err())
+            .map(|login| login.id)
+            .collect();
         let reset: Vec<Uuid> = self
             .logins
             .iter()
-            .filter(|login| login.hold.is_some_and(|hold| !hold.holds_at(now)))
+            .filter(|login| {
+                login.folder.is_ok() && login.hold.is_some_and(|hold| !hold.holds_at(now))
+            })
             .map(|login| login.id)
             .collect();
-        if reset.is_empty() {
+        if folders.is_empty() && reset.is_empty() {
             Reprobe::Nothing
         } else {
-            Reprobe::Logins(reset)
+            Reprobe::Logins { folders, reset }
         }
     }
 }
 
-/// What the timed re-probe probes.
+/// What the timed re-probe looks at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Reprobe {
-    /// The program, or a login's folder, is not ready: no lane turn runs to notice that the
-    /// person fixed it, so the program and every login no plan limit holds are probed again.
+    /// The program is not ready: no lane turn runs to notice that the person fixed it, so the
+    /// program and every login no plan limit holds are probed again.
     Everything,
-    /// The plan limits of these logins reset: each is probed again.
-    Logins(Vec<Uuid>),
+    /// The program is ready. The logins of `folders` have a folder that failed its checks: those
+    /// checks alone run again, which read the folder's owner and mode and start nothing, and a
+    /// login whose folder passes them is probed again. The plan limits of `reset` reset: each of
+    /// those logins is probed again.
+    Logins {
+        folders: Vec<Uuid>,
+        reset: Vec<Uuid>,
+    },
     Nothing,
 }
 
@@ -2093,13 +2117,19 @@ impl Lane {
         self.capability.subscribe()
     }
 
-    /// Probes again while the program or a login is not ready, and publishes a changed result
-    /// (3.2, 11.11): every `interval` while the program, or a login's folder, is not ready, since
-    /// no lane turn, and so no per-turn probe, runs to notice that the person fixed Claude Code
-    /// or the folder; and each login a plan limit holds at its reset time, however soon that
-    /// comes, so it reports ready again, or what the probe finds, and registers again. A held
-    /// login is probed for nothing until then, and ready ones are left to their turns' probes. A
-    /// hold that starts while it waits wakes it to wait for that reset too. Runs until dropped.
+    /// Looks again while the program or a login is not ready, and publishes a changed result
+    /// (3.2, 11.11, 11.19), since no lane turn, and so no per-turn probe, runs to notice that the
+    /// person fixed what was wrong:
+    /// - every `interval` while the program is not ready, the program and every login again;
+    /// - every `interval` while a login's folder fails its checks, those checks alone, which start
+    ///   nothing, so a folder that stays unusable, one that was deleted say, costs no `claude`
+    ///   command for as long as it stays granted; once it passes, that login alone is probed;
+    /// - each login a plan limit holds, at its reset time, however soon that comes, so it reports
+    ///   ready again, or what the probe finds.
+    ///
+    /// Each change registers again. A held login is probed for nothing until its reset, and ready
+    /// ones are left to their turns' probes. A hold that starts while it waits wakes it to wait
+    /// for that reset too. Runs until dropped.
     pub async fn reprobe_while_not_ready(&self, interval: Duration) {
         loop {
             let wait = self
@@ -2114,13 +2144,34 @@ impl Lane {
                 Reprobe::Everything => {
                     self.probe_and_publish_all().await;
                 }
-                Reprobe::Logins(logins) => {
-                    for login in logins {
+                Reprobe::Logins { folders, reset } => {
+                    for login in folders {
+                        self.recheck_folder_and_publish(login).await;
+                    }
+                    for login in reset {
                         self.probe_and_publish(login).await;
                     }
                 }
                 Reprobe::Nothing => {}
             }
+        }
+    }
+
+    /// The timed look at a login whose folder failed its checks (11.19): the checks again, alone,
+    /// which read the folder's owner and mode and start nothing. Once they pass, the login is
+    /// probed, unless a plan limit holds it; either way only a change is published.
+    async fn recheck_folder_and_publish(&self, login: Uuid) {
+        let Some(granted) = self.grant.login(login) else {
+            return;
+        };
+        // A hold that has ended is dropped: this look is the one its end called for.
+        let held = self.hold_or_clear(login).is_some();
+        let checked = self.grant.check_login(granted);
+        self.keep_folder(login, &checked);
+        if checked.is_ok() && !held {
+            self.probe_and_publish(login).await;
+        } else {
+            self.publish();
         }
     }
 
@@ -2868,6 +2919,11 @@ mod tests {
             json!([{ "id": id }]).to_string(),
             json!([{ "configDir": null }]).to_string(),
             json!([{ "id": id, "configDir": null, "label": "Work" }]).to_string(),
+            // A key twice: read as a map, the object would keep its last value.
+            format!(r#"[{{"id": "{id}", "configDir": null, "id": "{other}"}}]"#),
+            format!(r#"[{{"id": "{id}", "configDir": null, "configDir": "/home/person/.claude-work"}}]"#),
+            // An entry that is a list of the values, not an object.
+            json!([[id, null]]).to_string(),
             json!([{ "id": "not-a-uuid", "configDir": null }]).to_string(),
             json!([{ "id": Uuid::parse_str(&id).unwrap().simple().to_string(), "configDir": null }])
                 .to_string(),
@@ -3299,6 +3355,7 @@ mod tests {
             ],
         };
         let ready = Some(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
+        let unsafe_folder = Err(NotReadyReason::BinaryUnsafe);
         assert_eq!(
             state(ready, Ok(()), None).reprobe_due(now),
             Reprobe::Nothing
@@ -3309,17 +3366,93 @@ mod tests {
         );
         assert_eq!(
             state(ready, Ok(()), ended).reprobe_due(now),
-            Reprobe::Logins(vec![first])
+            Reprobe::Logins {
+                folders: vec![],
+                reset: vec![first],
+            }
         );
+        // A program that is not ready is probed again, and every login with it.
         for program in [None, Some(Err(NotReadyReason::ProbeFailed))] {
             assert_eq!(
                 state(program, Ok(()), ended).reprobe_due(now),
                 Reprobe::Everything
             );
+            assert_eq!(
+                state(program, unsafe_folder, None).reprobe_due(now),
+                Reprobe::Everything
+            );
         }
+        // A folder that fails its checks is looked at alone, held or not, and the other login,
+        // ready, is left to its turns.
+        for hold in [None, live, ended] {
+            assert_eq!(
+                state(ready, unsafe_folder, hold).reprobe_due(now),
+                Reprobe::Logins {
+                    folders: vec![first],
+                    reset: vec![],
+                },
+                "{hold:?}"
+            );
+        }
+    }
+
+    /// The timed look at a folder that failed its checks runs those checks alone (11.19): while
+    /// it still fails, nothing changes and nothing is published; once it passes, a login a plan
+    /// limit holds says so in place of the folder's reason, and nothing is probed for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failing_folder_is_checked_again_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let work = Uuid::new_v4();
+        let grant = parse(RawLaunchGrant {
+            logins_json: Some(logins_json(&[(
+                work,
+                Some(folder.path().to_str().unwrap()),
+            )])),
+            ..raw("/usr/local/bin/claude")
+        })
+        .unwrap()
+        .unwrap();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        let lane = Lane::new(grant);
+        lane.keep_program(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
+        assert!(lane.publish());
+        let hold = lane
+            .hold_for_plan_limit(work, Some(chrono::Utc::now().timestamp() + 3_600))
+            .expect("a hold");
+        let mut updates = lane.subscribe();
+        let entry = |updates: &mut watch::Receiver<Option<Value>>| {
+            updates.borrow_and_update().as_ref().expect("published")["logins"][work.to_string()]
+                .clone()
+        };
+        assert_eq!(entry(&mut updates)["reason"], "binary_unsafe");
         assert_eq!(
-            state(ready, Err(NotReadyReason::BinaryUnsafe), live).reprobe_due(now),
-            Reprobe::Everything
+            lane.state.lock().reprobe_due(chrono::Utc::now()),
+            Reprobe::Logins {
+                folders: vec![work],
+                reset: vec![],
+            }
+        );
+        lane.recheck_folder_and_publish(work).await;
+        assert!(!updates.has_changed().unwrap());
+
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        lane.recheck_folder_and_publish(work).await;
+        assert!(updates.has_changed().unwrap());
+        assert_eq!(
+            entry(&mut updates),
+            json!({
+                "ready": false,
+                "reason": "plan_limit",
+                "resetsAt": hold.resets_at_rfc3339(),
+                "planSignIn": false,
+            })
+        );
+        assert_eq!(lane.plan_limit_hold(work), Some(hold));
+        assert_eq!(
+            lane.state.lock().reprobe_due(chrono::Utc::now()),
+            Reprobe::Nothing
         );
     }
 
