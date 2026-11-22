@@ -18,8 +18,9 @@ export type DeviceAuthFlowBeginOptions = {
   provider: DeviceAuthProvider;
   label?: string | null;
   /**
-   * The ChatGPT sign-in this one replaces, whose name the new one takes.
-   * Without it a second sign-in is named "ChatGPT 2".
+   * The ChatGPT sign-in this one replaces. The controller gives the new one
+   * its place when it finishes and is of the same account; without it a
+   * second sign-in is named "ChatGPT 2".
    */
   replacesCredentialId?: string | null;
 };
@@ -37,6 +38,9 @@ export function useDeviceAuthFlow({
     provider: DeviceAuthProvider;
     sessionId: string;
     credentialId?: string | null;
+    /** Whether it took the place of the sign-in it was started to replace. */
+    replaced?: boolean | null;
+    notReplacedReason?: "different_account" | "gone" | null;
   }) => Promise<DeviceAuthFlowCompletionResult> | DeviceAuthFlowCompletionResult;
   onCancelled?: () => void;
 } = {}) {
@@ -245,6 +249,8 @@ export function useDeviceAuthFlow({
                 provider: completionProvider,
                 sessionId,
                 credentialId: typeof result.credentialId === "string" ? result.credentialId : null,
+                replaced: result.replaced ?? null,
+                notReplacedReason: result.notReplacedReason ?? null,
               });
               if (isStale()) {
                 return;

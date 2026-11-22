@@ -7,8 +7,10 @@ import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
 
 // Sign in again, end to end in Studio: the real Connections list, connect
 // flow, connect dialog and device sign-in, in front of a small stand-in for
-// the controller. Like the controller, the stand-in saves a sign-in that
-// names the one it replaces under that one's name.
+// the controller. Like the controller, the stand-in makes the replacement when
+// the sign-in finishes: of the same ChatGPT account, the new sign-in takes the
+// old one's place, name and default, and the old one is retired; of another,
+// it is added beside it. Studio itself retires nothing.
 
 type Row = {
   id: string;
@@ -25,16 +27,19 @@ type Row = {
 const controller = vi.hoisted(() => ({
   rows: [] as Row[],
   replaces: null as string | null,
+  // The ChatGPT account the person signs in to.
+  account: "acct_person",
   calls: [] as string[],
 }));
+const desktop = vi.hoisted(() => ({ available: false }));
 
-function signInRow(id: string, label: string, isDefault: boolean): Row {
+function signInRow(id: string, label: string, isDefault: boolean, account: string): Row {
   return {
     id,
     kind: "codex_auth_json",
     label,
     isDefault,
-    metadata: { source: "device_code", account_id: `acct_${id}` },
+    metadata: { source: "device_code", account_id: account },
     lastUsedAt: null,
     revokedAt: null,
     createdAt: "2026-11-01T00:00:00.000Z",
@@ -82,9 +87,9 @@ vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus 
 vi.mock("../../../../lib/identityImages", () => ({ uploadIdentityImage: vi.fn() }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
 vi.mock("../AgentProfileModal", () => ({ AgentProfileModal: () => null }));
-// The web's ChatGPT step: a device sign-in, no Desktop import.
+// Desktop's import off unless a case turns it on.
 vi.mock("../desktopCodexAuthJson", () => ({
-  canUseDesktopCodexAuthJson: () => false,
+  canUseDesktopCodexAuthJson: () => desktop.available,
   connectDesktopCodexAuthJson: vi.fn(),
   useDesktopCodexAuthJsonStatus: () => null,
   isLikelyDesktopDevice: () => false,
@@ -131,7 +136,9 @@ describe("Sign in again", () => {
     vi.stubGlobal("CSS", { escape: (value: string) => value, supports: () => false });
     controller.rows = [];
     controller.replaces = null;
+    controller.account = "acct_person";
     controller.calls = [];
+    desktop.available = false;
     showStatus.mockReset();
     credentials.list.mockImplementation(async () => ({
       success: true,
@@ -158,15 +165,34 @@ describe("Sign in again", () => {
         };
       },
     );
-    // The person approved the code: the controller saves the sign-in, under
-    // the replaced sign-in's name while that one is live.
+    // The person approved the code, and the controller saved the sign-in in
+    // one transaction: in the old one's place when it is live and of the same
+    // account, otherwise as a new one beside it.
+    let outcome: { replaced?: boolean; notReplacedReason?: "different_account" | "gone" } = {};
     credentials.getDeviceAuthStatus.mockImplementation(async () => {
       if (!controller.rows.some((row) => row.id === "cred-fresh")) {
-        const replaced = controller.rows.find((row) => row.id === controller.replaces && !row.revokedAt);
-        controller.rows.push(signInRow("cred-fresh", replaced?.label ?? "ChatGPT 2", false));
+        const old = controller.rows.find((row) => row.id === controller.replaces && !row.revokedAt);
+        if (old && old.metadata.account_id === controller.account) {
+          controller.rows.push(signInRow("cred-fresh", old.label ?? "ChatGPT", old.isDefault, controller.account));
+          old.isDefault = false;
+          old.revokedAt = "2026-11-22T12:00:00.000Z";
+          outcome = { replaced: true };
+        } else {
+          controller.rows.push(signInRow("cred-fresh", "ChatGPT 2", false, controller.account));
+          outcome = controller.replaces
+            ? { replaced: false, notReplacedReason: old ? "different_account" : "gone" }
+            : {};
+        }
         controller.calls.push("save");
       }
-      return { success: true, sessionId: "session-1", provider: "codex", status: "completed", credentialId: "cred-fresh" };
+      return {
+        success: true,
+        sessionId: "session-1",
+        provider: "codex",
+        status: "completed",
+        credentialId: "cred-fresh",
+        ...outcome,
+      };
     });
     credentials.cancelDeviceAuth.mockResolvedValue({ success: true });
     credentials.test.mockImplementation(async (id: string) => {
@@ -206,37 +232,66 @@ describe("Sign in again", () => {
   const liveRows = () =>
     Array.from(container.querySelectorAll<HTMLElement>('[data-testid^="credentials-connection-row-cred-"]'));
 
-  it.each([
-    ["the default", true, ["save", "test cred-fresh", "setDefault cred-fresh", "revoke cred-stale"]],
-    ["not the default", false, ["save", "test cred-fresh", "revoke cred-stale"]],
-  ])("on a ChatGPT sign-in that is %s ends with one live connection named ChatGPT", async (_case, wasDefault, calls) => {
-    controller.rows = [signInRow("cred-stale", "ChatGPT", wasDefault)];
+  async function signInAgainOn(id: string) {
     await act(async () => root.render(<CredentialsSettingsCard />));
-    await until("the sign-in's row", () => liveRows().length === 1);
-
+    await until("the sign-in's row", () => liveRows().length === controller.rows.length);
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-sign-in-again-cred-stale"]')!.click();
+      container.querySelector<HTMLButtonElement>(`[data-testid="credentials-connection-sign-in-again-${id}"]`)!.click();
     });
-    // Straight at the ChatGPT step, with nothing to choose first.
     const signIn = () => document.querySelector<HTMLButtonElement>('[data-testid="credentials-connect-codex"]');
     await until("the ChatGPT step", () => signIn() !== null);
+    // Only the device sign-in, so every Sign in again is the controller's
+    // replacement: no Desktop import, no auth.json, no typed name.
+    expect(document.querySelector('[data-testid="credentials-sign-in-again-note"]')?.textContent).toContain("ChatGPT");
+    expect(document.querySelector('[data-testid="credentials-connect-codex-browser-toggle"]')).toBeNull();
+    expect(document.querySelector('[data-testid="credentials-codex-auth-json-input"]')).toBeNull();
+    expect(document.querySelector('[data-testid="credentials-codex-label-input"]')).toBeNull();
+    expect(signIn()?.textContent).not.toContain("Use local Codex login");
     await act(async () => signIn()!.click());
+    await until("the sign-in to finish", () => controller.calls.includes("save") && !signIn());
+  }
 
-    await until("the replacement to finish", () => controller.calls.includes("revoke cred-stale") && !signIn());
+  it.each([
+    ["the default", true],
+    ["not the default", false],
+  ])("on a sign-in that is %s leaves one live connection of its name, retired by the controller", async (_case, wasDefault) => {
+    controller.rows = [signInRow("cred-stale", "ChatGPT", wasDefault, "acct_person")];
+    await signInAgainOn("cred-stale");
     await until("the list to reload", () => liveRows().length === 1 && liveRows()[0].dataset.testid === "credentials-connection-row-cred-fresh");
 
     expect(credentials.startDeviceAuth).toHaveBeenCalledExactlyOnceWith("codex", { replacesCredentialId: "cred-stale" });
-    expect(controller.calls).toEqual(calls);
+    // Studio only tested the new sign-in; it promoted and retired nothing.
+    expect(controller.calls).toEqual(["save", "test cred-fresh"]);
     const live = controller.rows.filter((row) => !row.revokedAt);
     expect(live.map((row) => [row.id, row.label, row.isDefault])).toEqual([["cred-fresh", "ChatGPT", wasDefault]]);
-    const row = liveRows()[0];
-    expect(row.textContent).toContain("ChatGPT");
-    expect(row.textContent).not.toContain("ChatGPT 2");
+    expect(liveRows()[0].textContent).not.toContain("ChatGPT 2");
+    expect(showStatus).toHaveBeenCalledWith("Signed in again.", "success", 3500);
+  });
+
+  it("with Desktop's import on this computer still offers only the device sign-in", async () => {
+    desktop.available = true;
+    controller.rows = [signInRow("cred-stale", "ChatGPT", true, "acct_person")];
+    await signInAgainOn("cred-stale");
+    await until("the list to reload", () => liveRows().length === 1);
+    expect(controller.calls).toEqual(["save", "test cred-fresh"]);
+  });
+
+  it("of another ChatGPT account adds a connection and keeps the old one", async () => {
+    controller.rows = [signInRow("cred-stale", "ChatGPT", true, "acct_person")];
+    controller.account = "acct_other";
+    await signInAgainOn("cred-stale");
+    await until("the list to reload", () => liveRows().length === 2);
+
+    expect(controller.calls).toEqual(["save", "test cred-fresh"]);
+    expect(controller.rows.map((row) => [row.id, row.label, row.isDefault, row.revokedAt])).toEqual([
+      ["cred-stale", "ChatGPT", true, null],
+      ["cred-fresh", "ChatGPT 2", false, null],
+    ]);
     expect(showStatus).toHaveBeenCalledWith(
-      "Connection replaced. Agents pinned to the old one now use the default.",
-      "success",
-      4500,
+      "That signed in to a different ChatGPT account, so it was added as a new connection. The old one is still here.",
+      "warning",
+      6500,
+      undefined,
     );
-    expect(showStatus).not.toHaveBeenCalledWith("ChatGPT credentials connected.", "success", 3500);
   });
 });

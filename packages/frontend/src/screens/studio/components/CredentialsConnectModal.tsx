@@ -80,6 +80,13 @@ export type CredentialsConnectModalProps = {
   desktopCodexAuthJsonStatus: InstafyDesktopCodexAuthJsonStatus | null;
   connectModalOpen: boolean;
   connectModalStep: CredentialsConnectModalStep;
+  /**
+   * The name of the ChatGPT sign-in Sign in again replaces. While it is set,
+   * the ChatGPT step offers only the device sign-in, which the controller
+   * turns into the replacement; Desktop's import and an auth.json upload,
+   * which replace nothing, stay off that step.
+   */
+  signInAgainOf?: string | null;
   connectPending: boolean;
   deviceAuthBusy: boolean;
   deviceAuthCompleting: boolean;
@@ -125,6 +132,7 @@ export function CredentialsConnectModal({
   desktopCodexAuthJsonStatus,
   connectModalOpen,
   connectModalStep,
+  signInAgainOf = null,
   connectPending,
   deviceAuthBusy,
   deviceAuthCompleting,
@@ -203,11 +211,14 @@ export function CredentialsConnectModal({
   const codexDeviceCodeLoginDisabled =
     isChatGptDeviceCodeLoginDisabledError(codexDeviceAuthSession?.error) ||
     isChatGptDeviceCodeLoginDisabledError(deviceAuthError);
-  const allowAuthJsonImport = canUseDesktopConnect || isLikelyDesktopDevice();
+  // Sign in again offers only the device sign-in.
+  const signingInAgain = signInAgainOf !== null;
+  const offerDesktopConnect = canUseDesktopConnect && !signingInAgain;
+  const allowAuthJsonImport = !signingInAgain && (canUseDesktopConnect || isLikelyDesktopDevice());
   const modalBusy =
     connectPending || deviceAuthBusy || deviceAuthCompleting || apiKeyPendingProvider !== null;
   const { title: codexChoiceTitle } = getCodexConnectionChoice({
-    canUseDesktopConnect,
+    canUseDesktopConnect: offerDesktopConnect,
     desktopCodexAuthJsonStatus,
   });
 
@@ -263,7 +274,7 @@ export function CredentialsConnectModal({
             <Text variant="bodyStrong" tone="secondary">
               {codexChoiceTitle}
             </Text>
-            {canUseDesktopConnect ? (
+            {offerDesktopConnect ? (
               <Button
                 onPress={shouldPromptForAuthJsonUpload ? onTriggerUpload : onConnectCodex}
                 isDisabled={
@@ -281,6 +292,14 @@ export function CredentialsConnectModal({
             ) : null}
           </div>
 
+          {signingInAgain ? (
+            <Text variant="caption" tone="muted" data-testid="credentials-sign-in-again-note">
+              Sign in to the same ChatGPT account to replace {signInAgainOf}. It keeps its name,
+              its agents and whether it is the default. Another account is added as a new
+              connection.
+            </Text>
+          ) : null}
+
           {codexDeviceCodeLoginDisabled ? (
             <ChatGptDeviceCodeDisabledNotice
               busy={modalBusy || !canManageAiConnections}
@@ -297,7 +316,7 @@ export function CredentialsConnectModal({
               onCancel={onCancelDeviceAuthSession}
               onTryAgain={() => onBeginDeviceAuth("codex")}
             />
-          ) : canUseDesktopConnect ? (
+          ) : offerDesktopConnect ? (
             <Surface tone="muted" radius="xl" shadow="none" className="p-3">
               {desktopCodexAuthJsonStatus?.exists ? (
                 <>
@@ -341,7 +360,7 @@ export function CredentialsConnectModal({
             />
           )}
 
-          {canUseDesktopConnect && !codexDeviceAuthSession && !codexDeviceCodeLoginDisabled ? (
+          {offerDesktopConnect && !codexDeviceAuthSession && !codexDeviceCodeLoginDisabled ? (
             <div className="space-y-2">
               <div className="flex justify-end">
                 <Button
@@ -374,17 +393,20 @@ export function CredentialsConnectModal({
             </div>
           ) : null}
 
-          <CodexAdvancedConnectionOptions
-            allowAuthJsonImport={allowAuthJsonImport}
-            expanded={showAdvanced}
-            label={labelDraft}
-            onExpandedChange={onShowAdvancedChange}
-            onLabelChange={onLabelDraftChange}
-            onChooseAuthJson={onTriggerUpload}
-            canDevSeed={canDevSeedCodex}
-            busy={modalBusy}
-            onDevSeed={onDevSeedCodex}
-          />
+          {/* A device sign-in takes no typed name: it is named by the controller. */}
+          {signingInAgain ? null : (
+            <CodexAdvancedConnectionOptions
+              allowAuthJsonImport={allowAuthJsonImport}
+              expanded={showAdvanced}
+              label={labelDraft}
+              onExpandedChange={onShowAdvancedChange}
+              onLabelChange={onLabelDraftChange}
+              onChooseAuthJson={onTriggerUpload}
+              canDevSeed={canDevSeedCodex}
+              busy={modalBusy}
+              onDevSeed={onDevSeedCodex}
+            />
+          )}
 
           {allowAuthJsonImport ? (
             <input

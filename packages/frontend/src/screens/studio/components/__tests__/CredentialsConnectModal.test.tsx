@@ -134,6 +134,28 @@ describe("CredentialsConnectModal", () => {
     expect(props.onConnectCodex).toHaveBeenCalledOnce();
   });
 
+  it("offers only the device sign-in while it signs a ChatGPT sign-in in again", async () => {
+    // Desktop's import is available here, and a plain ChatGPT step offers it.
+    const props = createProps({ connectModalStep: "codex", signInAgainOf: "Work plan" });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    expect(document.querySelector('[data-testid="credentials-sign-in-again-note"]')?.textContent).toContain(
+      "Sign in to the same ChatGPT account to replace Work plan.",
+    );
+    expect(document.querySelector('[data-testid="credentials-chatgpt-device-prerequisite"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="credentials-connect-codex-browser-toggle"]')).toBeNull();
+    expect(document.querySelector('[data-testid="credentials-codex-auth-json-input"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Use local Codex login");
+    expect(document.body.textContent).not.toContain("Desktop found your local Codex login.");
+    const signIn = document.querySelector<HTMLButtonElement>('[data-testid="credentials-connect-codex"]')!;
+    await act(async () => signIn.click());
+    expect(props.onBeginDeviceAuth).toHaveBeenCalledExactlyOnceWith("codex");
+    expect(props.onConnectCodex).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<CredentialsConnectModal {...props} signInAgainOf={null} />));
+    expect(document.querySelector('[data-testid="credentials-sign-in-again-note"]')).toBeNull();
+    expect(document.body.textContent).toContain("Use local Codex login");
+  });
+
   it("keeps the phone key field and selection mounted while its keyboard viewport changes", async () => {
     mockDesktopWidth(false);
     const viewport = Object.assign(new EventTarget(), {

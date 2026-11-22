@@ -96,8 +96,8 @@ pub(crate) enum NewCredentialLabel {
     /// The name the person gave it, if any.
     Given(Option<CredentialLabel>),
     /// A ChatGPT device sign-in's, decided in the transaction that saves it
-    /// (`device_auth::chatgpt_sign_in_label`): the name of the sign-in it
-    /// replaces, else the numbered "ChatGPT" default.
+    /// (`device_auth::chatgpt_sign_in`): the name of the sign-in it replaces
+    /// when it takes that one's place, else the numbered "ChatGPT" default.
     ChatGptSignIn { replaces: Option<Uuid> },
 }
 
@@ -106,8 +106,12 @@ pub(crate) struct CreatedCredential {
     pub(crate) credential_id: Uuid,
     pub(crate) kind: String,
     pub(crate) is_default: bool,
-    pub(crate) agent_id: Uuid,
-    pub(crate) agent_handle: String,
+    /// The agent made for it, by id and handle. None when it took a sign-in's
+    /// place, whose agents it took instead.
+    pub(crate) agent: Option<(Uuid, String)>,
+    /// For a ChatGPT sign-in started to replace another, what became of that
+    /// one.
+    pub(crate) replacement: Option<crate::device_auth::SignInReplacement>,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,38 +306,68 @@ pub(crate) async fn insert_user_credential(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    let label = match label {
-        NewCredentialLabel::Given(label) => label,
+    let (label, replacement) = match label {
+        NewCredentialLabel::Given(label) => (label, None),
         NewCredentialLabel::ChatGptSignIn { replaces } => {
-            Some(crate::device_auth::chatgpt_sign_in_label(&transaction, user_id, replaces).await?)
+            let account_id = metadata.get("account_id").and_then(JsonValue::as_str);
+            let sign_in =
+                crate::device_auth::chatgpt_sign_in(&transaction, user_id, replaces, account_id)
+                    .await?;
+            (Some(sign_in.label), sign_in.replacement)
         }
     };
     let label = label.as_ref().map(CredentialLabel::as_str);
-
-    let default_row = transaction
-        .query_opt(
-            "select id from user_credentials where user_id = $1 and is_default = true and revoked_at is null limit 1",
-            &[&user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to check default credential: {error}")))?;
-
-    let included_ai_available = match included_ai_proxy.as_ref() {
-        Some(proxy_requirements) if default_row.is_none() => {
-            let daily_prompts_used = count_recent_managed_ai_prompts(
-                &transaction,
-                Some(user_id),
-                Utc::now() - managed_ai_prompt_window(),
-            )
-            .await?;
-            build_managed_ai_access_response(&state.config, proxy_requirements, daily_prompts_used)
-                .available
+    // The live sign-in this one takes the place of, and whether it was the
+    // default; its row is locked until the commit.
+    let replaced = match replacement {
+        Some(crate::device_auth::SignInReplacement::Replaced { id, was_default }) => {
+            Some((id, was_default))
         }
-        _ => false,
+        _ => None,
     };
-    let should_default =
-        new_credential_becomes_default(make_default, default_row.is_some(), included_ai_available);
 
+    let should_default = match replaced {
+        // The default stays where it was: on the replacement exactly when the
+        // sign-in it replaces had it.
+        Some((_, was_default)) => was_default,
+        None => {
+            let default_row = transaction
+                .query_opt(
+                    "select id from user_credentials where user_id = $1 and is_default = true and revoked_at is null limit 1",
+                    &[&user_id],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to check default credential: {error}"))
+                })?;
+
+            let included_ai_available = match included_ai_proxy.as_ref() {
+                Some(proxy_requirements) if default_row.is_none() => {
+                    let daily_prompts_used = count_recent_managed_ai_prompts(
+                        &transaction,
+                        Some(user_id),
+                        Utc::now() - managed_ai_prompt_window(),
+                    )
+                    .await?;
+                    build_managed_ai_access_response(
+                        &state.config,
+                        proxy_requirements,
+                        daily_prompts_used,
+                    )
+                    .available
+                }
+                _ => false,
+            };
+            new_credential_becomes_default(
+                make_default,
+                default_row.is_some(),
+                included_ai_available,
+            )
+        }
+    };
+
+    // Cleared before the new one is saved as the default, so the one-default
+    // index never holds two; a replaced default is cleared here too.
     if should_default {
         transaction
             .execute(
@@ -380,18 +414,43 @@ pub(crate) async fn insert_user_credential(
         .await
         .map_err(|error| internal_error(format!("failed to insert credential: {error}")))?;
 
-    let (agent_id, agent_handle) = ai_agents::create_default_agent_for_credential(
-        &transaction,
-        user_id,
-        credential_id,
-        label,
-        None,
-        agent_model,
-        // New credential-seeded agents inherit reasoning effort (null) until set.
-        None,
-        &agent_provider,
-    )
-    .await?;
+    let agent = match replaced {
+        // The person's agents on the replaced sign-in go on with this one, so
+        // it gets no agent of its own, and retiring the old one, as a revoke
+        // does, finds none left to unpin.
+        Some((replaced_id, _)) => {
+            transaction
+                .execute(
+                    "update user_agents set credential_id = $3, updated_at = now()
+                     where user_id = $1 and credential_id = $2 and deleted_at is null",
+                    &[&user_id, &replaced_id, &credential_id],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!(
+                        "failed to move agents to the replacement credential: {error}"
+                    ))
+                })?;
+            if !retire_user_credential(&transaction, &user_id, &replaced_id).await? {
+                return Err(internal_error("the replaced credential is no longer live"));
+            }
+            None
+        }
+        None => Some(
+            ai_agents::create_default_agent_for_credential(
+                &transaction,
+                user_id,
+                credential_id,
+                label,
+                None,
+                agent_model,
+                // New credential-seeded agents inherit reasoning effort (null) until set.
+                None,
+                &agent_provider,
+            )
+            .await?,
+        ),
+    };
 
     transaction
         .commit()
@@ -402,9 +461,48 @@ pub(crate) async fn insert_user_credential(
         credential_id,
         kind,
         is_default: should_default,
-        agent_id,
-        agent_handle,
+        agent,
+        replacement,
     })
+}
+
+/// Retires one of the person's live connections: it is revoked and stops
+/// being the default, and their agents pinned to it fall back to the
+/// default. A revoke (`revoke_my_credential`) and a ChatGPT sign-in that
+/// takes a sign-in's place (`insert_user_credential`) retire one alike, the
+/// connection's row before its agents' rows. Gives whether there was one to
+/// retire.
+pub(crate) async fn retire_user_credential(
+    client: &impl GenericClient,
+    user_id: &Uuid,
+    credential_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let updated = client
+        .execute(
+            "update user_credentials
+             set revoked_at = now(), is_default = false, updated_at = now()
+             where id = $1 and user_id = $2 and revoked_at is null",
+            &[credential_id, user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to revoke credential: {error}")))?;
+    if updated == 0 {
+        return Ok(false);
+    }
+    client
+        .execute(
+            "update user_agents
+             set credential_id = null, updated_at = now()
+             where user_id = $1 and credential_id = $2 and deleted_at is null",
+            &[user_id, credential_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to disconnect agents from credential: {error}"
+            ))
+        })?;
+    Ok(true)
 }
 
 /// Why Instafy AI cannot run a turn for this person right now. Studio shows it
@@ -2208,8 +2306,11 @@ async fn create_my_codex_credential(
         credential_id: created.credential_id.to_string(),
         kind: created.kind,
         is_default: created.is_default,
-        agent_id: Some(created.agent_id.to_string()),
-        agent_handle: Some(created.agent_handle),
+        agent_id: created
+            .agent
+            .as_ref()
+            .map(|(agent_id, _)| agent_id.to_string()),
+        agent_handle: created.agent.map(|(_, handle)| handle),
     }))
 }
 
@@ -2390,39 +2491,24 @@ async fn revoke_my_credential(
         return Err(not_found("credential not found"));
     }
 
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-
-    let updated = connection
-        .execute(
-            "update user_credentials
-             set revoked_at = now(), is_default = false, updated_at = now()
-             where id = $1 and user_id = $2 and revoked_at is null",
-            &[&credential_id, &user_id],
-        )
+    let transaction = connection
+        .transaction()
         .await
-        .map_err(|error| internal_error(format!("failed to revoke credential: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    if updated == 0 {
+    if !retire_user_credential(&transaction, &user_id, &credential_id).await? {
         return Err(not_found("credential not found"));
     }
 
-    connection
-        .execute(
-            "update user_agents
-             set credential_id = null, updated_at = now()
-             where user_id = $1 and credential_id = $2 and deleted_at is null",
-            &[&user_id, &credential_id],
-        )
+    transaction
+        .commit()
         .await
-        .map_err(|error| {
-            internal_error(format!(
-                "failed to disconnect agents from credential: {error}"
-            ))
-        })?;
+        .map_err(|error| internal_error(format!("failed to commit credential revoke: {error}")))?;
 
     Ok(Json(json!({ "ok": true })))
 }

@@ -91,10 +91,7 @@ impl CredentialLabel {
     pub(crate) fn parse(raw: &str) -> Result<Self, (StatusCode, Json<ApiError>)> {
         let label = raw.trim();
         let length = label.chars().count();
-        if length == 0
-            || length > CREDENTIAL_LABEL_MAX_CHARS
-            || label.chars().any(breaks_a_one_line_name)
-        {
+        if length == 0 || length > CREDENTIAL_LABEL_MAX_CHARS || breaks_a_one_line_name(label) {
             return Err(label_refused(
                 CREDENTIAL_LABEL_INVALID_CODE,
                 CREDENTIAL_LABEL_INVALID_MESSAGE,
@@ -125,15 +122,46 @@ fn label_refused(code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
     )
 }
 
-/// Control characters, the Unicode line and paragraph separators, and the
-/// default-ignorable characters a name does not keep: the marks that reorder
-/// text and the ones that show nothing could make a name read as something
-/// else, hide an email address from the check below, or be a whole name that
-/// looks empty.
-fn breaks_a_one_line_name(character: char) -> bool {
-    character.is_control()
-        || matches!(character, '\u{2028}' | '\u{2029}')
-        || (is_default_ignorable(character) && !is_kept_in_names(character))
+/// Whether `label` holds a control character, a Unicode line or paragraph
+/// separator, or a default-ignorable character a name does not keep: the
+/// marks that reorder text and the ones that show nothing could make a name
+/// read as something else, hide an email address from the check below, or be
+/// a whole name that looks empty. The tag characters of a well-formed emoji
+/// tag sequence, such as the flag of Scotland, are kept
+/// ([`emoji_tag_sequence_end`]); any other tag character is refused.
+fn breaks_a_one_line_name(label: &str) -> bool {
+    let characters: Vec<char> = label.chars().collect();
+    let mut index = 0;
+    while index < characters.len() {
+        if let Some(end) = emoji_tag_sequence_end(&characters, index) {
+            index = end;
+            continue;
+        }
+        let character = characters[index];
+        if character.is_control()
+            || matches!(character, '\u{2028}' | '\u{2029}')
+            || (is_default_ignorable(character) && !is_kept_in_names(character))
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Where an emoji tag sequence that starts at `start` ends, past its last
+/// character, when one does: the black flag U+1F3F4, one or more tag
+/// characters U+E0020 to U+E007E, and the cancel tag U+E007F, as Unicode
+/// writes the flags of England, Scotland and Wales.
+fn emoji_tag_sequence_end(characters: &[char], start: usize) -> Option<usize> {
+    if characters.get(start) != Some(&'\u{1F3F4}') {
+        return None;
+    }
+    let mut index = start + 1;
+    while matches!(characters.get(index), Some('\u{E0020}'..='\u{E007E}')) {
+        index += 1;
+    }
+    (index > start + 1 && characters.get(index) == Some(&'\u{E007F}')).then_some(index + 1)
 }
 
 fn is_default_ignorable(character: char) -> bool {
@@ -241,11 +269,12 @@ pub(crate) fn numbered_chatgpt_label<'a>(
     CredentialLabel(format!("{CHATGPT_SIGN_IN_LABEL} {number}"))
 }
 
-/// What a ChatGPT device sign-in is called: the name of the live sign-in it
-/// replaces, as that one is named when this one is saved and without a
-/// number, so a reconnect keeps its name; otherwise the numbered default.
-/// A replaced sign-in with no name, or with one saved before these rules that
-/// they refuse, leaves the numbered default.
+/// What a ChatGPT device sign-in is called: the name of the sign-in whose
+/// place it takes (`device_auth::chatgpt_sign_in`), as that one is named when
+/// this one is saved and without a number, so signing in again keeps the
+/// name; otherwise the numbered default. A replaced sign-in with no name, or
+/// with one saved before these rules that they refuse, leaves the numbered
+/// default.
 pub(crate) fn chatgpt_sign_in_label<'a>(
     replaced: Option<&str>,
     taken: impl IntoIterator<Item = &'a str>,

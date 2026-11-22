@@ -22,6 +22,8 @@ import {
   CHATGPT_CONNECTION_DEFAULT_WARNING,
   CHATGPT_CONNECTION_RESOLUTION_WARNING,
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
+  CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT,
+  CHATGPT_SIGNED_IN_AGAIN,
 } from "./device-auth/deviceAuthCompletion";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
 import { checkCredentialLabel, savableCredentialLabel } from "../../../utils/credentialLabelRules";
@@ -39,9 +41,8 @@ export type CredentialReplaceTarget = {
   /** How messages name it. */
   label: string;
   /**
-   * The name it was saved with, or null when it has none. A replacement the
-   * person gives no name of its own takes this one, so a reconnect keeps its
-   * name.
+   * The name it was saved with, or null when it has none. An API key that
+   * replaces it, given no name of its own, takes this one.
    */
   savedLabel?: string | null;
 };
@@ -97,7 +98,12 @@ type UseCredentialsConnectFlowResult = {
     step: CredentialsConnectModalStep,
     options?: { returnOnBack?: boolean },
   ) => void;
-  /** Opens the modal to replace an existing credential rather than add one. */
+  /**
+   * Opens the modal to replace an existing credential rather than add one: an
+   * API key at its provider's step, or a ChatGPT sign-in at the ChatGPT step
+   * (Sign in again), which then offers only the device sign-in, since the
+   * controller replaces a sign-in when that sign-in finishes.
+   */
   openConnectModalToReplace: (
     credential: CredentialReplaceTarget,
     step: CredentialsConnectModalStep,
@@ -123,6 +129,25 @@ export function useCredentialsConnectFlow({
     const makeDefault = newConnectionDefaultRef.current?.();
     return typeof makeDefault === "boolean" ? { makeDefault } : {};
   }, []);
+  /**
+   * The name the person typed, trimmed, or "" when they typed none. A name
+   * the controller would refuse is never sent: its sentence shows instead and
+   * this gives false. Desktop's import in particular would only say it failed.
+   */
+  const typedLabelOrRefusal = useCallback(
+    (draft: string): string | false => {
+      if (!draft.trim()) {
+        return "";
+      }
+      const check = checkCredentialLabel(draft);
+      if (check.ok) {
+        return check.label;
+      }
+      showStatus(check.message, "error", 5000);
+      return false;
+    },
+    [showStatus],
+  );
   const [connectPending, setConnectPending] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -135,6 +160,9 @@ export function useCredentialsConnectFlow({
   // would silently degrade into a plain add, leaving two live credentials with
   // the dead one still default.
   const replaceTargetRef = useRef<CredentialReplaceTarget | null>(null);
+  // The name of the ChatGPT sign-in Sign in again replaces, which the
+  // ChatGPT step shows while it offers only the device sign-in.
+  const [signInAgainOf, setSignInAgainOf] = useState<string | null>(null);
   const [apiKeyPendingProvider, setApiKeyPendingProvider] = useState<CredentialsConnectApiKeyProvider | null>(null);
   const [openaiApiKeyDraft, setOpenaiApiKeyDraft] = useState("");
   const [openaiLabelDraft, setOpenaiLabelDraft] = useState("");
@@ -144,6 +172,435 @@ export function useCredentialsConnectFlow({
   const [zaiLabelDraft, setZaiLabelDraft] = useState("");
   const [geminiApiKeyDraft, setGeminiApiKeyDraft] = useState("");
   const [geminiLabelDraft, setGeminiLabelDraft] = useState("");
+  // Set when a finished sign-in took the place of the one Sign in again
+  // replaces, so the success line says so.
+  const signedInAgainRef = useRef(false);
+  const handleDeviceAuthCompleted = useCallback(
+    async ({
+      credentialId,
+      replaced,
+      notReplacedReason,
+    }: {
+      credentialId?: string | null;
+      replaced?: boolean | null;
+      notReplacedReason?: "different_account" | "gone" | null;
+    }): Promise<{ success: true; warning?: string }> => {
+      if (!credentialId) {
+        return {
+          success: true,
+          warning: CHATGPT_CONNECTION_RESOLUTION_WARNING,
+        };
+      }
+
+      // Sign in again is the controller's: a sign-in of the same account
+      // took the old one's place, name, default and agents when it was saved,
+      // and one of another account was added beside it. Nothing is retired
+      // here, and the test below only reports.
+      const ofAnotherAccount = replaced === false && notReplacedReason === "different_account";
+      if (replaced === true) {
+        signedInAgainRef.current = true;
+      }
+
+      const testResult = await testMyCredential(credentialId).catch(() => null);
+      if (ofAnotherAccount) {
+        return { success: true, warning: CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT };
+      }
+      if (!testResult?.success || !testResult.ok) {
+        return {
+          success: true,
+          warning: CHATGPT_CONNECTION_VERIFICATION_WARNING,
+        };
+      }
+      // Its default is the old one's.
+      if (replaced === true) {
+        return { success: true };
+      }
+
+      // The controller saved it without taking the default from Instafy AI;
+      // keep it that way unless this connect is the person's choice of AI.
+      if (newConnectionDefaultRef.current?.() === false) {
+        return { success: true };
+      }
+
+      const defaultResult = await setDefaultCredential(credentialId).catch(() => null);
+      if (!defaultResult?.success) {
+        return {
+          success: true,
+          warning: CHATGPT_CONNECTION_DEFAULT_WARNING,
+        };
+      }
+
+      return { success: true };
+    },
+    [],
+  );
+  const deviceAuth = useDeviceAuthFlow({ onCompleted: handleDeviceAuthCompleted });
+  const completedDeviceAuthSessionRef = useRef<string | null>(null);
+
+  const deviceAuthSession = deviceAuth.session;
+  const deviceAuthProvider = deviceAuth.provider;
+  const deviceAuthError = deviceAuth.error;
+  const deviceAuthBusy = deviceAuth.busy;
+  const deviceAuthCompleting = deviceAuth.completing;
+  const deviceAuthCompletionWarning = deviceAuth.completionWarning;
+  const beginDeviceAuthFlow = deviceAuth.begin;
+  const cancelDeviceAuthFlow = deviceAuth.cancel;
+  const resetDeviceAuthFlow = deviceAuth.reset;
+  const connectInteractionBusy =
+    connectPending || deviceAuthBusy || deviceAuthCompleting || apiKeyPendingProvider !== null;
+
+  const canUseDesktopConnect = canUseDesktopCodexAuthJson();
+  const desktopCodexAuthJsonStatus = useDesktopCodexAuthJsonStatus(canUseDesktopConnect);
+  const canManageAiConnections = runtimeControllerEnabled && Boolean(controllerBaseUrl) && userPresent;
+
+  const resetConnectDrafts = useCallback(() => {
+    setLabelDraft("");
+    setOpenaiApiKeyDraft("");
+    setOpenaiLabelDraft("");
+    setDeepseekApiKeyDraft("");
+    setDeepseekLabelDraft("");
+    setZaiApiKeyDraft("");
+    setZaiLabelDraft("");
+    setGeminiApiKeyDraft("");
+    setGeminiLabelDraft("");
+  }, []);
+
+  const closeConnectModal = useCallback(() => {
+    replaceTargetRef.current = null;
+    setSignInAgainOf(null);
+    if (connectInteractionBusy) {
+      return;
+    }
+    setConnectModalOpen(false);
+    setConnectModalStep("picker");
+    setShowAdvanced(false);
+    resetConnectDrafts();
+    if (deviceAuthSession?.status === "pending") {
+      void cancelDeviceAuthFlow();
+    } else {
+      resetDeviceAuthFlow();
+    }
+    completedDeviceAuthSessionRef.current = null;
+  }, [
+    cancelDeviceAuthFlow,
+    connectInteractionBusy,
+    deviceAuthSession,
+    resetConnectDrafts,
+    resetDeviceAuthFlow,
+  ]);
+
+  const openConnectModal = useCallback(() => {
+    returnOnBackRef.current = false;
+    setConnectModalOpen(true);
+    setConnectModalStep("picker");
+    setShowAdvanced(false);
+    resetDeviceAuthFlow();
+    completedDeviceAuthSessionRef.current = null;
+  }, [resetDeviceAuthFlow]);
+
+  const openConnectModalAtStep = useCallback(
+    (step: CredentialsConnectModalStep, options?: { returnOnBack?: boolean }) => {
+      returnOnBackRef.current = options?.returnOnBack === true;
+      replaceTargetRef.current = null;
+      setSignInAgainOf(null);
+      setConnectModalOpen(true);
+      setConnectModalStep(step);
+      setShowAdvanced(false);
+      resetDeviceAuthFlow();
+      completedDeviceAuthSessionRef.current = null;
+    },
+    [resetDeviceAuthFlow],
+  );
+
+  const openConnectModalToReplace = useCallback(
+    (credential: CredentialReplaceTarget, step: CredentialsConnectModalStep) => {
+      openConnectModalAtStep(step);
+      replaceTargetRef.current = credential;
+      if (step === "codex") {
+        setSignInAgainOf(credential.label);
+      }
+    },
+    [openConnectModalAtStep],
+  );
+
+  // Leaving the provider step abandons the replace. Without this, a replace
+  // opened on one provider that lands on another through any step change would
+  // retire a healthy credential of the first provider.
+  const handleConnectModalStepChange = useCallback((step: CredentialsConnectModalStep) => {
+    replaceTargetRef.current = null;
+    setSignInAgainOf(null);
+    setConnectModalStep(step);
+  }, []);
+
+  const handleConnectModalBack = useCallback(() => {
+    if (connectInteractionBusy) {
+      return;
+    }
+    // The Connections page already shows the provider choices. Return there
+    // without making the user pass through another chooser.
+    if (returnOnBackRef.current) {
+      closeConnectModal();
+      return;
+    }
+    setConnectModalStep("picker");
+    setShowAdvanced(false);
+    if (deviceAuthSession?.status === "pending") {
+      void cancelDeviceAuthFlow();
+    } else {
+      resetDeviceAuthFlow();
+    }
+    completedDeviceAuthSessionRef.current = null;
+  }, [cancelDeviceAuthFlow, closeConnectModal, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
+
+  const beginDeviceAuth = useCallback(
+    async (provider: "codex") => {
+      if (!runtimeControllerEnabled || !controllerBaseUrl) {
+        showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
+        return;
+      }
+      if (!userPresent) {
+        showStatus("Sign in to connect credentials.", "error", 3500);
+        return;
+      }
+      if (connectPending) {
+        return;
+      }
+
+      setConnectPending(true);
+      resetDeviceAuthFlow();
+      completedDeviceAuthSessionRef.current = null;
+
+      try {
+        // Sign in again names the sign-in it replaces; the controller then
+        // replaces that one when this one finishes, even if Studio is gone.
+        await beginDeviceAuthFlow({
+          provider,
+          replacesCredentialId: replaceTargetRef.current?.id ?? null,
+        });
+      } finally {
+        setConnectPending(false);
+      }
+    },
+    [beginDeviceAuthFlow, connectPending, resetDeviceAuthFlow, showStatus, userPresent],
+  );
+
+  const cancelDeviceAuthSession = useCallback(async () => {
+    if (connectInteractionBusy) {
+      return;
+    }
+    if (!deviceAuthSession) {
+      resetDeviceAuthFlow();
+      return;
+    }
+    if (deviceAuthSession.status === "pending") {
+      await cancelDeviceAuthFlow();
+    } else {
+      resetDeviceAuthFlow();
+    }
+  }, [cancelDeviceAuthFlow, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
+
+  useEffect(() => {
+    if (!deviceAuthSession) {
+      return;
+    }
+    if (deviceAuthSession.status !== "completed") {
+      return;
+    }
+    if (completedDeviceAuthSessionRef.current === deviceAuthSession.sessionId) {
+      return;
+    }
+    completedDeviceAuthSessionRef.current = deviceAuthSession.sessionId;
+
+    const signedInAgain = signedInAgainRef.current;
+    signedInAgainRef.current = false;
+    void (async () => {
+      await loadCredentials({ silent: true });
+      notifyAiConfigChanged("codex_oauth_connected");
+      if (deviceAuthCompletionWarning) {
+        showStatus(
+          deviceAuthCompletionWarning,
+          "warning",
+          6500,
+          onOpenAiManager
+            ? {
+                actionLabel: "Open AI Manager",
+                onAction: onOpenAiManager,
+              }
+            : undefined,
+        );
+      } else {
+        showStatus(
+          signedInAgain ? CHATGPT_SIGNED_IN_AGAIN : "ChatGPT credentials connected.",
+          "success",
+          3500,
+        );
+      }
+      closeConnectModal();
+    })();
+  }, [
+    closeConnectModal,
+    deviceAuthCompletionWarning,
+    deviceAuthProvider,
+    deviceAuthSession,
+    loadCredentials,
+    notifyAiConfigChanged,
+    onOpenAiManager,
+    showStatus,
+  ]);
+
+  const handleConnectCodex = useCallback(async () => {
+    if (!runtimeControllerEnabled || !controllerBaseUrl) {
+      showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
+      return;
+    }
+    if (!userPresent) {
+      showStatus("Sign in to connect credentials.", "error", 3500);
+      return;
+    }
+    if (connectPending) {
+      return;
+    }
+
+    if (canUseDesktopConnect) {
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
+      setConnectPending(true);
+      try {
+        const result = await connectDesktopCodexAuthJson({
+          label: typedLabel || "Codex on this computer",
+          ...newConnectionDefaultOption(),
+        });
+        if (!result.success) {
+          showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
+          return;
+        }
+        showStatus("Codex credentials connected.", "success", 3500);
+        setLabelDraft("");
+        await loadCredentials({ silent: true });
+        notifyAiConfigChanged("codex_connected");
+        closeConnectModal();
+      } catch {
+        showStatus("Unable to connect the local Codex login.", "error", 5000);
+      } finally {
+        setConnectPending(false);
+      }
+      return;
+    }
+
+    void beginDeviceAuth("codex");
+  }, [
+    beginDeviceAuth,
+    canUseDesktopConnect,
+    closeConnectModal,
+    connectPending,
+    labelDraft,
+    loadCredentials,
+    newConnectionDefaultOption,
+    notifyAiConfigChanged,
+    showStatus,
+    typedLabelOrRefusal,
+    userPresent,
+  ]);
+
+  // Dev-only: seed this machine's Codex login through the same completion
+  // contract as every other connect path (loadCredentials + close, folded into
+  // connectPending so the modal locks while it runs).
+  const canDevSeedCodex = canUseDevServerCodexAuthJson();
+  const handleDevSeedCodex = useCallback(async () => {
+    if (!userPresent) {
+      showStatus("Sign in to connect credentials.", "error", 3500);
+      return;
+    }
+    if (connectPending) {
+      return;
+    }
+    setConnectPending(true);
+    try {
+      const result = await connectDevServerCodexAuthJson();
+      if (!result.success) {
+        showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
+        return;
+      }
+      showStatus("Connected this machine's Codex login.", "success", 3500);
+      await loadCredentials({ silent: true });
+      notifyAiConfigChanged("codex_connected");
+      closeConnectModal();
+    } catch {
+      showStatus("Unable to connect the local Codex login.", "error", 5000);
+    } finally {
+      setConnectPending(false);
+    }
+  }, [
+    closeConnectModal,
+    connectPending,
+    loadCredentials,
+    notifyAiConfigChanged,
+    showStatus,
+    userPresent,
+  ]);
+
+  const handleTriggerUpload = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleUploadFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) {
+        return;
+      }
+      if (!runtimeControllerEnabled || !controllerBaseUrl) {
+        showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
+        return;
+      }
+      if (!userPresent) {
+        showStatus("Sign in to connect credentials.", "error", 3500);
+        return;
+      }
+
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
+
+      setConnectPending(true);
+      try {
+        const authJson = await readJsonFile(file);
+        const result = await createCodexCredential({
+          authJson,
+          label: typedLabel || "Browser upload",
+          ...newConnectionDefaultOption(),
+        });
+        if (!result.success) {
+          showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
+          return;
+        }
+        showStatus("Codex credentials connected.", "success", 3500);
+        setLabelDraft("");
+        await loadCredentials({ silent: true });
+        notifyAiConfigChanged("codex_connected");
+        closeConnectModal();
+      } catch {
+        showStatus("Unable to read auth.json from this computer.", "error", 5000);
+      } finally {
+        setConnectPending(false);
+      }
+    },
+    [
+      closeConnectModal,
+      labelDraft,
+      loadCredentials,
+      newConnectionDefaultOption,
+      notifyAiConfigChanged,
+      showStatus,
+      typedLabelOrRefusal,
+      userPresent,
+    ],
+  );
+
   // Verification failed, so the half-created credential has to go. When that
   // cleanup itself fails, keep the removal on the toast instead of sending the
   // user to AI Connections to finish it by hand.
@@ -228,480 +685,6 @@ export function useCredentialsConnectFlow({
       showStatus("Connection replaced. Agents pinned to the old one now use the default.", "success", 4500);
     },
     [isCredentialDefault, showStatus],
-  );
-
-  /**
-   * Finish a replacement saved from the ChatGPT step with an auth.json or
-   * Desktop's local Codex login. As for an API key, the new connection is
-   * tested before anything is retired; one that fails is removed again and
-   * the old one stays. True once the old one is retired.
-   */
-  const verifyAndFinalizeReplacement = useCallback(
-    async (credentialId: string): Promise<boolean> => {
-      const testResult = await testMyCredential(credentialId).catch(() => null);
-      if (!testResult?.success || !testResult.ok) {
-        const detail = formatCredentialTestFailureMessage(
-          testResult?.success ? testResult.output : testResult?.error,
-        );
-        await reportUnverifiedCredential(
-          credentialId,
-          detail
-            ? `The new login couldn't be verified, so the old one stays: ${detail}`
-            : "The new login couldn't be verified, so the old one stays.",
-          7000,
-        );
-        return false;
-      }
-      await finalizeCredentialReplacement(credentialId);
-      return true;
-    },
-    [finalizeCredentialReplacement, formatCredentialTestFailureMessage, reportUnverifiedCredential],
-  );
-
-  /**
-   * The name the person typed, trimmed, or "" when they typed none. A name
-   * the controller would refuse is never sent: its sentence shows instead and
-   * this gives false. Desktop's import in particular would only say it failed.
-   */
-  const typedLabelOrRefusal = useCallback(
-    (draft: string): string | false => {
-      if (!draft.trim()) {
-        return "";
-      }
-      const check = checkCredentialLabel(draft);
-      if (check.ok) {
-        return check.label;
-      }
-      showStatus(check.message, "error", 5000);
-      return false;
-    },
-    [showStatus],
-  );
-
-  // Set when a finished ChatGPT sign-in replaced another (Sign in again),
-  // whose own message then stands in for "connected".
-  const deviceSignInReplacedRef = useRef(false);
-  const handleDeviceAuthCompleted = useCallback(
-    async ({
-      credentialId,
-    }: {
-      credentialId?: string | null;
-    }): Promise<{ success: true; warning?: string }> => {
-      if (!credentialId) {
-        return {
-          success: true,
-          warning: CHATGPT_CONNECTION_RESOLUTION_WARNING,
-        };
-      }
-
-      // Nothing is retired before the new sign-in passes its test.
-      const testResult = await testMyCredential(credentialId).catch(() => null);
-      if (!testResult?.success || !testResult.ok) {
-        return {
-          success: true,
-          warning: CHATGPT_CONNECTION_VERIFICATION_WARNING,
-        };
-      }
-
-      // Sign in again: the new sign-in becomes the default if the old one
-      // was, then the old one is retired, as an API-key replacement does.
-      if (replaceTargetRef.current) {
-        await finalizeCredentialReplacement(credentialId);
-        deviceSignInReplacedRef.current = true;
-        return { success: true };
-      }
-
-      // The controller saved it without taking the default from Instafy AI;
-      // keep it that way unless this connect is the person's choice of AI.
-      if (newConnectionDefaultRef.current?.() === false) {
-        return { success: true };
-      }
-
-      const defaultResult = await setDefaultCredential(credentialId).catch(() => null);
-      if (!defaultResult?.success) {
-        return {
-          success: true,
-          warning: CHATGPT_CONNECTION_DEFAULT_WARNING,
-        };
-      }
-
-      return { success: true };
-    },
-    [finalizeCredentialReplacement],
-  );
-  const deviceAuth = useDeviceAuthFlow({ onCompleted: handleDeviceAuthCompleted });
-  const completedDeviceAuthSessionRef = useRef<string | null>(null);
-
-  const deviceAuthSession = deviceAuth.session;
-  const deviceAuthProvider = deviceAuth.provider;
-  const deviceAuthError = deviceAuth.error;
-  const deviceAuthBusy = deviceAuth.busy;
-  const deviceAuthCompleting = deviceAuth.completing;
-  const deviceAuthCompletionWarning = deviceAuth.completionWarning;
-  const beginDeviceAuthFlow = deviceAuth.begin;
-  const cancelDeviceAuthFlow = deviceAuth.cancel;
-  const resetDeviceAuthFlow = deviceAuth.reset;
-  const connectInteractionBusy =
-    connectPending || deviceAuthBusy || deviceAuthCompleting || apiKeyPendingProvider !== null;
-
-  const canUseDesktopConnect = canUseDesktopCodexAuthJson();
-  const desktopCodexAuthJsonStatus = useDesktopCodexAuthJsonStatus(canUseDesktopConnect);
-  const canManageAiConnections = runtimeControllerEnabled && Boolean(controllerBaseUrl) && userPresent;
-
-  const resetConnectDrafts = useCallback(() => {
-    setLabelDraft("");
-    setOpenaiApiKeyDraft("");
-    setOpenaiLabelDraft("");
-    setDeepseekApiKeyDraft("");
-    setDeepseekLabelDraft("");
-    setZaiApiKeyDraft("");
-    setZaiLabelDraft("");
-    setGeminiApiKeyDraft("");
-    setGeminiLabelDraft("");
-  }, []);
-
-  const closeConnectModal = useCallback(() => {
-    replaceTargetRef.current = null;
-    if (connectInteractionBusy) {
-      return;
-    }
-    setConnectModalOpen(false);
-    setConnectModalStep("picker");
-    setShowAdvanced(false);
-    resetConnectDrafts();
-    if (deviceAuthSession?.status === "pending") {
-      void cancelDeviceAuthFlow();
-    } else {
-      resetDeviceAuthFlow();
-    }
-    completedDeviceAuthSessionRef.current = null;
-  }, [
-    cancelDeviceAuthFlow,
-    connectInteractionBusy,
-    deviceAuthSession,
-    resetConnectDrafts,
-    resetDeviceAuthFlow,
-  ]);
-
-  const openConnectModal = useCallback(() => {
-    returnOnBackRef.current = false;
-    setConnectModalOpen(true);
-    setConnectModalStep("picker");
-    setShowAdvanced(false);
-    resetDeviceAuthFlow();
-    completedDeviceAuthSessionRef.current = null;
-  }, [resetDeviceAuthFlow]);
-
-  const openConnectModalAtStep = useCallback(
-    (step: CredentialsConnectModalStep, options?: { returnOnBack?: boolean }) => {
-      returnOnBackRef.current = options?.returnOnBack === true;
-      replaceTargetRef.current = null;
-      setConnectModalOpen(true);
-      setConnectModalStep(step);
-      setShowAdvanced(false);
-      resetDeviceAuthFlow();
-      completedDeviceAuthSessionRef.current = null;
-    },
-    [resetDeviceAuthFlow],
-  );
-
-  const openConnectModalToReplace = useCallback(
-    (credential: CredentialReplaceTarget, step: CredentialsConnectModalStep) => {
-      openConnectModalAtStep(step);
-      replaceTargetRef.current = credential;
-    },
-    [openConnectModalAtStep],
-  );
-
-  // Leaving the provider step abandons the replace. Without this, a replace
-  // opened on one provider that lands on another through any step change would
-  // retire a healthy credential of the first provider.
-  const handleConnectModalStepChange = useCallback((step: CredentialsConnectModalStep) => {
-    replaceTargetRef.current = null;
-    setConnectModalStep(step);
-  }, []);
-
-  const handleConnectModalBack = useCallback(() => {
-    if (connectInteractionBusy) {
-      return;
-    }
-    // The Connections page already shows the provider choices. Return there
-    // without making the user pass through another chooser.
-    if (returnOnBackRef.current) {
-      closeConnectModal();
-      return;
-    }
-    setConnectModalStep("picker");
-    setShowAdvanced(false);
-    if (deviceAuthSession?.status === "pending") {
-      void cancelDeviceAuthFlow();
-    } else {
-      resetDeviceAuthFlow();
-    }
-    completedDeviceAuthSessionRef.current = null;
-  }, [cancelDeviceAuthFlow, closeConnectModal, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
-
-  const beginDeviceAuth = useCallback(
-    async (provider: "codex") => {
-      if (!runtimeControllerEnabled || !controllerBaseUrl) {
-        showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
-        return;
-      }
-      if (!userPresent) {
-        showStatus("Sign in to connect credentials.", "error", 3500);
-        return;
-      }
-      if (connectPending) {
-        return;
-      }
-
-      setConnectPending(true);
-      resetDeviceAuthFlow();
-      completedDeviceAuthSessionRef.current = null;
-
-      try {
-        // The controller names a replacement after the sign-in it replaces;
-        // otherwise a second sign-in would be "ChatGPT 2".
-        await beginDeviceAuthFlow({
-          provider,
-          replacesCredentialId: replaceTargetRef.current?.id ?? null,
-        });
-      } finally {
-        setConnectPending(false);
-      }
-    },
-    [beginDeviceAuthFlow, connectPending, resetDeviceAuthFlow, showStatus, userPresent],
-  );
-
-  const cancelDeviceAuthSession = useCallback(async () => {
-    if (connectInteractionBusy) {
-      return;
-    }
-    if (!deviceAuthSession) {
-      resetDeviceAuthFlow();
-      return;
-    }
-    if (deviceAuthSession.status === "pending") {
-      await cancelDeviceAuthFlow();
-    } else {
-      resetDeviceAuthFlow();
-    }
-  }, [cancelDeviceAuthFlow, connectInteractionBusy, deviceAuthSession, resetDeviceAuthFlow]);
-
-  useEffect(() => {
-    if (!deviceAuthSession) {
-      return;
-    }
-    if (deviceAuthSession.status !== "completed") {
-      return;
-    }
-    if (completedDeviceAuthSessionRef.current === deviceAuthSession.sessionId) {
-      return;
-    }
-    completedDeviceAuthSessionRef.current = deviceAuthSession.sessionId;
-
-    const replaced = deviceSignInReplacedRef.current;
-    deviceSignInReplacedRef.current = false;
-    void (async () => {
-      await loadCredentials({ silent: true });
-      notifyAiConfigChanged("codex_oauth_connected");
-      if (deviceAuthCompletionWarning) {
-        showStatus(
-          deviceAuthCompletionWarning,
-          "warning",
-          6500,
-          onOpenAiManager
-            ? {
-                actionLabel: "Open AI Manager",
-                onAction: onOpenAiManager,
-              }
-            : undefined,
-        );
-      } else if (!replaced) {
-        showStatus("ChatGPT credentials connected.", "success", 3500);
-      }
-      closeConnectModal();
-    })();
-  }, [
-    closeConnectModal,
-    deviceAuthCompletionWarning,
-    deviceAuthProvider,
-    deviceAuthSession,
-    loadCredentials,
-    notifyAiConfigChanged,
-    onOpenAiManager,
-    showStatus,
-  ]);
-
-  const handleConnectCodex = useCallback(async () => {
-    if (!runtimeControllerEnabled || !controllerBaseUrl) {
-      showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
-      return;
-    }
-    if (!userPresent) {
-      showStatus("Sign in to connect credentials.", "error", 3500);
-      return;
-    }
-    if (connectPending) {
-      return;
-    }
-
-    if (canUseDesktopConnect) {
-      const typedLabel = typedLabelOrRefusal(labelDraft);
-      if (typedLabel === false) {
-        return;
-      }
-      setConnectPending(true);
-      try {
-        // While replacing, the default is decided once the new one is tested.
-        const replacing = replaceTargetRef.current !== null;
-        const result = await connectDesktopCodexAuthJson({
-          label: typedLabel || savedLabelOf(replaceTargetRef.current) || "Codex on this computer",
-          ...(replacing ? { makeDefault: false } : newConnectionDefaultOption()),
-        });
-        if (!result.success) {
-          showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
-          return;
-        }
-        if (replacing) {
-          if (!(await verifyAndFinalizeReplacement(result.credentialId))) {
-            return;
-          }
-        } else {
-          showStatus("Codex credentials connected.", "success", 3500);
-        }
-        setLabelDraft("");
-        await loadCredentials({ silent: true });
-        notifyAiConfigChanged("codex_connected");
-        closeConnectModal();
-      } catch {
-        showStatus("Unable to connect the local Codex login.", "error", 5000);
-      } finally {
-        setConnectPending(false);
-      }
-      return;
-    }
-
-    void beginDeviceAuth("codex");
-  }, [
-    beginDeviceAuth,
-    canUseDesktopConnect,
-    closeConnectModal,
-    connectPending,
-    labelDraft,
-    loadCredentials,
-    newConnectionDefaultOption,
-    notifyAiConfigChanged,
-    showStatus,
-    typedLabelOrRefusal,
-    userPresent,
-    verifyAndFinalizeReplacement,
-  ]);
-
-  // Dev-only: seed this machine's Codex login through the same completion
-  // contract as every other connect path (loadCredentials + close, folded into
-  // connectPending so the modal locks while it runs).
-  const canDevSeedCodex = canUseDevServerCodexAuthJson();
-  const handleDevSeedCodex = useCallback(async () => {
-    if (!userPresent) {
-      showStatus("Sign in to connect credentials.", "error", 3500);
-      return;
-    }
-    if (connectPending) {
-      return;
-    }
-    setConnectPending(true);
-    try {
-      const result = await connectDevServerCodexAuthJson();
-      if (!result.success) {
-        showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
-        return;
-      }
-      showStatus("Connected this machine's Codex login.", "success", 3500);
-      await loadCredentials({ silent: true });
-      notifyAiConfigChanged("codex_connected");
-      closeConnectModal();
-    } catch {
-      showStatus("Unable to connect the local Codex login.", "error", 5000);
-    } finally {
-      setConnectPending(false);
-    }
-  }, [
-    closeConnectModal,
-    connectPending,
-    loadCredentials,
-    notifyAiConfigChanged,
-    showStatus,
-    userPresent,
-  ]);
-
-  const handleTriggerUpload = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleUploadFile = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-      if (!file) {
-        return;
-      }
-      if (!runtimeControllerEnabled || !controllerBaseUrl) {
-        showStatus("BYOC needs a configured controller (VITE_CONTROLLER_URL).", "error", 4500);
-        return;
-      }
-      if (!userPresent) {
-        showStatus("Sign in to connect credentials.", "error", 3500);
-        return;
-      }
-
-      const typedLabel = typedLabelOrRefusal(labelDraft);
-      if (typedLabel === false) {
-        return;
-      }
-
-      setConnectPending(true);
-      try {
-        const authJson = await readJsonFile(file);
-        // While replacing, the default is decided once the new one is tested.
-        const replacing = replaceTargetRef.current !== null;
-        const result = await createCodexCredential({
-          authJson,
-          label: typedLabel || savedLabelOf(replaceTargetRef.current) || "Browser upload",
-          ...(replacing ? { makeDefault: false } : newConnectionDefaultOption()),
-        });
-        if (!result.success || !result.credentialId) {
-          showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
-          return;
-        }
-        if (replacing) {
-          if (!(await verifyAndFinalizeReplacement(result.credentialId))) {
-            return;
-          }
-        } else {
-          showStatus("Codex credentials connected.", "success", 3500);
-        }
-        setLabelDraft("");
-        await loadCredentials({ silent: true });
-        notifyAiConfigChanged("codex_connected");
-        closeConnectModal();
-      } catch {
-        showStatus("Unable to read auth.json from this computer.", "error", 5000);
-      } finally {
-        setConnectPending(false);
-      }
-    },
-    [
-      closeConnectModal,
-      labelDraft,
-      loadCredentials,
-      newConnectionDefaultOption,
-      notifyAiConfigChanged,
-      showStatus,
-      typedLabelOrRefusal,
-      userPresent,
-      verifyAndFinalizeReplacement,
-    ],
   );
 
   const handleConnectApiKey = useCallback(
@@ -864,6 +847,7 @@ export function useCredentialsConnectFlow({
       desktopCodexAuthJsonStatus,
       connectModalOpen,
       connectModalStep,
+      signInAgainOf,
       connectPending,
       apiKeyPendingProvider,
       showAdvanced,

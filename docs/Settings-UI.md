@@ -782,23 +782,29 @@ changes, since people mention agents by them (`PATCH /me/credentials/:id`).
 
 A new ChatGPT sign-in is named "ChatGPT", or the lowest free number ("ChatGPT 2", then "ChatGPT 3")
 while a live connection or an agent of the person's that is not deleted is named that, so two plans
-read apart. The row of a ChatGPT sign-in made with a device code also has **Sign in again** (Sign in
-again… in its menu), which opens the ChatGPT step to replace it; **Reconnect**, which uploads an
-auth.json in its place, stays as it was. The sign-in says which one it replaces
-(`replacesCredentialId`), since the old one is still live when the new one is saved, and the new one
-takes the old one's name. Once the new one passes its test it becomes the default if the old one was,
-and the old one is removed, as **Replace** does for an API key; a new one that fails its test leaves
-both, with a warning. An auth.json chosen in that step, or Desktop's local Codex login, replaces the
-sign-in the same way, except that one failing its test is removed again.
+read apart. A device sign-in takes no typed name: its name is that, or the one it replaces below.
+The row of a ChatGPT sign-in made with a device code also has **Sign in again** (Sign in again… in
+its menu), which opens the ChatGPT step to replace it with the device sign-in alone, with no
+Desktop import, auth.json or name there; **Reconnect**, which uploads an auth.json in its place,
+stays as it was. The sign-in says which one it replaces (`replacesCredentialId`), and the controller
+settles it when the sign-in finishes, in the transaction that saves it. Of the same ChatGPT account
+(both name the same account id, or neither names one), the new sign-in replaces the old one in
+place: it keeps the name, whether it is the default and its agents, and the old one is retired as
+a revoke retires one; Studio says "Signed in again.". Of another account, it is added as a new
+connection with the numbered name and an agent of its own, and the old one stays, which Studio
+says. One whose old sign-in was removed meanwhile is a new sign-in like any other. Studio retires
+nothing on this path and only reports the new sign-in's test: closing the dialog before the sign-in
+finishes cancels it, and one that finishes after Studio has gone is settled all the same.
 
-What replaces a connection takes its name unless the person types another or that name breaks the
-rules, and then takes the name the path gives a new connection ("Browser upload", "OpenAI"); so does
-Reconnect. Studio checks every name by the controller's rules before it sends one
+An API key that replaces a connection, and Reconnect, keep its name unless the person types another
+or that name breaks the rules, and then take the name the path gives a new connection ("OpenAI",
+"Browser upload"). Studio checks every name by the controller's rules before it sends one
 (`utils/credentialLabelRules.ts`, which `credential_label_fixtures.json` pins to the controller's
 copy), and the controller's credential routes save a name only when it is 1 to 60 characters, counted
 as code points, on one line, with no control, text-direction or other invisible characters (joiners,
-non-joiners and variation selectors excepted) and no email address, whoever types it: the agent made
-for a connection goes by its name, and teammates see that agent.
+non-joiners, variation selectors and the tags of an emoji flag such as Scotland's excepted) and no
+email address, whoever types it: the agent made for a connection goes by its name, and teammates see
+that agent.
 
 In Instafy Desktop on macOS, and only for a person `CLAUDE_CODE_LANE_USER_IDS` covers (the space's
 runtime status carries `claudeCodeLane`), Connections also shows **Claude Code on this computer**

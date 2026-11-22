@@ -170,8 +170,15 @@ pub(crate) struct DeviceAuthSession {
 #[derive(Clone, Debug)]
 pub(crate) enum DeviceAuthStatus {
     Pending,
-    Completed { credential_id: Option<Uuid> },
-    Failed { error: String },
+    Completed {
+        credential_id: Option<Uuid>,
+        /// What became of the sign-in a ChatGPT sign-in was started to
+        /// replace, if any.
+        replacement: Option<SignInReplacement>,
+    },
+    Failed {
+        error: String,
+    },
     Cancelled,
 }
 
@@ -181,9 +188,9 @@ pub(crate) enum DeviceAuthProviderState {
         issuer: String,
         client_id: String,
         device_auth_id: String,
-        /// The person's live ChatGPT sign-in this one replaces
-        /// (`replacesCredentialId` at start), whose name it takes when it is
-        /// saved (`chatgpt_sign_in_label`).
+        /// The person's live ChatGPT sign-in this one was started to replace
+        /// (`replacesCredentialId`), whose place it takes when it is saved if
+        /// that one is still live and of the same account (`chatgpt_sign_in`).
         replaces_credential_id: Option<Uuid>,
     },
     Github {
@@ -314,25 +321,62 @@ async fn replaced_chatgpt_sign_in(
     }
 }
 
-/// What a finished ChatGPT device sign-in is called, decided in the
-/// transaction that saves it (`credentials::insert_user_credential`).
+/// What saving a finished ChatGPT sign-in did with the sign-in it was started
+/// to replace (`replacesCredentialId`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignInReplacement {
+    /// It took that sign-in's place, which was still one of the person's live
+    /// ChatGPT sign-ins and of the same ChatGPT account: its name, its
+    /// default and its agents, and that one was retired in the same
+    /// transaction.
+    Replaced { id: Uuid, was_default: bool },
+    /// That sign-in is of another ChatGPT account, so this one was saved as a
+    /// new connection beside it, which stays.
+    DifferentAccount,
+    /// That sign-in was removed meanwhile, so this one was saved as a new one.
+    Gone,
+}
+
+/// The name a finished ChatGPT sign-in is saved with, and what became of the
+/// sign-in it was started to replace, if any.
+pub(crate) struct ChatGptSignIn {
+    pub(crate) label: CredentialLabel,
+    pub(crate) replacement: Option<SignInReplacement>,
+}
+
+/// Whether two ChatGPT sign-ins are of one ChatGPT account: both name the
+/// same account id, or neither names one.
+fn same_chatgpt_account(replaced: Option<&str>, new: Option<&str>) -> bool {
+    fn account(id: Option<&str>) -> Option<&str> {
+        id.map(str::trim).filter(|id| !id.is_empty())
+    }
+    account(replaced) == account(new)
+}
+
+/// Decides, in the transaction that saves a finished ChatGPT device sign-in
+/// (`credentials::insert_user_credential`), what it is called and whether it
+/// takes the place of the sign-in it was started to replace.
 ///
-/// Studio saves a replacement before it retires the sign-in it replaces
-/// (`finalizeCredentialReplacement`), so that one is still live here and
-/// numbering alone would call a reconnected "ChatGPT" "ChatGPT 2". A sign-in
-/// started with `replacesCredentialId` therefore takes that sign-in's name as
-/// it is now, while it is live; otherwise, or once it is gone, the numbered
-/// default applies (`credential_labels::chatgpt_sign_in_label`). A number is
+/// It does when that sign-in is still one of the person's live ChatGPT
+/// sign-ins and of the same ChatGPT account (`same_chatgpt_account`, against
+/// `account_id`, the new sign-in's): the new one takes its name, and the
+/// saving transaction gives it the old one's default and agents and retires
+/// the old one, so nothing is left for Studio to finish and closing Studio
+/// midway changes nothing. Its row is locked here, before any agent row, as a
+/// revoke locks them. Otherwise, the old one gone, revoked or of another
+/// account, the new one is a sign-in like any other, with the numbered
+/// default name (`credential_labels::chatgpt_sign_in_label`). A number is
 /// free when no live connection of the person's and none of their agents that
 /// are not deleted goes by it: an agent outlives a removed connection with the
 /// connection's name, so a later sign-in must not give a second agent that
 /// name. The lock on the person's connection names makes two sign-ins that
 /// finish together take different numbers.
-pub(crate) async fn chatgpt_sign_in_label(
+pub(crate) async fn chatgpt_sign_in(
     transaction: &Transaction<'_>,
     user_id: Uuid,
     replaces: Option<Uuid>,
-) -> Result<CredentialLabel, (HttpStatusCode, Json<ApiError>)> {
+    account_id: Option<&str>,
+) -> Result<ChatGptSignIn, (HttpStatusCode, Json<ApiError>)> {
     transaction
         .query_one(
             "select pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -340,38 +384,70 @@ pub(crate) async fn chatgpt_sign_in_label(
         )
         .await
         .map_err(|error| internal_error(format!("failed to lock connection names: {error}")))?;
-    let rows = transaction
+    let reserved = crate::config::managed_ai_credential_id();
+    let replaced = match replaces {
+        Some(replaced_id) => transaction
+            .query_opt(
+                "select label, is_default, metadata->>'account_id' as account_id
+                 from user_credentials
+                 where id = $1 and user_id = $2 and id <> $3
+                   and kind = 'codex_auth_json' and revoked_at is null
+                 for update",
+                &[&replaced_id, &user_id, &reserved],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to load the replaced credential: {error}"))
+            })?
+            .map(|row| (replaced_id, row)),
+        None => None,
+    };
+    let (replacement, replaced_label) = match (replaces, replaced) {
+        (None, _) => (None, None),
+        (Some(_), None) => (Some(SignInReplacement::Gone), None),
+        (Some(_), Some((id, row))) => {
+            if same_chatgpt_account(row.get("account_id"), account_id) {
+                let replacement = SignInReplacement::Replaced {
+                    id,
+                    was_default: row.get("is_default"),
+                };
+                (Some(replacement), row.get::<_, Option<String>>("label"))
+            } else {
+                (Some(SignInReplacement::DifferentAccount), None)
+            }
+        }
+    };
+
+    let mut taken: Vec<String> = transaction
         .query(
-            "select id, label from user_credentials
-             where user_id = $1 and revoked_at is null and id <> $2",
-            &[&user_id, &crate::config::managed_ai_credential_id()],
+            "select label from user_credentials
+             where user_id = $1 and revoked_at is null and id <> $2 and label is not null",
+            &[&user_id, &reserved],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to load connection names: {error}")))?;
-    let live: Vec<(Uuid, Option<String>)> = rows
+        .map_err(|error| internal_error(format!("failed to load connection names: {error}")))?
         .iter()
-        .map(|row| (row.get("id"), row.get("label")))
+        .map(|row| row.get("label"))
         .collect();
-    let agent_names: Vec<String> = transaction
-        .query(
-            "select display_name from user_agents
-             where user_id = $1 and deleted_at is null and display_name is not null",
-            &[&user_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load agent names: {error}")))?
-        .iter()
-        .map(|row| row.get("display_name"))
-        .collect();
-    let replaced = replaces
-        .and_then(|replaced_id| live.iter().find(|(id, _)| *id == replaced_id))
-        .and_then(|(_, label)| label.as_deref());
-    Ok(credential_labels::chatgpt_sign_in_label(
-        replaced,
-        live.iter()
-            .filter_map(|(_, label)| label.as_deref())
-            .chain(agent_names.iter().map(String::as_str)),
-    ))
+    taken.extend(
+        transaction
+            .query(
+                "select display_name from user_agents
+                 where user_id = $1 and deleted_at is null and display_name is not null",
+                &[&user_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load agent names: {error}")))?
+            .iter()
+            .map(|row| row.get::<_, String>("display_name")),
+    );
+    Ok(ChatGptSignIn {
+        label: credential_labels::chatgpt_sign_in_label(
+            replaced_label.as_deref(),
+            taken.iter().map(String::as_str),
+        ),
+        replacement,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -390,6 +466,13 @@ struct DeviceAuthStatusResponse {
     poll_interval_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_id: Option<String>,
+    /// For a finished ChatGPT sign-in started with `replacesCredentialId`:
+    /// whether it took that sign-in's place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced: Option<bool>,
+    /// Why it did not: `different_account` or `gone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1357,6 +1440,8 @@ fn github_device_auth_status_response(
         expires_at: include_codes.then(|| record.device_expires_at.to_rfc3339()),
         poll_interval_seconds: include_codes.then_some(record.poll_interval_seconds),
         credential_id: None,
+        replaced: None,
+        reason: None,
         error,
     })
 }
@@ -1589,16 +1674,29 @@ async fn get_device_auth_status(
 }
 
 fn local_device_auth_status_response(session: DeviceAuthSession) -> DeviceAuthStatusResponse {
+    let mut replacement = None;
     let (status, credential_id, error, include_codes) = match session.status {
         DeviceAuthStatus::Pending => ("pending".to_string(), None, None, true),
         DeviceAuthStatus::Cancelled => ("cancelled".to_string(), None, None, false),
-        DeviceAuthStatus::Completed { credential_id } => (
-            "completed".to_string(),
-            credential_id.map(|value| value.to_string()),
-            None,
-            false,
-        ),
+        DeviceAuthStatus::Completed {
+            credential_id,
+            replacement: outcome,
+        } => {
+            replacement = outcome;
+            (
+                "completed".to_string(),
+                credential_id.map(|value| value.to_string()),
+                None,
+                false,
+            )
+        }
         DeviceAuthStatus::Failed { error } => ("failed".to_string(), None, Some(error), false),
+    };
+    let (replaced, reason) = match replacement {
+        None => (None, None),
+        Some(SignInReplacement::Replaced { .. }) => (Some(true), None),
+        Some(SignInReplacement::DifferentAccount) => (Some(false), Some("different_account")),
+        Some(SignInReplacement::Gone) => (Some(false), Some("gone")),
     };
 
     DeviceAuthStatusResponse {
@@ -1610,6 +1708,8 @@ fn local_device_auth_status_response(session: DeviceAuthSession) -> DeviceAuthSt
         expires_at: include_codes.then(|| session.expires_at.to_rfc3339()),
         poll_interval_seconds: include_codes.then(|| session.poll_interval_seconds),
         credential_id,
+        replaced,
+        reason,
         error,
     }
 }
@@ -1820,6 +1920,7 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                                         &session_id,
                                         DeviceAuthStatus::Completed {
                                             credential_id: Some(created.credential_id),
+                                            replacement: created.replacement,
                                         },
                                     )
                                     .await;
@@ -2296,6 +2397,7 @@ async fn poll_github_device_auth(state: AppState, session_id: Uuid) {
                     if let Some(entry) = guard.get_mut(&session_id) {
                         entry.status = DeviceAuthStatus::Completed {
                             credential_id: None,
+                            replacement: None,
                         };
                         entry.completed_at = Some(completed_at);
                         if let DeviceAuthProviderState::Github {
@@ -3159,6 +3261,7 @@ mod device_auth_session_tests {
                 Utc::now() + ChronoDuration::minutes(10),
                 DeviceAuthStatus::Completed {
                     credential_id: None,
+                    replacement: None,
                 },
                 Some(completed_at),
             ))

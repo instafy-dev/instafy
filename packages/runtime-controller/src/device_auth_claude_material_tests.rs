@@ -228,6 +228,7 @@ async fn a_device_login_that_returns_claude_tokens_stores_nothing() -> anyhow::R
         match complete_codex_device_login(&state, user_id, &codex, None).await? {
             DeviceAuthStatus::Completed {
                 credential_id: Some(_),
+                ..
             } => {}
             other => anyhow::bail!("a device login with Codex tokens ended as {other:?}"),
         }

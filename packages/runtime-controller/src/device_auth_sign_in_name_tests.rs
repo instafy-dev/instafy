@@ -1,10 +1,11 @@
-//! What a ChatGPT device sign-in is called. Every one used to be "ChatGPT",
-//! so a person with two plans had two connections, and two agents, of that
-//! name. A second sign-in now takes the lowest free number ("ChatGPT 2"), and
-//! a sign-in that replaces one of the person's sign-ins takes that one's name
-//! as it is when the new one is saved. Studio saves a replacement before it
-//! retires the old sign-in, so numbering alone would call a reconnected
-//! "ChatGPT" "ChatGPT 2".
+//! What a ChatGPT device sign-in is called, and Sign in again. Every sign-in
+//! used to be "ChatGPT", so a person with two plans had two connections, and
+//! two agents, of that name. A second sign-in now takes the lowest free number
+//! ("ChatGPT 2"). A sign-in started to replace one of the person's sign-ins
+//! takes its place in the transaction that saves it when the old one is still
+//! live and of the same ChatGPT account: its name, its default and its agents,
+//! and the old one is retired. Of another account, or once the old one is
+//! gone, it is saved as a new sign-in beside whatever is left.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -15,8 +16,14 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use base64::Engine;
+
 use super::claude_material_tests::{authorizing_issuer, complete_codex_device_login};
-use super::{router, DeviceAuthProviderState, DeviceAuthStatus, CREDENTIAL_REPLACE_UNKNOWN_CODE};
+use super::{
+    local_device_auth_status_response, router, same_chatgpt_account, DeviceAuthProviderState,
+    DeviceAuthSession, DeviceAuthStatus, SignInReplacement, CREDENTIAL_REPLACE_UNKNOWN_CODE,
+};
 use crate::config::{CredentialEncryptionKey, PgPool};
 use crate::credentials::claude_material_tests::EnvVarGuard;
 use crate::tests::{
@@ -78,29 +85,56 @@ async fn names(
 }
 
 /// Runs a ChatGPT device sign-in for `owner` to its end and gives the id of
-/// the connection it saved.
+/// the connection it saved and what became of the one it replaces.
 async fn finish_sign_in(
     state: &crate::AppState,
     owner: Uuid,
     issuer: &MockServer,
     replaces: Option<Uuid>,
-) -> anyhow::Result<Uuid> {
+) -> anyhow::Result<(Uuid, Option<SignInReplacement>)> {
     match complete_codex_device_login(state, owner, issuer, replaces).await? {
         DeviceAuthStatus::Completed {
             credential_id: Some(credential_id),
-        } => Ok(credential_id),
+            replacement,
+        } => Ok((credential_id, replacement)),
         other => anyhow::bail!("the device sign-in ended as {other:?}"),
     }
 }
 
-/// An issuer that authorizes every code at once with inert tokens.
-async fn inert_issuer() -> MockServer {
+/// An issuer that authorizes every code at once, signing in to the ChatGPT
+/// account `account_id` names (none: an ID token without one).
+async fn issuer_for(account_id: Option<&str>) -> MockServer {
+    let claims = match account_id {
+        Some(account_id) => json!({ "chatgpt_account_id": account_id }),
+        None => json!({}),
+    };
     authorizing_issuer(json!({
-        "id_token": "inert.id.token",
+        "id_token": format!("e30.{}.inert", BASE64URL.encode(claims.to_string())),
         "access_token": "inert-codex-access",
         "refresh_token": "inert-codex-refresh",
     }))
     .await
+}
+
+/// An issuer whose sign-ins name no ChatGPT account.
+async fn inert_issuer() -> MockServer {
+    issuer_for(None).await
+}
+
+/// The handles of the person's agents that are not deleted, on a connection.
+async fn agents_on(pool: &PgPool, credential_id: &Uuid) -> anyhow::Result<Vec<String>> {
+    Ok(pool
+        .get()
+        .await?
+        .query(
+            "select handle from user_agents
+             where credential_id = $1 and deleted_at is null order by handle",
+            &[credential_id],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get("handle"))
+        .collect())
 }
 
 /// The person's live connections as `GET /me/credentials` lists them:
@@ -153,7 +187,7 @@ async fn delete_users(pool: &PgPool, users: &[Uuid]) -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn a_second_sign_in_is_numbered_and_a_reconnect_keeps_its_name() -> anyhow::Result<()> {
+async fn a_second_sign_in_is_numbered_and_signing_in_again_keeps_the_name() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("device sign-in names").await?;
     let owner = Uuid::new_v4();
 
@@ -162,24 +196,7 @@ async fn a_second_sign_in_is_numbered_and_a_reconnect_keeps_its_name() -> anyhow
         let state = test_state(&pool);
         let bearer = bearer_for(&state, &owner)?;
         let app = crate::credentials::router().with_state(state.clone());
-        let issuer = authorizing_issuer(json!({
-            "id_token": "inert.id.token",
-            "access_token": "inert-codex-access",
-            "refresh_token": "inert-codex-refresh",
-        }))
-        .await;
-        let sign_in = |replaces: Option<Uuid>| {
-            let state = state.clone();
-            let issuer = &issuer;
-            async move {
-                match complete_codex_device_login(&state, owner, issuer, replaces).await? {
-                    DeviceAuthStatus::Completed {
-                        credential_id: Some(credential_id),
-                    } => anyhow::Ok(credential_id),
-                    other => anyhow::bail!("the device sign-in ended as {other:?}"),
-                }
-            }
-        };
+        let issuer = inert_issuer().await;
         let named = |label: &str, handle: &str| {
             (
                 Some(label.to_string()),
@@ -188,35 +205,17 @@ async fn a_second_sign_in_is_numbered_and_a_reconnect_keeps_its_name() -> anyhow
             )
         };
 
-        let first = sign_in(None).await?;
+        let (first, none) = finish_sign_in(&state, owner, &issuer, None).await?;
+        assert_eq!(none, None);
         assert_eq!(names(&pool, &first).await?, named("ChatGPT", "chatgpt"));
-        let second = sign_in(None).await?;
+        let (second, _) = finish_sign_in(&state, owner, &issuer, None).await?;
         assert_eq!(
             names(&pool, &second).await?,
             named("ChatGPT 2", "chatgpt-2")
         );
 
-        // A reconnect of the first, which Studio retires only afterwards.
-        let reconnected = sign_in(Some(first)).await?;
-        assert_eq!(
-            names(&pool, &reconnected).await?,
-            named("ChatGPT", "chatgpt-3")
-        );
-
-        // Once the replaced sign-in is revoked, there is no name to keep.
-        let (status, _) = call_router(
-            &app,
-            Some(&bearer),
-            "DELETE",
-            format!("/me/credentials/{first}"),
-            None,
-        )
-        .await?;
-        assert_eq!(status, StatusCode::OK);
-        let late = sign_in(Some(first)).await?;
-        assert_eq!(names(&pool, &late).await?.0.as_deref(), Some("ChatGPT 3"));
-
-        // The replaced sign-in's name as it is now, with no number.
+        // Signing in again takes the name the old sign-in has then, with no
+        // number. Neither names a ChatGPT account, which counts as one.
         let (status, renamed) = call_router(
             &app,
             Some(&bearer),
@@ -226,22 +225,19 @@ async fn a_second_sign_in_is_numbered_and_a_reconnect_keeps_its_name() -> anyhow
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{renamed}");
-        let work = sign_in(Some(second)).await?;
-        assert_eq!(names(&pool, &work).await?.0.as_deref(), Some("Work plan"));
-
-        // A replaced connection with no name leaves the lowest free number,
-        // which the rename above gave back.
-        let unnamed = connect(
-            &app,
-            &bearer,
-            json!({ "authJson": { "tokens": { "access_token": "inert-upload-access" } } }),
-        )
-        .await?;
-        assert_eq!(names(&pool, &unnamed).await?.0, None);
-        let after_unnamed = sign_in(Some(unnamed)).await?;
-        assert_eq!(
-            names(&pool, &after_unnamed).await?.0.as_deref(),
-            Some("ChatGPT 2")
+        let (again, replacement) = finish_sign_in(&state, owner, &issuer, Some(second)).await?;
+        assert!(
+            matches!(replacement, Some(SignInReplacement::Replaced { .. })),
+            "{replacement:?}"
+        );
+        let live = live_connections(&app, &bearer).await?;
+        assert!(
+            live.contains(&(again.to_string(), Some("Work plan".to_string()), false)),
+            "{live:?}"
+        );
+        assert!(
+            !live.iter().any(|(id, _, _)| *id == second.to_string()),
+            "{live:?}"
         );
         Ok::<(), anyhow::Error>(())
     })
@@ -253,6 +249,261 @@ async fn a_second_sign_in_is_numbered_and_a_reconnect_keeps_its_name() -> anyhow
         Ok(result) => result.and(cleanup),
         Err(panic) => std::panic::resume_unwind(panic),
     }
+}
+
+#[tokio::test]
+async fn signing_in_again_to_the_same_account_replaces_the_sign_in_in_place() -> anyhow::Result<()>
+{
+    let pool = require_origin_test_pool("device sign-in in place").await?;
+    let owner = Uuid::new_v4();
+
+    let outcome = std::panic::AssertUnwindSafe(async {
+        ensure_test_user(&pool, &owner).await?;
+        let state = test_state(&pool);
+        let bearer = bearer_for(&state, &owner)?;
+        let app = crate::credentials::router().with_state(state.clone());
+        let issuer = issuer_for(Some("acct_same")).await;
+
+        let (stale, _) = finish_sign_in(&state, owner, &issuer, None).await?;
+        assert_eq!(
+            live_connections(&app, &bearer).await?,
+            vec![(stale.to_string(), Some("ChatGPT".to_string()), true)]
+        );
+        // Another agent on it, and a deleted one, which stays where it is.
+        sql(
+            &pool,
+            "insert into user_agents (id, user_id, credential_id, provider, handle, display_name, avatar_seed, deleted_at)
+             values (gen_random_uuid(), $1, $2, 'openai', 'reviewer', 'Reviewer', 'hatchling:1', null),
+                    (gen_random_uuid(), $1, $2, 'openai', 'gone', 'Gone', 'hatchling:2', now())",
+            &[&owner, &stale],
+        )
+        .await?;
+        let agents = sql_one::<i64>(
+            &pool,
+            "select count(*) from user_agents where user_id = $1",
+            &[&owner],
+        )
+        .await?;
+
+        let (fresh, replacement) = finish_sign_in(&state, owner, &issuer, Some(stale)).await?;
+        assert_eq!(
+            replacement,
+            Some(SignInReplacement::Replaced {
+                id: stale,
+                was_default: true
+            })
+        );
+        // One live connection: the new one, with the old one's name and default.
+        assert_eq!(
+            live_connections(&app, &bearer).await?,
+            vec![(fresh.to_string(), Some("ChatGPT".to_string()), true)]
+        );
+        // Its agents are the old one's; none was made for it.
+        assert_eq!(agents_on(&pool, &fresh).await?, vec!["chatgpt", "reviewer"]);
+        assert_eq!(
+            sql_one::<i64>(
+                &pool,
+                "select count(*) from user_agents where user_id = $1",
+                &[&owner]
+            )
+            .await?,
+            agents
+        );
+        // The old one is retired as a revoke retires one.
+        let retired = pool
+            .get()
+            .await?
+            .query_one(
+                "select revoked_at is not null as revoked, is_default from user_credentials where id = $1",
+                &[&stale],
+            )
+            .await?;
+        assert!(retired.get::<_, bool>("revoked"));
+        assert!(!retired.get::<_, bool>("is_default"));
+        assert_eq!(
+            sql_one::<i64>(
+                &pool,
+                "select count(*) from user_agents where credential_id = $1 and deleted_at is not null",
+                &[&stale],
+            )
+            .await?,
+            1
+        );
+        let (status, _) = call_router(
+            &app,
+            Some(&bearer),
+            "DELETE",
+            format!("/me/credentials/{stale}"),
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        Ok::<(), anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = delete_users(&pool, &[owner]).await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+async fn signing_in_again_to_another_account_adds_a_connection_beside_the_old_one(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("device sign-in of another account").await?;
+    let owner = Uuid::new_v4();
+
+    let outcome = std::panic::AssertUnwindSafe(async {
+        ensure_test_user(&pool, &owner).await?;
+        let state = test_state(&pool);
+        let bearer = bearer_for(&state, &owner)?;
+        let app = crate::credentials::router().with_state(state.clone());
+
+        let (stale, _) =
+            finish_sign_in(&state, owner, &issuer_for(Some("acct_a")).await, None).await?;
+        let (other, replacement) = finish_sign_in(
+            &state,
+            owner,
+            &issuer_for(Some("acct_b")).await,
+            Some(stale),
+        )
+        .await?;
+        assert_eq!(replacement, Some(SignInReplacement::DifferentAccount));
+        assert_eq!(
+            live_connections(&app, &bearer).await?,
+            vec![
+                (other.to_string(), Some("ChatGPT 2".to_string()), false),
+                (stale.to_string(), Some("ChatGPT".to_string()), true),
+            ]
+        );
+        assert_eq!(agents_on(&pool, &other).await?, vec!["chatgpt-2"]);
+        assert_eq!(agents_on(&pool, &stale).await?, vec!["chatgpt"]);
+
+        // A sign-in that names no account is not the one that names one.
+        let (unnamed, replacement) =
+            finish_sign_in(&state, owner, &inert_issuer().await, Some(stale)).await?;
+        assert_eq!(replacement, Some(SignInReplacement::DifferentAccount));
+        assert_eq!(
+            names(&pool, &unnamed).await?.0.as_deref(),
+            Some("ChatGPT 3")
+        );
+        assert_eq!(live_connections(&app, &bearer).await?.len(), 3);
+        Ok::<(), anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = delete_users(&pool, &[owner]).await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test]
+async fn a_sign_in_whose_old_one_was_removed_meanwhile_is_saved_as_a_new_one() -> anyhow::Result<()>
+{
+    let pool = require_origin_test_pool("device sign-in after a removal").await?;
+    let owner = Uuid::new_v4();
+
+    let outcome = std::panic::AssertUnwindSafe(async {
+        ensure_test_user(&pool, &owner).await?;
+        let state = test_state(&pool);
+        let bearer = bearer_for(&state, &owner)?;
+        let app = crate::credentials::router().with_state(state.clone());
+        let issuer = issuer_for(Some("acct_same")).await;
+
+        let (stale, _) = finish_sign_in(&state, owner, &issuer, None).await?;
+        let (status, _) = call_router(
+            &app,
+            Some(&bearer),
+            "DELETE",
+            format!("/me/credentials/{stale}"),
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let (fresh, replacement) = finish_sign_in(&state, owner, &issuer, Some(stale)).await?;
+        assert_eq!(replacement, Some(SignInReplacement::Gone));
+        // A new sign-in: its own agent and the numbered name, since the
+        // removed one's agent still goes by "ChatGPT".
+        assert_eq!(names(&pool, &fresh).await?.0.as_deref(), Some("ChatGPT 2"));
+        assert_eq!(agents_on(&pool, &fresh).await?, vec!["chatgpt-2"]);
+        Ok::<(), anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = delete_users(&pool, &[owner]).await;
+    match outcome {
+        Ok(result) => result.and(cleanup),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[test]
+fn one_chatgpt_account_is_one_account_id_or_none_on_both() {
+    assert!(same_chatgpt_account(Some("acct_a"), Some("acct_a")));
+    assert!(same_chatgpt_account(Some(" acct_a "), Some("acct_a")));
+    assert!(same_chatgpt_account(None, None));
+    assert!(same_chatgpt_account(Some(""), None));
+    assert!(!same_chatgpt_account(Some("acct_a"), Some("acct_b")));
+    assert!(!same_chatgpt_account(Some("acct_a"), None));
+    assert!(!same_chatgpt_account(None, Some("acct_a")));
+}
+
+#[test]
+fn the_status_says_whether_a_sign_in_replaced_its_old_one() {
+    let status = |replacement: Option<SignInReplacement>| {
+        let session = DeviceAuthSession {
+            session_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            provider: "codex".to_string(),
+            verification_url: "https://auth.example.test/codex/device".to_string(),
+            user_code: "INERT-CODE".to_string(),
+            poll_interval_seconds: 5,
+            expires_at: chrono::Utc::now(),
+            status: DeviceAuthStatus::Completed {
+                credential_id: Some(Uuid::nil()),
+                replacement,
+            },
+            completed_at: None,
+            provider_state: DeviceAuthProviderState::Codex {
+                issuer: "https://auth.example.test".to_string(),
+                client_id: "inert-client".to_string(),
+                device_auth_id: "inert-device-auth".to_string(),
+                replaces_credential_id: None,
+            },
+        };
+        let body = serde_json::to_value(local_device_auth_status_response(session)).expect("json");
+        (
+            body["status"].clone(),
+            body["replaced"].clone(),
+            body["reason"].clone(),
+        )
+    };
+    let replaced = SignInReplacement::Replaced {
+        id: Uuid::new_v4(),
+        was_default: false,
+    };
+    assert_eq!(
+        status(Some(replaced)),
+        (json!("completed"), json!(true), Value::Null)
+    );
+    assert_eq!(
+        status(Some(SignInReplacement::DifferentAccount)),
+        (json!("completed"), json!(false), json!("different_account"))
+    );
+    assert_eq!(
+        status(Some(SignInReplacement::Gone)),
+        (json!("completed"), json!(false), json!("gone"))
+    );
+    // A sign-in that replaced nothing says nothing about it.
+    assert_eq!(status(None), (json!("completed"), Value::Null, Value::Null));
 }
 
 #[tokio::test]
@@ -421,63 +672,6 @@ async fn a_start_replaces_only_a_live_chatgpt_sign_in_of_the_person() -> anyhow:
 }
 
 #[tokio::test]
-async fn signing_in_again_leaves_one_connection_of_the_name() -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("device sign-in again").await?;
-    let owner = Uuid::new_v4();
-
-    let outcome = std::panic::AssertUnwindSafe(async {
-        ensure_test_user(&pool, &owner).await?;
-        let state = test_state(&pool);
-        let bearer = bearer_for(&state, &owner)?;
-        let app = crate::credentials::router().with_state(state.clone());
-        let issuer = inert_issuer().await;
-
-        let stale = finish_sign_in(&state, owner, &issuer, None).await?;
-        assert_eq!(
-            live_connections(&app, &bearer).await?,
-            vec![(stale.to_string(), Some("ChatGPT".to_string()), true)]
-        );
-
-        // Studio's Sign in again: the new sign-in names the one it replaces,
-        // then Studio makes it the default, as the old one was, and retires
-        // the old one (`finalizeCredentialReplacement`).
-        let fresh = finish_sign_in(&state, owner, &issuer, Some(stale)).await?;
-        let (status, promoted) = call_router(
-            &app,
-            Some(&bearer),
-            "POST",
-            format!("/me/credentials/{fresh}/default"),
-            None,
-        )
-        .await?;
-        assert_eq!(status, StatusCode::OK, "{promoted}");
-        let (status, retired) = call_router(
-            &app,
-            Some(&bearer),
-            "DELETE",
-            format!("/me/credentials/{stale}"),
-            None,
-        )
-        .await?;
-        assert_eq!(status, StatusCode::OK, "{retired}");
-
-        assert_eq!(
-            live_connections(&app, &bearer).await?,
-            vec![(fresh.to_string(), Some("ChatGPT".to_string()), true)]
-        );
-        Ok::<(), anyhow::Error>(())
-    })
-    .catch_unwind()
-    .await;
-
-    let cleanup = delete_users(&pool, &[owner]).await;
-    match outcome {
-        Ok(result) => result.and(cleanup),
-        Err(panic) => std::panic::resume_unwind(panic),
-    }
-}
-
-#[tokio::test]
 async fn a_removed_sign_in_s_agent_keeps_its_number_taken() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("device sign-in numbers and agents").await?;
     let owner = Uuid::new_v4();
@@ -502,7 +696,7 @@ async fn a_removed_sign_in_s_agent_keeps_its_number_taken() -> anyhow::Result<()
         };
 
         finish_sign_in(&state, owner, &issuer, None).await?;
-        let second = finish_sign_in(&state, owner, &issuer, None).await?;
+        let (second, _) = finish_sign_in(&state, owner, &issuer, None).await?;
         assert_eq!(names(&pool, &second).await?.0.as_deref(), Some("ChatGPT 2"));
 
         // Removing the connection leaves its agent, still named "ChatGPT 2",
@@ -516,7 +710,7 @@ async fn a_removed_sign_in_s_agent_keeps_its_number_taken() -> anyhow::Result<()
         )
         .await?;
         assert_eq!(status, StatusCode::OK);
-        let third = finish_sign_in(&state, owner, &issuer, None).await?;
+        let (third, _) = finish_sign_in(&state, owner, &issuer, None).await?;
         assert_eq!(names(&pool, &third).await?.0.as_deref(), Some("ChatGPT 3"));
         assert_eq!(agents_named("ChatGPT 2").await?, 1);
 
@@ -528,7 +722,7 @@ async fn a_removed_sign_in_s_agent_keeps_its_number_taken() -> anyhow::Result<()
             &[&owner],
         )
         .await?;
-        let fourth = finish_sign_in(&state, owner, &issuer, None).await?;
+        let (fourth, _) = finish_sign_in(&state, owner, &issuer, None).await?;
         assert_eq!(names(&pool, &fourth).await?.0.as_deref(), Some("ChatGPT 2"));
         assert_eq!(agents_named("ChatGPT 2").await?, 1);
         Ok::<(), anyhow::Error>(())
@@ -603,8 +797,8 @@ async fn two_sign_ins_that_finish_together_take_different_names() -> anyhow::Res
         );
         released?;
         let mut taken = vec![
-            names(&pool, &first?).await?.0,
-            names(&pool, &second?).await?.0,
+            names(&pool, &first?.0).await?.0,
+            names(&pool, &second?.0).await?.0,
         ];
         taken.sort();
         assert_eq!(

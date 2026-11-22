@@ -100,6 +100,14 @@ export interface DeviceAuthStatusResult {
   provider?: string;
   status?: "pending" | "completed" | "failed" | "cancelled";
   credentialId?: string | null;
+  /**
+   * For a finished ChatGPT sign-in started with `replacesCredentialId`:
+   * whether it took that sign-in's place (same account, still live). Null
+   * when it replaced nothing, or from an older controller.
+   */
+  replaced?: boolean | null;
+  /** Why it did not: another ChatGPT account, or the old one was gone. */
+  notReplacedReason?: "different_account" | "gone" | null;
   error?: string | null;
 }
 
@@ -489,8 +497,9 @@ export async function startDeviceAuth(
   params?: {
     accessToken?: string | null;
     /**
-     * The ChatGPT sign-in this one replaces. The new sign-in takes its name
-     * when it is saved, instead of a numbered "ChatGPT 2".
+     * The ChatGPT sign-in this one replaces. When it finishes and is of the
+     * same account, the controller gives it that sign-in's place (name,
+     * default and agents) and retires that one.
      */
     replacesCredentialId?: string | null;
   },
@@ -595,6 +604,9 @@ export async function getDeviceAuthStatus(
       provider: typeof payload.provider === "string" ? payload.provider : undefined,
       status: normalizedStatus,
       credentialId: typeof payload.credentialId === "string" ? payload.credentialId : null,
+      replaced: typeof payload.replaced === "boolean" ? payload.replaced : null,
+      notReplacedReason:
+        payload.reason === "different_account" || payload.reason === "gone" ? payload.reason : null,
       error: typeof payload.error === "string" ? payload.error : null,
     };
   } catch (error) {

@@ -21,6 +21,7 @@ vi.mock("../core", () => ({
 }));
 
 import {
+  getDeviceAuthStatus,
   parseManagedAiAccess,
   parseSubscriptionUsage,
   renameMyCredential,
@@ -211,5 +212,26 @@ describe("startDeviceAuth", () => {
     const plain = sent(fetchMock, 1);
     expect(plain.body).toBeUndefined();
     expect(plain.headers).not.toHaveProperty("content-type");
+  });
+});
+
+describe("getDeviceAuthStatus", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads whether a finished sign-in replaced the one it was started to replace", async () => {
+    const completed = { sessionId: "session-1", provider: "codex", status: "completed", credentialId: "cred-new" };
+    const read = async (extra: Record<string, unknown>) => {
+      vi.stubGlobal("fetch", vi.fn(answer(200, { ...completed, ...extra })));
+      const status = await getDeviceAuthStatus("session-1");
+      return [status.replaced, status.notReplacedReason];
+    };
+    expect(await read({ replaced: true })).toEqual([true, null]);
+    expect(await read({ replaced: false, reason: "different_account" })).toEqual([false, "different_account"]);
+    expect(await read({ replaced: false, reason: "gone" })).toEqual([false, "gone"]);
+    // Nothing replaced, an older controller, or a reason it does not know.
+    expect(await read({})).toEqual([null, null]);
+    expect(await read({ replaced: false, reason: "solar_flare" })).toEqual([false, null]);
   });
 });

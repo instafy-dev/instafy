@@ -32,28 +32,64 @@ const LONE_SURROGATE = /^\p{Cs}$/u;
 const DEFAULT_IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
 // The default-ignorable characters a name keeps, because scripts and emoji
 // need them: the zero-width non-joiner and joiner, and the variation selectors.
-const KEPT_IN_NAMES = /^[‌‍\p{Variation_Selector}]$/u;
+const KEPT_IN_NAMES = /^[\u200C\u200D\p{Variation_Selector}]$/u;
 const COMBINING_MARK = /^\p{M}$/u;
 const ALPHANUMERIC = /^[\p{Alphabetic}\p{N}]$/u;
 const ALPHABETIC = /^\p{Alphabetic}$/u;
-const AT_SIGNS = new Set(["@", "＠", "﹫"]);
-const DOMAIN_DOTS = new Set([".", "．", "｡", "。", "﹒", "․"]);
+const AT_SIGNS = new Set(["@", "\uFF20", "\uFE6B"]);
+const DOMAIN_DOTS = new Set([".", "\uFF0E", "\uFF61", "\u3002", "\uFE52", "\u2024"]);
 const LOCAL_PART_PUNCTUATION = new Set(Array.from("!#$%&'*+-/=?^_`{|}~."));
 
+const BLACK_FLAG = "\u{1F3F4}";
+const CANCEL_TAG = "\u{E007F}";
+const TAG_SPEC = /^[\u{E0020}-\u{E007E}]$/u;
+
 /**
- * Control characters, line and paragraph separators, and the default-ignorable
- * characters a name does not keep: the text-direction marks and the ones that
- * show nothing could make a name read as something else, hide an email
- * address, or be a whole name that looks empty.
+ * Where an emoji tag sequence that starts at `start` ends, past its last
+ * character, when one does: the black flag, one or more tag characters
+ * U+E0020 to U+E007E, and the cancel tag, as Unicode writes the flags of
+ * England, Scotland and Wales.
  */
-function breaksAOneLineName(character: string): boolean {
-  return (
-    CONTROL.test(character) ||
-    LONE_SURROGATE.test(character) ||
-    character === " " ||
-    character === " " ||
-    (DEFAULT_IGNORABLE.test(character) && !KEPT_IN_NAMES.test(character))
-  );
+function emojiTagSequenceEnd(characters: string[], start: number): number | null {
+  if (characters[start] !== BLACK_FLAG) {
+    return null;
+  }
+  let index = start + 1;
+  while (index < characters.length && TAG_SPEC.test(characters[index])) {
+    index += 1;
+  }
+  return index > start + 1 && characters[index] === CANCEL_TAG ? index + 1 : null;
+}
+
+/**
+ * Whether a name holds a control character, a line or paragraph separator, or
+ * a default-ignorable character a name does not keep: the text-direction marks
+ * and the ones that show nothing could make a name read as something else,
+ * hide an email address, or be a whole name that looks empty. The tag
+ * characters of a well-formed emoji tag sequence are kept; any other tag
+ * character is refused.
+ */
+function breaksAOneLineName(characters: string[]): boolean {
+  let index = 0;
+  while (index < characters.length) {
+    const end = emojiTagSequenceEnd(characters, index);
+    if (end !== null) {
+      index = end;
+      continue;
+    }
+    const character = characters[index];
+    if (
+      CONTROL.test(character) ||
+      LONE_SURROGATE.test(character) ||
+      character === "\u2028" ||
+      character === "\u2029" ||
+      (DEFAULT_IGNORABLE.test(character) && !KEPT_IN_NAMES.test(character))
+    ) {
+      return true;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 function isDomainCharacter(character: string): boolean {
@@ -132,7 +168,7 @@ export function checkCredentialLabel(raw: string): CredentialLabelCheck {
   if (
     characters.length === 0 ||
     characters.length > CREDENTIAL_LABEL_MAX_LENGTH ||
-    characters.some(breaksAOneLineName)
+    breaksAOneLineName(characters)
   ) {
     return { ok: false, code: "credential_label_invalid", message: CREDENTIAL_LABEL_INVALID_MESSAGE };
   }
