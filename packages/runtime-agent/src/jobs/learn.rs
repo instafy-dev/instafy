@@ -844,6 +844,11 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // price below all others, news or a score with no search came from the subject's own page, and
     // the key card came from `instafy web search-key` for a person who asks to set up search.
     "2b9977b774663276901a2b05ad802a748a3172ec8b17fd590ba201d801fcf943", // v23
+    // From before "checked <date>" was a reply's words and a page's helpers' to draw (never
+    // typed), news or a score read its subject's own page before any search, a status or news
+    // page was read without `--find` and a cut read again, and a page the reader couldn't read
+    // ended in a few plain words, its link and one card, never how the reader was stopped.
+    "72511d5584747120c02884281993ba896c3ffd3f335356e225a5d143788f04c7", // v24
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,

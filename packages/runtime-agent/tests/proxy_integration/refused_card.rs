@@ -15,6 +15,11 @@
 //! The first answer's words go from the reply being written as the retry begins: they were
 //! written for a card that never came. Any other answer asked for again stays until the retry's
 //! words replace it (`pages_of_their_own_chats`).
+//!
+//! The retry fixes only the card: a price question's first attempt read the shop's page, and its
+//! retry, on a thread of its own and told to "search first", read it all again (a local test,
+//! Nov 20). It now runs on the first attempt's own thread, which holds what that attempt read,
+//! with no shell and no web search, told which rule its card broke and what to name instead.
 
 // The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
 use crate::*;
@@ -44,6 +49,18 @@ const HOTEL_OPENED: &str =
     "I've opened a browser check for those dates; no reservation will be made.";
 const STAND_ALONE: &str =
     "If this card is refused too, only your words show: make them stand alone.";
+/// A price question whose first attempt read the shop's page, which the reader refused, then
+/// wrote a card naming no page. The command stands in for the read and writes nothing, so the
+/// turn changed no file.
+const PRICE_REQUEST: &str = "What does the vacuum cost at the shop?";
+const READ_OUTPUT: &str = "SHOP_PAGE_NOT_READ: the search page of the shop refused a direct read";
+const READ_COMMAND: &str =
+    "printf 'SHOP_PAGE_NOT_READ: the search page of the shop refused a direct read'";
+const PRICE_HAND_OVER: &str = "I'm handing the shop's page to the browser to check the price.";
+const PRICE_NO_PAGE: &str = "Check the vacuum's price at the shop.";
+/// The retry's card names the shop's home page, as told for a page whose address would be a guess.
+const PRICE_HOME_PAGE: &str = "Open https://shop.example and find the vacuum's price.";
+const PRICE_WORDS: &str = "I couldn't read the vacuum's price on the shop's site.";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Case {
@@ -55,6 +72,8 @@ enum Case {
     AWaitingCard,
     /// The retry's card names no page either.
     RefusedTwice,
+    /// The first attempt read a page before its card named none: the retry fixes only the card.
+    AfterARead,
 }
 
 impl Case {
@@ -72,7 +91,16 @@ impl Case {
             Self::RefusedTwice => {
                 "evidence_retry::refused_card::a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy"
             }
+            Self::AfterARead => {
+                "evidence_retry::refused_card::a_refused_cards_retry_adds_no_search_and_no_read_via_proxy"
+            }
         }
+    }
+
+    /// The provider request the retry sends: after the first answer, which follows a read for
+    /// the case that reads first.
+    fn retry_index(self) -> usize {
+        if self == Self::AfterARead { 2 } else { 1 }
     }
 
     /// The person's message.
@@ -83,6 +111,7 @@ impl Case {
             }
             Self::AWaitingCard => POLICY_REQUEST,
             Self::RefusedTwice => HOTEL_REQUEST,
+            Self::AfterARead => PRICE_REQUEST,
         }
     }
 
@@ -122,6 +151,7 @@ impl Case {
             Self::AWaitingCard => Some(answer(POLICY_WORDS, POLICY_PAGE)),
             Self::RefusedTwice if stand_alone => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
             Self::RefusedTwice => Some(answer(HOTEL_OPENED, HOTEL_NO_PAGE)),
+            Self::AfterARead => Some(answer(PRICE_WORDS, PRICE_HOME_PAGE)),
         }
     }
 
@@ -131,6 +161,7 @@ impl Case {
             Self::TheOnlyCard | Self::ACardLeft => vec![NAMES_ITS_PAGE.to_string()],
             Self::AWaitingCard => vec![POLICY_PAGE.to_string()],
             Self::RefusedTwice => Vec::new(),
+            Self::AfterARead => vec![PRICE_HOME_PAGE.to_string()],
         }
     }
 
@@ -139,6 +170,7 @@ impl Case {
             Self::TheOnlyCard | Self::ACardLeft => NAMES_NO_PAGE,
             Self::AWaitingCard => POLICY_NO_PAGE,
             Self::RefusedTwice => HOTEL_NO_PAGE,
+            Self::AfterARead => PRICE_NO_PAGE,
         };
         let mut actions = vec![json!({
             "type":"request_browser","task":no_page,
@@ -159,6 +191,7 @@ impl Case {
                 json!([]),
             ),
             Self::RefusedTwice => (HOTEL_OPENED.to_string(), json!([])),
+            Self::AfterARead => (PRICE_HAND_OVER.to_string(), json!([])),
         };
         json!({
             "summary":summary,"code":"","suggestions":[],
@@ -188,6 +221,11 @@ fn a_retrys_card_that_waits_for_the_person_shows_the_retrys_words_above_it_via_p
 #[test]
 fn a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy() -> Result<()> {
     run_isolated(Case::RefusedTwice)
+}
+
+#[test]
+fn a_refused_cards_retry_adds_no_search_and_no_read_via_proxy() -> Result<()> {
+    run_isolated(Case::AfterARead)
 }
 
 fn run_isolated(case: Case) -> Result<()> {
@@ -252,12 +290,21 @@ async fn provider_request(
         requests.push(body);
         requests.len() - 1
     };
-    if index == 1 {
+    if index == state.case.retry_index() {
         *state.draft_as_the_retry_began.lock().unwrap() = Some(state.draft.borrow().clone());
     }
     match (state.case, index) {
+        // The first attempt reads first: the command stands in for the reader.
+        (Case::AfterARead, 0) => response(json!({
+            "id":"tool_first_read","type":"function_call","name":"exec_command",
+            "call_id":"call_first_read","status":"completed",
+            "arguments":json!({"cmd":READ_COMMAND,"max_output_tokens":64}).to_string()
+        })),
+        (Case::AfterARead, 1) => response(final_answer(&Case::AfterARead.first_answer())),
         (case, 0) => response(final_answer(&case.first_answer())),
-        (case, 1) if case.retry_answer(stand_alone).is_some() => {
+        (case, index)
+            if index == case.retry_index() && case.retry_answer(stand_alone).is_some() =>
+        {
             response(final_answer(&case.retry_answer(stand_alone).unwrap()))
         }
         (case, _) => panic!("unexpected extra provider request {index} for {case:?}"),
@@ -379,7 +426,8 @@ async fn run_case(case: Case) -> Result<()> {
         intent: Some("feature".to_string()),
         project_id: Some(project_id),
         run_id: Some(Uuid::new_v4()),
-        conversation_id: None,
+        // A chat's message keeps its thread, which its first attempt starts.
+        conversation_id: (case == Case::AfterARead).then(Uuid::new_v4),
         session_id: None,
         credential_id: None,
         payload: case.payload(),
@@ -429,6 +477,18 @@ async fn run_case(case: Case) -> Result<()> {
                 metadata["activity"]["live"].clone(),
             )
         })
+        .collect();
+    let retry_lines: Vec<&str> = streamed
+        .iter()
+        .filter(|message| {
+            message
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("kind"))
+                .and_then(Value::as_str)
+                == Some("codex_retry")
+        })
+        .map(|message| message.content.as_str())
         .collect();
     // Every card the turn posted, settled or streamed with its answer, by its task.
     let cards: Vec<String> = execution
@@ -488,11 +548,11 @@ async fn run_case(case: Case) -> Result<()> {
                 vec![(json!("refused_browser_card"), json!("Working"))]
             );
             assert_eq!(requests.len(), 2, "the first answer, then the retry's");
-            // The retry was told why its card was refused.
+            // The retry was told why its card was refused, and what to name instead.
             let retry_input = requests[1]["input"].to_string();
             assert!(
-                retry_input.contains("`request_browser` card was refused")
-                    && retry_input.contains("search first, then hand over what it found"),
+                retry_input.contains("`request_browser` card was refused for what its task says. Fix only the card:")
+                    && retry_input.contains("For a page whose address you would only guess, such as a site's search page, name that site's home page."),
                 "retry input: {retry_input}"
             );
             // The person reads none of the first answer's words for a card that never came.
@@ -507,6 +567,43 @@ async fn run_case(case: Case) -> Result<()> {
         Case::ACardLeft => {
             assert!(retries.is_empty(), "{retries:?}");
             assert_eq!(requests.len(), 1, "one answer, not run again");
+        }
+        Case::AfterARead => {
+            assert_eq!(
+                retries,
+                vec![(json!("refused_browser_card"), json!("Working"))]
+            );
+            // The line names the rule the card broke and what the retry names instead.
+            assert_eq!(
+                retry_lines,
+                ["Retrying: the browser card named no page by its address. The retry names each page it opens, or the site's home page for an address it would only guess."]
+            );
+            assert_eq!(requests.len(), 3, "the read, the first answer, then the retry's");
+            let retry = &requests[2];
+            let retry_input = retry["input"].to_string();
+            // The first attempt's own thread: what it read is in the retry's input.
+            assert!(retry_input.contains(READ_OUTPUT), "retry input: {retry_input}");
+            for words in [
+                "- It named no page it opens.",
+                "name that site's home page",
+                "This turn's searches and reads are done: do not search or read any page again.",
+            ] {
+                assert!(retry_input.contains(words), "{words}: {retry_input}");
+            }
+            // It has no shell and no web search: it can't read or search again.
+            let tools = retry["tools"].to_string();
+            for tool in ["\"exec_command\"", "\"exec\"", "\"shell\"", "web_search"] {
+                assert!(!tools.contains(tool), "{tool}: {tools}");
+            }
+            // The one read in its input is the first attempt's.
+            let outputs = retry["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| item["type"] == "function_call_output")
+                .count();
+            assert_eq!(outputs, 1, "retry input: {retry_input}");
+            assert_eq!(execution.summary, PRICE_WORDS);
         }
     }
     // A card posted names its page, and a refused one is never posted.
