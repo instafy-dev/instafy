@@ -11,6 +11,8 @@ const workspaceTabs = vi.hoisted(() => {
   const state = { conversationBrowser: { available: true, attention: false } as ConversationBrowserState };
   return Object.assign(state, {
     setConversationBrowser: vi.fn((_scope: string | null, next: ConversationBrowserState) => { state.conversationBrowser = next; }),
+    updateSurfaces: vi.fn(),
+    openConversationTab: vi.fn(),
   });
 });
 
@@ -18,12 +20,12 @@ vi.mock("../WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({
     conversationWorkspace: true,
     conversationWorkspaceScope: "scope-1",
-    conversationSurfaces: { read: () => DEFAULT_CONVERSATION_SURFACES, update: vi.fn() },
+    conversationSurfaces: { read: () => DEFAULT_CONVERSATION_SURFACES, update: workspaceTabs.updateSurfaces },
     conversationBrowser: workspaceTabs.conversationBrowser,
     setConversationBrowser: workspaceTabs.setConversationBrowser,
     activeTab: { id: "tab-1", kind: "conversation", conversationId: "conversation-1" },
     tabs: [],
-    openConversationTab: vi.fn(),
+    openConversationTab: workspaceTabs.openConversationTab,
     focusTab: vi.fn(),
     closeTab: vi.fn(),
     requestUrlPush: vi.fn(),
@@ -103,7 +105,7 @@ describe("ConversationWorkspaceViews", () => {
     // The chat closes its view; the tab does not wait for its panel to say so
     // (one of the chat's own tabs may be in front of it).
     expect(close).toHaveBeenCalledTimes(1);
-    expect(workspaceTabs.setConversationBrowser).toHaveBeenCalledWith("scope-1", { available: false, attention: false, pageTitle: null, agentName: "Octo", close });
+    expect(workspaceTabs.setConversationBrowser).toHaveBeenCalledWith("scope-1", { available: false, offered: false, attention: false, pageTitle: null, agentName: "Octo", close });
     await renderViews(root);
     expect(container.querySelector('[data-testid="conversation-subtab-browser"]')).toBeNull();
   });
@@ -113,5 +115,52 @@ describe("ConversationWorkspaceViews", () => {
     await renderViews(root);
     expect(container.querySelector('[data-testid="conversation-subtab-browser"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="Close Browser view"]')).toBeNull();
+  });
+
+  // Dogfood, Nov 22: Octo's pause on a sign-in still waited after a reload,
+  // but the chat had no Browser tab to go back to it.
+  it("keeps a Browser tab a waiting pause offers, which selects the Browser view", async () => {
+    workspaceTabs.updateSurfaces.mockClear();
+    workspaceTabs.openConversationTab.mockClear();
+    workspaceTabs.conversationBrowser = { available: false, offered: true, attention: false, pageTitle: null, agentName: null };
+    await renderViews(root);
+    const tab = container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-browser"]');
+    expect(tab).not.toBeNull();
+    // Chat stays the view in front until the chat's panel opens the browser.
+    expect(container.querySelector('[data-testid="conversation-subtab-chat"]')?.getAttribute("aria-selected")).toBe("true");
+    await act(async () => tab!.click());
+    expect(workspaceTabs.updateSurfaces).toHaveBeenCalledTimes(1);
+    const [scope, change] = workspaceTabs.updateSurfaces.mock.calls[0] as [string, (state: typeof DEFAULT_CONVERSATION_SURFACES) => typeof DEFAULT_CONVERSATION_SURFACES];
+    expect(scope).toBe("scope-1");
+    expect(change(DEFAULT_CONVERSATION_SURFACES).activeId).toBe("browser");
+    expect(workspaceTabs.openConversationTab).toHaveBeenCalledWith("conversation-1");
+  });
+
+  it("counts an offered tab as no open view: the bar does not split for it", async () => {
+    const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1280);
+    try {
+      workspaceTabs.conversationBrowser = { available: false, offered: true, attention: false };
+      await renderViews(root);
+      expect(container.querySelector('[data-testid="conversation-chat-toolbar"]')).toBeNull();
+      expect(container.querySelector('[data-testid="conversation-subtab-chat"]')).not.toBeNull();
+      // An open view beside Chat does split it.
+      workspaceTabs.conversationBrowser = { available: true, attention: false };
+      await renderViews(root);
+      expect(container.querySelector('[data-testid="conversation-chat-toolbar"]')).not.toBeNull();
+    } finally {
+      width.mockRestore();
+    }
+  });
+
+  it("withdraws the offer when the person closes that tab", async () => {
+    const close = vi.fn();
+    workspaceTabs.setConversationBrowser.mockClear();
+    workspaceTabs.conversationBrowser = { available: false, offered: true, attention: false, pageTitle: null, agentName: null, close };
+    await renderViews(root);
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close Browser view"]')!.click());
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(workspaceTabs.setConversationBrowser).toHaveBeenCalledWith("scope-1", expect.objectContaining({ available: false, offered: false }));
+    await renderViews(root);
+    expect(container.querySelector('[data-testid="conversation-subtab-browser"]')).toBeNull();
   });
 });

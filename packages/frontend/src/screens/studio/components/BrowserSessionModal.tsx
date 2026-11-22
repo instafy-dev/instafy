@@ -491,6 +491,7 @@ export function BrowserSessionModal({
   humanInputIdentityKey,
   humanInputRunIds = null,
   humanInputStoppedRunIds = null,
+  pausedPageId = null,
   currentUserId = null,
   onTakeOverAgent,
   onContinueAfterHumanInput,
@@ -562,6 +563,12 @@ export function BrowserSessionModal({
   humanInputRunIds?: ReadonlySet<string> | null;
   /** The chat's runs a person's Stop ended (`runIdsEndedByStop`): a pause of one of them is over. */
   humanInputStoppedRunIds?: ReadonlySet<string> | null;
+  /**
+   * The tab of a pause that still waits for this person (openBrowserPause).
+   * Once the browser no longer lists it, the empty stage says the page has
+   * closed, and how to start over.
+   */
+  pausedPageId?: string | null;
   currentUserId?: string | null;
   /**
    * Take over. `agentHoldsBrowser`: the browser reports the agent's control,
@@ -3473,6 +3480,11 @@ export function BrowserSessionModal({
   // arrived already, and a cover over it took the person's first click.
   const blankPageShown = viewLive && stageShowsPage && sharedBrowserActivePage !== null &&
     browserSessionPageIsBlank(sharedBrowserActivePage) && !agentArrivalNote && !agentWhereabouts;
+  // A pause that still waits for this person, on a tab the browser no longer
+  // lists: the browser stopped, and its tabs went with it. The empty stage
+  // says so, and how to start over, rather than only that no page is open.
+  const pausedPageClosed = pausedPageId !== null && sharedBrowserChrome !== null && sharedBrowserChrome.resolved &&
+    !sharedBrowserChrome.pages.some((page) => page.id === pausedPageId);
   // Around a live page the stage follows the theme like the chrome above it
   // and the composer below: black under a page in light mode read as dark
   // chrome on a phone, where the page leaves bands above and below it.
@@ -3946,7 +3958,11 @@ export function BrowserSessionModal({
               className="absolute inset-0 flex items-center justify-center bg-slate-100 p-4 text-center dark:bg-slate-950"
               data-testid="browser-session-blank-page"
             >
-              <Text variant="body" tone="muted">No page open</Text>
+              <Text variant="body" tone="muted" className="max-w-sm">
+                {pausedPageClosed
+                  ? "The page Octo paused on is no longer open in Instafy's browser. Send your request again to start over."
+                  : "No page open"}
+              </Text>
             </div>
           ) : null}
           {!shouldCollapseDocked && viewLive && !stageShowsPage && !anotherChatTurn &&
