@@ -742,8 +742,17 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         !BROWSER_SKILL[start + 1..].contains("\n## "),
         "the routing section is the skill's last"
     );
-    // As written, with its marks, it fits too.
-    assert!(BROWSER_SKILL[start..].trim_end().chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS);
+    // As written, with its marks, it fits too: a runtime from before the marks reads it so, in
+    // every state, braces and all, with no mark left out.
+    let as_written =
+        extract_markdown_h2_section(BROWSER_SKILL, "Routing preflight").expect("routing section");
+    let as_written = format_routing_skill_snapshot(
+        "browser",
+        learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+        &as_written,
+        BROWSER_SKILL_ROUTING_MAX_CHARS,
+    );
+    assert!(!as_written.contains("(truncated)"), "{as_written}");
     let section = routing_section(BROWSER_SKILL);
     assert!(
         section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
@@ -4263,8 +4272,11 @@ fn where_research_pages_search_first_the_routing_step_reads_only_that_states_wor
 
 /// Only words in braces are left out, only where research that ends in a page searches first,
 /// and never on a guess: a section with no braces reads as written in every state (a space's
-/// own copy, or one from before the marks), a brace in inline code is text, and a brace with no
-/// partner on its line, or one inside another, leaves the section as written.
+/// own copy, or one from before the marks), a brace in inline code is text, inside the marked
+/// words too, and a brace with no partner on its line, or one inside another, leaves the section
+/// as written. Inside the marked words, a brace in inline code ended them there, or left the
+/// section as written: with search off, "- A{ answer `}` now}." was read "- A answer `` now}."
+/// (a local test of the reader, Nov 22).
 #[test]
 fn only_marked_words_are_left_out_and_never_on_a_guess() {
     let read = browser_routing_section_for_search_state;
@@ -4288,6 +4300,13 @@ fn only_marked_words_are_left_out_and_never_on_a_guess() {
     let holds_code = "- A{ stays `direct`}.\n";
     assert_eq!(read(holds_code, false), "- A stays `direct`.\n");
     assert_eq!(read(holds_code, true), "- A.\n");
+    for (holds_brace, as_written) in [
+        ("- A{ answer `}` now}.\n", "- A answer `}` now.\n"),
+        ("- A{ answer `{x}` now}.\n", "- A answer `{x}` now.\n"),
+    ] {
+        assert_eq!(read(holds_brace, false), as_written);
+        assert_eq!(read(holds_brace, true), "- A.\n");
+    }
 
     for broken in [
         "- A{ when B, stays.\n- C}\n",
@@ -4295,6 +4314,7 @@ fn only_marked_words_are_left_out_and_never_on_a_guess() {
         "- A{ when {B} }.\n",
         "- A when B}.\n",
         "- A{ when B",
+        "- A{ answer `x}.\n",
     ] {
         assert_eq!(read(broken, false), broken);
         assert_eq!(read(broken, true), broken);
@@ -4303,8 +4323,10 @@ fn only_marked_words_are_left_out_and_never_on_a_guess() {
 
 /// A space's own copy of the routing section is read for the message's search state too, from
 /// the copy as it is: one from before the marks reads the same in every state, a brace in a
-/// fenced block marks nothing (the snapshot leaves such blocks out), and the routing step's
-/// budget counts what the step reads, after the marked words are left out.
+/// fenced block marks nothing (the snapshot leaves such blocks out, before the marks are read:
+/// a block's braces on lines of their own, as JSON is written, would otherwise leave the section
+/// as written, its marks too), and the routing step's budget counts what the step reads, after
+/// the marked words are left out.
 #[test]
 fn a_spaces_own_routing_section_is_read_for_its_search_state() {
     let tmp = scaffolded_space();
@@ -4322,7 +4344,7 @@ fn a_spaces_own_routing_section_is_read_for_its_search_state() {
 
     fs::write(
         &path,
-        "# Browser\n\n## Routing preflight\n\n- Stay `direct`{ unless it browses first}.\n\n```json\n{\"route\": \"browser\"}\n```\n",
+        "# Browser\n\n## Routing preflight\n\n- Stay `direct`{ unless it browses first}.\n\n```json\n{\n  \"route\": \"browser\"\n}\n```\n",
     )
     .unwrap();
     for (pages_first, rule) in [
