@@ -773,6 +773,18 @@ quota or switch action. An unresolved or failed capability check must not be pre
 confirmed unavailability. Reserve the separate status summary for loading, errors or a saved
 account that needs to be selected as default.
 
+Each saved, live connection has **Rename** (Rename… in its menu on a narrow screen), which turns
+its name into a text field with Save and Cancel: Enter saves, Escape cancels, and a refused name
+says why under the field. Instafy AI's row has none. The person's agents on that connection whose
+display name still reads exactly as the old name take the new one; an agent named by hand keeps
+its name, and no handle changes, since people mention agents by them (`PATCH /me/credentials/:id`).
+While a live connection is named "ChatGPT", a new ChatGPT sign-in takes the lowest free number
+("ChatGPT 2", then "ChatGPT 3"), so two plans read apart. A reconnect keeps the old connection's
+name: what replaces it takes that name unless the person types another, and a ChatGPT sign-in says
+which sign-in it replaces (`replacesCredentialId`), since the old one is still live when the new
+one is saved. A name is 1 to 60 characters on one line and never holds an email address, whoever
+types it: the agent made for a connection goes by its name, and teammates see that agent.
+
 In Instafy Desktop on macOS, and only for a person `CLAUDE_CODE_LANE_USER_IDS` covers (the space's
 runtime status carries `claudeCodeLane`), Connections also shows **Claude Code on this computer**
 after saved connections and before **Connect an account**: whether this computer can run the turns

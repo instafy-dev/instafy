@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::{
-    decode_authoritative_credential_payload, insert_user_credential,
+    decode_authoritative_credential_payload, insert_user_credential, NewCredentialLabel,
     CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
 };
 use crate::claude_material::{
@@ -135,7 +135,7 @@ async fn the_credential_sink_refuses_a_claude_sign_in_before_sealing_or_the_data
             "codex_auth_json".to_string(),
             json!({ "source": "device_code" }),
             auth_json,
-            Some("ChatGPT".to_string()),
+            NewCredentialLabel::ChatGptSignIn { replaces: None },
             None,
         )
         .await;

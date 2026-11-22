@@ -32,6 +32,24 @@ const {
   test: testMyCredential,
 } = controllerClient.credentials;
 
+/** A connection that a new one replaces. */
+export type CredentialReplaceTarget = {
+  id: string;
+  /** How messages name it. */
+  label: string;
+  /**
+   * The name it was saved with, or null when it has none. A replacement the
+   * person gives no name of its own takes this one, so a reconnect keeps its
+   * name.
+   */
+  savedLabel?: string | null;
+};
+
+/** The replaced connection's own name, when it has one. */
+function savedLabelOf(target: CredentialReplaceTarget | null): string | null {
+  return target?.savedLabel?.trim() || null;
+}
+
 async function readJsonFile(file: File): Promise<unknown> {
   const contents = await file.text();
   return JSON.parse(contents) as unknown;
@@ -76,7 +94,7 @@ type UseCredentialsConnectFlowResult = {
   ) => void;
   /** Opens the modal to replace an existing credential rather than add one. */
   openConnectModalToReplace: (
-    credential: { id: string; label: string },
+    credential: CredentialReplaceTarget,
     step: CredentialsConnectModalStep,
   ) => void;
   connectModalProps: CredentialsConnectModalProps;
@@ -111,7 +129,7 @@ export function useCredentialsConnectFlow({
   // and a state value read inside it would be captured stale — the replace
   // would silently degrade into a plain add, leaving two live credentials with
   // the dead one still default.
-  const replaceTargetRef = useRef<{ id: string; label: string } | null>(null);
+  const replaceTargetRef = useRef<CredentialReplaceTarget | null>(null);
   const [apiKeyPendingProvider, setApiKeyPendingProvider] = useState<CredentialsConnectApiKeyProvider | null>(null);
   const [openaiApiKeyDraft, setOpenaiApiKeyDraft] = useState("");
   const [openaiLabelDraft, setOpenaiLabelDraft] = useState("");
@@ -237,7 +255,7 @@ export function useCredentialsConnectFlow({
   );
 
   const openConnectModalToReplace = useCallback(
-    (credential: { id: string; label: string }, step: CredentialsConnectModalStep) => {
+    (credential: CredentialReplaceTarget, step: CredentialsConnectModalStep) => {
       openConnectModalAtStep(step);
       replaceTargetRef.current = credential;
     },
@@ -291,8 +309,11 @@ export function useCredentialsConnectFlow({
       completedDeviceAuthSessionRef.current = null;
 
       try {
+        // The controller names a replacement after the sign-in it replaces;
+        // otherwise a second sign-in would be "ChatGPT 2".
         await beginDeviceAuthFlow({
           provider,
+          replacesCredentialId: replaceTargetRef.current?.id ?? null,
         });
       } finally {
         setConnectPending(false);
@@ -376,7 +397,8 @@ export function useCredentialsConnectFlow({
       setConnectPending(true);
       try {
         const result = await connectDesktopCodexAuthJson({
-          label: labelDraft.trim() ? labelDraft.trim() : "Codex on this computer",
+          label:
+            labelDraft.trim() || savedLabelOf(replaceTargetRef.current) || "Codex on this computer",
           ...newConnectionDefaultOption(),
         });
         if (!result.success) {
@@ -472,7 +494,7 @@ export function useCredentialsConnectFlow({
         const authJson = await readJsonFile(file);
         const result = await createCodexCredential({
           authJson,
-          label: labelDraft.trim() ? labelDraft.trim() : "Browser upload",
+          label: labelDraft.trim() || savedLabelOf(replaceTargetRef.current) || "Browser upload",
           ...newConnectionDefaultOption(),
         });
         if (!result.success) {
@@ -623,15 +645,18 @@ export function useCredentialsConnectFlow({
             : provider === "zai"
               ? zaiLabelDraft
               : geminiLabelDraft;
-      const label = draftLabel.trim()
-        ? draftLabel.trim()
-        : provider === "openai"
+      // A replacement keeps the replaced connection's name unless the person
+      // typed another.
+      const label =
+        draftLabel.trim() ||
+        savedLabelOf(replaceTargetRef.current) ||
+        (provider === "openai"
           ? "OpenAI"
           : provider === "deepseek"
             ? "DeepSeek"
             : provider === "zai"
               ? "z.ai"
-              : "Gemini";
+              : "Gemini");
 
       setApiKeyPendingProvider(provider);
       let createdCredentialId: string | null = null;

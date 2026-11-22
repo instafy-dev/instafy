@@ -39,6 +39,7 @@ mod conversation_stop;
 mod conversations;
 mod cors;
 mod credential_keys;
+mod credential_labels;
 mod credential_rotation;
 mod credentials;
 mod credits;

@@ -17,6 +17,11 @@ export type DeviceAuthSession = {
 export type DeviceAuthFlowBeginOptions = {
   provider: DeviceAuthProvider;
   label?: string | null;
+  /**
+   * The ChatGPT sign-in this one replaces, whose name the new one takes.
+   * Without it a second sign-in is named "ChatGPT 2".
+   */
+  replacesCredentialId?: string | null;
 };
 
 export type DeviceAuthFlowCompletionResult =
@@ -70,7 +75,11 @@ export function useDeviceAuthFlow({
       setSession(null);
       statusFailureCountRef.current = 0;
       try {
-        const result = await controllerClient.credentials.startDeviceAuth(options.provider);
+        const result = options.replacesCredentialId
+          ? await controllerClient.credentials.startDeviceAuth(options.provider, {
+              replacesCredentialId: options.replacesCredentialId,
+            })
+          : await controllerClient.credentials.startDeviceAuth(options.provider);
         if (beginGenerationRef.current !== generation) {
           return;
         }

@@ -13,7 +13,7 @@ use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::time::timeout;
-use tokio_postgres::{types::Json as PgJson, GenericClient, Transaction};
+use tokio_postgres::{types::Json as PgJson, GenericClient, Row, Transaction};
 use uuid::Uuid;
 
 use crate::ai_agents;
@@ -22,13 +22,14 @@ use crate::auth::{
 };
 use crate::claude_material::{claude_credential_refused, json_contains_claude_material};
 use crate::credential_keys::CredentialKeyRing;
+use crate::credential_labels::CredentialLabel;
 use crate::model_defaults::{
     default_chatgpt_model_id, default_model_for_provider, floor_own_ai_model_for_provider,
 };
 use crate::typed_sql::typed;
 use crate::{bad_request, internal_error, not_found, unauthorized, ApiError, AppState};
 
-const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
+pub(crate) const CREDENTIAL_KIND_CODEX_AUTH_JSON: &str = "codex_auth_json";
 const CREDENTIAL_KIND_OPENAI_API_KEY: &str = "openai_api_key";
 const PROVIDER_OPENAI: &str = "openai";
 const PROVIDER_DEEPSEEK: &str = "deepseek";
@@ -66,6 +67,12 @@ struct CreateCodexCredentialBody {
     provider: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RenameCredentialBody {
+    #[serde(default)]
+    label: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateCredentialResponse {
@@ -82,6 +89,16 @@ struct CreateCredentialResponse {
 #[serde(rename_all = "camelCase")]
 struct MySessionResponse {
     user_id: String,
+}
+
+/// The name a new connection is saved with.
+pub(crate) enum NewCredentialLabel {
+    /// The name the person gave it, if any.
+    Given(Option<CredentialLabel>),
+    /// A ChatGPT device sign-in's, decided in the transaction that saves it
+    /// (`device_auth::chatgpt_sign_in_label`): the name of the sign-in it
+    /// replaces, else the numbered "ChatGPT" default.
+    ChatGptSignIn { replaces: Option<Uuid> },
 }
 
 #[derive(Debug)]
@@ -188,7 +205,7 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route(
             "/me/credentials/:credential_id",
-            delete(revoke_my_credential),
+            delete(revoke_my_credential).patch(rename_my_credential),
         )
         .route(
             "/internal/credentials/:credential_id",
@@ -234,7 +251,7 @@ pub(crate) async fn insert_user_credential(
     kind: String,
     metadata: JsonValue,
     auth_json: JsonValue,
-    label: Option<String>,
+    label: NewCredentialLabel,
     make_default: Option<bool>,
 ) -> Result<CreatedCredential, (StatusCode, Json<ApiError>)> {
     // The one sink for stored model credentials, the Codex upload and device
@@ -260,10 +277,6 @@ pub(crate) async fn insert_user_credential(
         internal_error(format!("failed to encrypt credential payload: {error}"))
     })?;
 
-    let label = label
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
     // Whether Instafy AI can run this person's turns decides an unasked
     // default. Probe the proxy before the transaction so no database
     // connection waits on it. Without a proxy Instafy AI cannot run at all.
@@ -288,6 +301,14 @@ pub(crate) async fn insert_user_credential(
         .transaction()
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    let label = match label {
+        NewCredentialLabel::Given(label) => label,
+        NewCredentialLabel::ChatGptSignIn { replaces } => {
+            Some(crate::device_auth::chatgpt_sign_in_label(&transaction, user_id, replaces).await?)
+        }
+    };
+    let label = label.as_ref().map(CredentialLabel::as_str);
 
     let default_row = transaction
         .query_opt(
@@ -363,7 +384,7 @@ pub(crate) async fn insert_user_credential(
         &transaction,
         user_id,
         credential_id,
-        label.as_deref(),
+        label,
         None,
         agent_model,
         // New credential-seeded agents inherit reasoning effort (null) until set.
@@ -1993,6 +2014,9 @@ async fn list_my_credentials(
     Ok(Json(load_credential_list(&*connection, &user_id).await?))
 }
 
+/// The columns [`credential_list_item`] reads.
+const CREDENTIAL_LIST_COLUMNS: &str = "id, kind, label, metadata, is_default, subscription_usage, last_used_at, revoked_at, created_at, updated_at";
+
 /// The user's credentials as `GET /me/credentials` lists them. A row under
 /// the reserved managed id is not a user credential and is never listed, so
 /// no client can select it.
@@ -2003,50 +2027,137 @@ async fn load_credential_list(
     let reserved_credential_id = crate::config::managed_ai_credential_id();
     let rows = client
         .query(
-            "select id, kind, label, metadata, is_default, subscription_usage, last_used_at, revoked_at, created_at, updated_at
-             from user_credentials
-             where user_id = $1 and id <> $2
-             order by created_at desc, id desc
-             limit 200",
+            format!(
+                "select {CREDENTIAL_LIST_COLUMNS}
+                 from user_credentials
+                 where user_id = $1 and id <> $2
+                 order by created_at desc, id desc
+                 limit 200"
+            )
+            .as_str(),
             &[user_id, &reserved_credential_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to list credentials: {error}")))?;
 
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            let id: Uuid = row.get("id");
-            let kind: String = row.get("kind");
-            let label: Option<String> = row.get("label");
-            let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
-            let is_default: bool = row.get("is_default");
-            let subscription_usage: Option<JsonValue> = row
-                .get::<_, Option<PgJson<JsonValue>>>("subscription_usage")
-                .map(|value| value.0);
-            let last_used_at: Option<DateTime<Utc>> = row.get("last_used_at");
-            let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-            let created_at: DateTime<Utc> = row.get("created_at");
-            let updated_at: DateTime<Utc> = row.get("updated_at");
+    Ok(rows.iter().map(credential_list_item).collect())
+}
 
-            let default_model = credential_default_model(&kind, &metadata);
-            CredentialListItem {
-                id: id.to_string(),
-                kind,
-                label,
-                is_default,
-                metadata,
-                default_model,
-                subscription_usage,
-                last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
-                revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
-                created_at: created_at.to_rfc3339(),
-                updated_at: updated_at.to_rfc3339(),
-            }
-        })
-        .collect();
+/// One credential as `GET /me/credentials` lists it, from a row with
+/// [`CREDENTIAL_LIST_COLUMNS`].
+fn credential_list_item(row: &Row) -> CredentialListItem {
+    let id: Uuid = row.get("id");
+    let kind: String = row.get("kind");
+    let label: Option<String> = row.get("label");
+    let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
+    let is_default: bool = row.get("is_default");
+    let subscription_usage: Option<JsonValue> = row
+        .get::<_, Option<PgJson<JsonValue>>>("subscription_usage")
+        .map(|value| value.0);
+    let last_used_at: Option<DateTime<Utc>> = row.get("last_used_at");
+    let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let updated_at: DateTime<Utc> = row.get("updated_at");
 
-    Ok(items)
+    let default_model = credential_default_model(&kind, &metadata);
+    CredentialListItem {
+        id: id.to_string(),
+        kind,
+        label,
+        is_default,
+        metadata,
+        default_model,
+        subscription_usage,
+        last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
+        revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
+        created_at: created_at.to_rfc3339(),
+        updated_at: updated_at.to_rfc3339(),
+    }
+}
+
+/// Renames one of the person's own live connections, which only they may do
+/// and only through their own session. A connection that is not theirs, is
+/// revoked, or is the reserved managed id answers like an unknown one.
+///
+/// The agent made for a connection goes by its name (its display name and
+/// its handle are made from it), so their agents pinned to it whose display
+/// name is still exactly the old name take the new one in the same
+/// transaction. An agent they named themselves keeps its name, and no handle
+/// changes, since people mention agents by them.
+async fn rename_my_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(credential_id_raw): AxumPath<String>,
+    Json(body): Json<RenameCredentialBody>,
+) -> Result<Json<CredentialListItem>, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    let user_id = require_user_session(&context)?;
+    let credential_id = Uuid::from_str(credential_id_raw.trim())
+        .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
+    if is_managed_ai_credential_id(&credential_id) {
+        return Err(not_found("credential not found"));
+    }
+    let label = CredentialLabel::parse(body.label.as_deref().unwrap_or_default())?;
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    let Some(previous) = transaction
+        .query_opt(
+            "select label from user_credentials
+             where id = $1 and user_id = $2 and revoked_at is null
+             for update",
+            &[&credential_id, &user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load credential: {error}")))?
+    else {
+        return Err(not_found("credential not found"));
+    };
+    let previous_label: Option<String> = previous.get("label");
+
+    let renamed = transaction
+        .query_one(
+            format!(
+                "update user_credentials set label = $3, updated_at = now()
+                 where id = $1 and user_id = $2
+                 returning {CREDENTIAL_LIST_COLUMNS}"
+            )
+            .as_str(),
+            &[&credential_id, &user_id, &label.as_str()],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to rename credential: {error}")))?;
+
+    if let Some(previous_label) = previous_label.as_deref() {
+        transaction
+            .execute(
+                "update user_agents set display_name = $4, updated_at = now()
+                 where user_id = $1 and credential_id = $2 and deleted_at is null
+                   and display_name = $3",
+                &[&user_id, &credential_id, &previous_label, &label.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to rename agents named after the credential: {error}"
+                ))
+            })?;
+    }
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to commit credential rename: {error}")))?;
+
+    Ok(Json(credential_list_item(&renamed)))
 }
 
 async fn create_my_codex_credential(
@@ -2064,6 +2175,13 @@ async fn create_my_codex_credential(
         return Err(claude_credential_refused());
     }
 
+    // A typed name follows the rules a rename does. None, or only spaces,
+    // leaves the connection unnamed, as before.
+    let label = match body.label.as_deref().map(str::trim) {
+        Some(label) if !label.is_empty() => Some(CredentialLabel::parse(label)?),
+        _ => None,
+    };
+
     let auth_object = body
         .auth_json
         .as_object()
@@ -2078,7 +2196,7 @@ async fn create_my_codex_credential(
         kind,
         metadata,
         body.auth_json,
-        body.label,
+        NewCredentialLabel::Given(label),
         body.make_default,
     )
     .await?;
@@ -4459,7 +4577,7 @@ mod session_identity_tests {
     const SUPABASE_SECRET: &str = "secret";
 
     /// An access token shaped like one Supabase Auth issues, for `role`.
-    fn supabase_access_token(user_id: Uuid, role: &'static str) -> String {
+    pub(super) fn supabase_access_token(user_id: Uuid, role: &'static str) -> String {
         #[derive(Serialize)]
         struct Claims {
             aud: &'static str,
@@ -4487,7 +4605,7 @@ mod session_identity_tests {
 
     /// A runtime token for `user_id`, like the ones runtimes, origins, Git
     /// remotes and jobs carry: its subject is the user it acts for.
-    fn scoped_token_for(config: &crate::config::AppConfig, user_id: Uuid) -> String {
+    pub(super) fn scoped_token_for(config: &crate::config::AppConfig, user_id: Uuid) -> String {
         let runtime_id = Uuid::new_v4();
         mint_scoped_token(
             config,
@@ -4615,3 +4733,7 @@ mod managed_ai_allowance_tests;
 #[cfg(test)]
 #[path = "credentials_default_choice_tests.rs"]
 mod default_choice_tests;
+
+#[cfg(test)]
+#[path = "credentials_rename_tests.rs"]
+mod rename_tests;

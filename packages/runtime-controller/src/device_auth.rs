@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::routing::{delete, get, post};
@@ -15,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tokio_postgres::{error::SqlState, GenericClient, Row};
+use tokio_postgres::{error::SqlState, GenericClient, Row, Transaction};
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session};
 use crate::config::PgPool;
 use crate::credential_keys::CredentialKeyRing;
+use crate::credential_labels::{self, CredentialLabel};
 use crate::credentials;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
 
@@ -179,6 +181,10 @@ pub(crate) enum DeviceAuthProviderState {
         issuer: String,
         client_id: String,
         device_auth_id: String,
+        /// The person's live ChatGPT sign-in this one replaces
+        /// (`replacesCredentialId` at start), whose name it takes when it is
+        /// saved (`chatgpt_sign_in_label`).
+        replaces_credential_id: Option<Uuid>,
     },
     Github {
         client_id: String,
@@ -245,6 +251,111 @@ struct DeviceAuthStartResponse {
     user_code: String,
     expires_at: String,
     poll_interval_seconds: u64,
+}
+
+/// The optional body of `POST /me/auth/device/:provider/start`. A start with
+/// no body, or with `null`, replaces nothing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAuthStartBody {
+    /// The connection the sign-in replaces: for `codex`, one of the person's
+    /// live ChatGPT sign-ins. GitHub's sign-in replaces no connection.
+    #[serde(default)]
+    replaces_credential_id: Option<String>,
+}
+
+/// The 422 for a `replacesCredentialId` that names no connection the sign-in
+/// can replace.
+const CREDENTIAL_REPLACE_UNKNOWN_CODE: &str = "credential_replace_unknown";
+const CREDENTIAL_REPLACE_UNKNOWN_MESSAGE: &str =
+    "The connection this sign-in would replace isn't one of your ChatGPT sign-ins.";
+
+fn credential_replace_unknown() -> (HttpStatusCode, Json<ApiError>) {
+    (
+        HttpStatusCode::UNPROCESSABLE_ENTITY,
+        Json(ApiError {
+            message: CREDENTIAL_REPLACE_UNKNOWN_MESSAGE.to_string(),
+            code: Some(CREDENTIAL_REPLACE_UNKNOWN_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+fn parse_device_auth_start_body(
+    body: &[u8],
+) -> Result<DeviceAuthStartBody, (HttpStatusCode, Json<ApiError>)> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(DeviceAuthStartBody::default());
+    }
+    serde_json::from_slice::<Option<DeviceAuthStartBody>>(body)
+        .map(Option::unwrap_or_default)
+        .map_err(|error| bad_request(format!("invalid device login request: {error}")))
+}
+
+/// The person's own live ChatGPT sign-in that `raw` names, which a Codex
+/// device sign-in may replace, or the 422 that refuses it. The reserved
+/// managed id is never one (`credentials::load_owned_live_credential`).
+async fn replaced_chatgpt_sign_in(
+    state: &AppState,
+    user_id: &Uuid,
+    raw: &str,
+) -> Result<Uuid, (HttpStatusCode, Json<ApiError>)> {
+    let credential_id = Uuid::parse_str(raw.trim()).map_err(|_| credential_replace_unknown())?;
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    match credentials::load_owned_live_credential(&*connection, user_id, &credential_id).await? {
+        Some(credential) if credential.kind == credentials::CREDENTIAL_KIND_CODEX_AUTH_JSON => {
+            Ok(credential_id)
+        }
+        _ => Err(credential_replace_unknown()),
+    }
+}
+
+/// What a finished ChatGPT device sign-in is called, decided in the
+/// transaction that saves it (`credentials::insert_user_credential`).
+///
+/// Studio saves a replacement before it retires the sign-in it replaces
+/// (`finalizeCredentialReplacement`), so that one is still live here and
+/// numbering alone would call a reconnected "ChatGPT" "ChatGPT 2". A sign-in
+/// started with `replacesCredentialId` therefore takes that sign-in's name as
+/// it is now, while it is live; otherwise, or once it is gone, the numbered
+/// default applies (`credential_labels::chatgpt_sign_in_label`). The lock on
+/// the person's connection names makes two sign-ins that finish together take
+/// different numbers.
+pub(crate) async fn chatgpt_sign_in_label(
+    transaction: &Transaction<'_>,
+    user_id: Uuid,
+    replaces: Option<Uuid>,
+) -> Result<CredentialLabel, (HttpStatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&format!("credential-labels:{user_id}")],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock connection names: {error}")))?;
+    let rows = transaction
+        .query(
+            "select id, label from user_credentials
+             where user_id = $1 and revoked_at is null and id <> $2",
+            &[&user_id, &crate::config::managed_ai_credential_id()],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load connection names: {error}")))?;
+    let live: Vec<(Uuid, Option<String>)> = rows
+        .iter()
+        .map(|row| (row.get("id"), row.get("label")))
+        .collect();
+    let replaced = replaces
+        .and_then(|replaced_id| live.iter().find(|(id, _)| *id == replaced_id))
+        .and_then(|(_, label)| label.as_deref());
+    Ok(credential_labels::chatgpt_sign_in_label(
+        replaced,
+        live.iter().filter_map(|(_, label)| label.as_deref()),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -1238,15 +1349,23 @@ async fn start_device_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(provider): AxumPath<String>,
+    body: Bytes,
 ) -> Result<Json<DeviceAuthStartResponse>, (HttpStatusCode, Json<ApiError>)> {
     let provider = provider.trim().to_ascii_lowercase();
 
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
+    let start = parse_device_auth_start_body(&body)?;
     let now = Utc::now();
     let session_id = Uuid::new_v4();
     match provider.as_str() {
         "codex" => {
+            // Checked before OpenAI issues a code, so a refused start leaves
+            // nothing behind.
+            let replaces_credential_id = match start.replaces_credential_id.as_deref() {
+                Some(raw) => Some(replaced_chatgpt_sign_in(&state, &user_id, raw).await?),
+                None => None,
+            };
             let issuer = read_env_trimmed("CODEX_DEVICE_AUTH_ISSUER")
                 .unwrap_or_else(|| DEFAULT_CODEX_ISSUER.to_string());
             let client_id = read_env_trimmed("CODEX_DEVICE_AUTH_CLIENT_ID")
@@ -1270,6 +1389,7 @@ async fn start_device_auth(
                     issuer: issuer.clone(),
                     client_id: client_id.clone(),
                     device_auth_id: challenge.device_auth_id.clone(),
+                    replaces_credential_id,
                 },
             };
 
@@ -1286,6 +1406,9 @@ async fn start_device_auth(
             }))
         }
         "github" => {
+            if start.replaces_credential_id.is_some() {
+                return Err(credential_replace_unknown());
+            }
             if state.config.credential_keys.is_none() {
                 return Err(github_device_auth_service_unavailable(
                     GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
@@ -1616,14 +1739,16 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
         return;
     };
 
-    let (issuer, client_id, device_auth_id) = match session.provider_state.clone() {
-        DeviceAuthProviderState::Codex {
-            issuer,
-            client_id,
-            device_auth_id,
-        } => (issuer, client_id, device_auth_id),
-        _ => return,
-    };
+    let (issuer, client_id, device_auth_id, replaces_credential_id) =
+        match session.provider_state.clone() {
+            DeviceAuthProviderState::Codex {
+                issuer,
+                client_id,
+                device_auth_id,
+                replaces_credential_id,
+            } => (issuer, client_id, device_auth_id, replaces_credential_id),
+            _ => return,
+        };
 
     let mut interval = Duration::from_secs(session.poll_interval_seconds.max(1));
     let deadline = session.expires_at;
@@ -1661,10 +1786,12 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                         let result = credentials::insert_user_credential(
                             &state,
                             session.user_id,
-                            "codex_auth_json".to_string(),
+                            credentials::CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
                             metadata,
                             auth_json,
-                            Some("ChatGPT".to_string()),
+                            credentials::NewCredentialLabel::ChatGptSignIn {
+                                replaces: replaces_credential_id,
+                            },
                             None,
                         )
                         .await;
@@ -2711,6 +2838,7 @@ mod device_auth_session_tests {
                 issuer: "https://auth.openai.com".to_string(),
                 client_id: "test-client".to_string(),
                 device_auth_id: "test-device-auth".to_string(),
+                replaces_credential_id: None,
             },
         }
     }
@@ -3226,3 +3354,7 @@ mod device_auth_session_tests {
 #[cfg(test)]
 #[path = "device_auth_claude_material_tests.rs"]
 mod claude_material_tests;
+
+#[cfg(test)]
+#[path = "device_auth_sign_in_name_tests.rs"]
+mod sign_in_name_tests;

@@ -65,6 +65,7 @@ import {
 } from "./StudioListSection";
 import { CredentialsConnectionChoices } from "./CredentialsConnectionChoices";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
+import { CredentialNameField } from "./CredentialNameField";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
 import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
@@ -134,10 +135,36 @@ const {
   createCodex: createCodexCredential,
   getRequirements: getCredentialRequirements,
   list: listMyCredentials,
+  rename: renameMyCredential,
   revoke: revokeMyCredential,
   setDefault: setDefaultCredential,
   test: testMyCredential,
 } = controllerClient.credentials;
+
+/**
+ * A refused rename in plain words, for under the name field. The controller's
+ * own sentence for a name it refuses already is; anything else is put simply.
+ */
+function describeRenameRefusal(result: { error?: string; code?: string | null; status?: number }): string {
+  if (result.code === "credential_label_invalid" || result.code === "credential_label_has_email") {
+    return result.error?.trim() || "Use a name of 1 to 60 characters on one line.";
+  }
+  if (result.status === 404) {
+    return "This connection was removed, so it can't be renamed.";
+  }
+  return "The name couldn't be saved. Try again.";
+}
+
+/** A connection whose name is a text field, for Rename. */
+type CredentialRename = {
+  credentialId: string;
+  draft: string;
+  /** Why the last save was refused, or null. */
+  error: string | null;
+  pending: boolean;
+  /** Where focus goes when the field closes: the row's Rename button, or its menu on a narrow screen. */
+  returnFocusTo: "button" | "menu";
+};
 
 function normalizeAgentHandle(raw: string): string | null {
   return normalizeCustomAgentHandle(raw);
@@ -400,6 +427,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [credentialTestPendingId, setCredentialTestPendingId] = useState<string | null>(null);
   const [credentialTestFeedback, setCredentialTestFeedback] = useState<Record<string, CredentialTestFeedback>>({});
   const [mobileCredentialMenuId, setMobileCredentialMenuId] = useState<string | null>(null);
+  const [credentialRename, setCredentialRename] = useState<CredentialRename | null>(null);
+  const renameFocusReturnRef = useRef<Pick<CredentialRename, "credentialId" | "returnFocusTo"> | null>(null);
   const reconnectFileInputRef = useRef<HTMLInputElement | null>(null);
   const reconnectCredentialIdRef = useRef<string | null>(null);
 
@@ -675,6 +704,79 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     },
     [actionPendingId, credentialsById, loadCredentials, notifyAiConfigChanged, showStatus]
   );
+
+  const beginRename = useCallback(
+    (credentialId: string, returnFocusTo: CredentialRename["returnFocusTo"]) => {
+      const credential = credentialsById.get(credentialId) ?? null;
+      if (!credential || credential.revokedAt) {
+        return;
+      }
+      setCredentialRename({
+        credentialId,
+        draft: resolveCredentialLabel(credential),
+        error: null,
+        pending: false,
+        returnFocusTo,
+      });
+    },
+    [credentialsById],
+  );
+
+  const closeRename = useCallback((rename: CredentialRename) => {
+    renameFocusReturnRef.current = { credentialId: rename.credentialId, returnFocusTo: rename.returnFocusTo };
+    setCredentialRename(null);
+  }, []);
+
+  // Back to what opened the field once it is gone and the row's actions show again.
+  useEffect(() => {
+    const target = renameFocusReturnRef.current;
+    if (credentialRename || !target) {
+      return;
+    }
+    renameFocusReturnRef.current = null;
+    const control = target.returnFocusTo === "button" ? "rename" : "menu";
+    document
+      .querySelector<HTMLElement>(`[data-testid="credentials-connection-${control}-${target.credentialId}"]`)
+      ?.focus();
+  }, [credentialRename]);
+
+  const handleSaveRename = useCallback(async () => {
+    const rename = credentialRename;
+    if (!rename || rename.pending) {
+      return;
+    }
+    const credential = credentialsById.get(rename.credentialId) ?? null;
+    const name = rename.draft.trim();
+    // Nothing to save when the name reads as it did.
+    if (!credential || name === resolveCredentialLabel(credential)) {
+      closeRename(rename);
+      return;
+    }
+    setCredentialRename({ ...rename, pending: true, error: null });
+    const result = await renameMyCredential(rename.credentialId, name).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : String(error),
+      code: null,
+      status: undefined,
+      credential: undefined,
+    }));
+    if (!mounted.current) {
+      return;
+    }
+    if (!result.success || !result.credential) {
+      const error = describeRenameRefusal(result);
+      setCredentialRename((current) =>
+        current?.credentialId === rename.credentialId ? { ...current, pending: false, error } : current,
+      );
+      return;
+    }
+    const renamed = result.credential;
+    setCredentials((current) => current.map((entry) => (entry.id === renamed.id ? renamed : entry)));
+    closeRename(rename);
+    // Agents still named after the connection took the new name too.
+    await loadCredentials({ silent: true });
+    notifyAiConfigChanged("credential_renamed");
+  }, [closeRename, credentialRename, credentialsById, loadCredentials, notifyAiConfigChanged]);
 
   const handleTriggerReconnectCredential = useCallback(
     (credentialId: string) => {
@@ -1674,9 +1776,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                         ? `Last test failed: ${testFeedbackEntry.detail}`
                         : "Last test failed";
                   const replaceCredential = () => openConnectModalToReplace(
-                    { id: credential.id, label: label || "this connection" },
+                    { id: credential.id, label: label || "this connection", savedLabel: credential.label },
                     connectStepForCredential(credential),
                   );
+                  // Only a live saved connection: Instafy AI's row is drawn apart, and the
+                  // controller refuses a revoked one.
+                  const canRename = !credential.revokedAt;
+                  const renaming = credentialRename?.credentialId === credential.id ? credentialRename : null;
                   return (
                     <li key={credential.id} data-testid={`credentials-connection-row-${credential.id}`}>
                       <EntityRow
@@ -1694,9 +1800,30 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                             {icon}
                           </span>
                         }
-                        title={label}
+                        title={
+                          renaming ? (
+                            <CredentialNameField
+                              name={label}
+                              draft={renaming.draft}
+                              error={renaming.error}
+                              pending={renaming.pending}
+                              onDraftChange={(draft) =>
+                                setCredentialRename((current) =>
+                                  current?.credentialId === credential.id ? { ...current, draft, error: null } : current,
+                                )
+                              }
+                              onSave={() => void handleSaveRename()}
+                              onCancel={() => closeRename(renaming)}
+                              data-testid={`credentials-connection-name-field-${credential.id}`}
+                            />
+                          ) : (
+                            label
+                          )
+                        }
+                        // The field and its focus ring are not cut off like a long name.
+                        titleClassName={renaming ? "!overflow-visible !whitespace-normal" : undefined}
                         titleEnd={
-                          testFeedbackState === "needs_reconnect" || credential.isDefault ? (
+                          !renaming && (testFeedbackState === "needs_reconnect" || credential.isDefault) ? (
                             <span className="inline-flex min-w-0 items-center justify-end gap-1">
                               {testFeedbackState === "needs_reconnect" ? (
                                 <Badge tone="warning" size="xs">
@@ -1749,7 +1876,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                         className="items-start"
                         startClassName="pt-0.5"
                         detailClassName="min-w-0"
-                        end={
+                        end={renaming ? null : (
                           <div className="flex items-center gap-2">
                             <div className="hidden md:flex items-center gap-2">
                               {credential.isDefault ? (
@@ -1809,6 +1936,20 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                 </Button>
                               ) : null}
 
+                              {canRename ? (
+                                <IconButton
+                                  onPress={() => beginRename(credential.id, "button")}
+                                  isDisabled={pending || testPending}
+                                  variant="ghost"
+                                  radius="full"
+                                  size="xs"
+                                  aria-label={`Rename ${label}`}
+                                  data-testid={`credentials-connection-rename-${credential.id}`}
+                                >
+                                  <EditPencil className="h-4 w-4" aria-hidden="true" />
+                                </IconButton>
+                              ) : null}
+
                               <IconButton
                                 onPress={() => void handleRevoke(credential.id)}
                                 isDisabled={pending || testPending}
@@ -1854,6 +1995,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                         void handleMakeDefault(credential.id);
                                       } else if (action === "test") {
                                         void handleTestCredential(credential.id);
+                                      } else if (action === "rename") {
+                                        beginRename(credential.id, "menu");
                                       } else if (action === "reconnect") {
                                         handleTriggerReconnectCredential(credential.id);
                                       } else if (action === "replace") {
@@ -1872,6 +2015,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                     <StudioMenuItem id="test" isDisabled={testPending}>
                                       <MenuItemContent>Test</MenuItemContent>
                                     </StudioMenuItem>
+                                    {canRename ? (
+                                      <StudioMenuItem id="rename" isDisabled={testPending}>
+                                        <MenuItemContent start={<EditPencil aria-hidden="true" />}>
+                                          Rename…
+                                        </MenuItemContent>
+                                      </StudioMenuItem>
+                                    ) : null}
                                     {canReplace ? (
                                       <StudioMenuItem id="replace" isDisabled={testPending}>
                                         <MenuItemContent>Replace…</MenuItemContent>
@@ -1898,7 +2048,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                               </MenuTrigger>
                             </div>
                           </div>
-                        }
+                        )}
                         endClassName="self-center"
                       />
                     </li>

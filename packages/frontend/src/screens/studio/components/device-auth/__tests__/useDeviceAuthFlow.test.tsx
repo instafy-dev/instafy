@@ -112,6 +112,17 @@ describe("useDeviceAuthFlow", () => {
     expect(captured?.busy).toBe(false);
   });
 
+  it("names the ChatGPT sign-in a new one replaces, and nothing otherwise", async () => {
+    sdkMock.startDeviceAuth.mockResolvedValue({ success: false, error: "Stopped by the test." });
+
+    await act(async () => captured?.begin({ provider: "codex", replacesCredentialId: "old-chatgpt" }));
+    expect(sdkMock.startDeviceAuth).toHaveBeenLastCalledWith("codex", { replacesCredentialId: "old-chatgpt" });
+
+    await act(async () => captured?.begin({ provider: "codex", replacesCredentialId: null }));
+    expect(sdkMock.startDeviceAuth).toHaveBeenLastCalledWith("codex");
+    expect(sdkMock.startDeviceAuth.mock.lastCall).toHaveLength(1);
+  });
+
   it("turns an expired session into an actionable failure without polling", async () => {
     sdkMock.startDeviceAuth.mockResolvedValue({
       success: true,
