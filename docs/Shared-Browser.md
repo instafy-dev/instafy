@@ -1174,9 +1174,19 @@ is written is said there too: under a page read that states it, in a few words,
 saying which of its values the turn chose, not the page; a value a page doesn't
 give goes in the missing line, by name. A route, from the operator's journey planner with
 its stations chosen, for the day and time the person travels (a daytime hour
-when they gave none) and saying which, is `instafy-getting-around`'s; a
+when they gave none) and saying which, is `instafy-getting-around`'s, and so is
+what a turn gives when the planner can't be run (its fields never show, or one
+is the person's): the lines and stop the place's own getting-there tab or
+question names, in the place's words, linked, with "the planner wasn't run, so
+no times". A planner that showed no fields in a chat isn't opened the same way
+again there: its link and the start and stop to type in it are given instead. A
 comparison's models, those a page's menu names included, each read on its own
-page, and its reviews, from each reviewer's own site, are `instafy-comparing`'s.
+page, and its reviews are `instafy-comparing`'s: with no search, a review no
+page links to is looked for on up to two reviewers' own sites, and counts as not
+found only once a reviewer's page was read; one no reviewer's page could be read
+for (none could be tried, or each one stopped the turn) is "not checked", and
+the reply names such reviews once, with an offer to read a site the person
+names, never what the turn can't do.
 A cookie banner is the browser's own: it declines one with its
 own reject button before Octo reads the page (above). A sign-in, a bot check,
 a paywall or a refused read ends that page, never the task: nothing a turn carries tells it to stop there, so neither a card's
@@ -3780,8 +3790,9 @@ unless the policy is `"covered"`.
   items and each reviewer's own site are `instafy-comparing`'s). A browser turn
   has no provider-hosted search tool, and its part says so. Its unread line
   names a page by its own address, or as a tab or link on a page it read, named
-  with that page; a page it has neither for (a review no page it read links to)
-  is a value it didn't find, for its missing line: a comparison's first answer
+  with that page; a page it has neither for (a review no page it read links to,
+  once it has read a reviewer's own page) is a value it didn't find, for its
+  missing line: a comparison's first answer
   named such reviews as unread, and its second pass tried a search engine's
   results page twice, which the browser refused.
   Right before the request it reads its part

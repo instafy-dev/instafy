@@ -17,10 +17,15 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 - Look for a route only when the message asks for one, or carries on one that did.
 - A route comes from the transit operator's own journey planner, reached from the operator's site. A listing, a map snippet or a guide only leads to it; never a route from memory.
 - In the planner, choose the start, the stop nearest the place (the one the place's own page names, else your pick) and the person's day and time (else a daytime hour); then press its button and read the route.
-- Choose each stop by clicking it in its field's own suggestions, not with Enter, which can send the form before a stop is chosen. Press the button once, when every field is filled.
+- Choose each stop by clicking it in its field's own suggestions, not with Enter, which can send the form before a stop is chosen. Press the button once, when every field is filled. A click's answer saying a field still holds what was typed means none of its suggestions is chosen: click one.
 - Say there's no route only when the planner's own results say so. When a stop couldn't be chosen, say that instead.
 - If the browser refuses a planner's field as a secret, filling it is the person's step: highlight it with `request_human_input` and say what goes in it. Don't try it on another copy of that planner in this message.
 - A planner you didn't send is "not run", never "checked" or "no result". Say the last step you took ("I typed the start; I couldn't choose a stop"), and say "again" only for a step this turn took.
+
+## When the planner can't be run
+
+- When a planner's fields never show, or one is the person's, open the place's own getting-there tab or question (click a closed one open) before you highlight a field or end. Give the lines and stop it names as the place's words, with its link and "the planner wasn't run, so no times". A listing, a map snippet and memory stay out.
+- A planner that showed no fields in this chat isn't opened the same way again (its address, whatever values it carries): give its link and the start and stop to type in it.
 
 ## A route's finding
 
