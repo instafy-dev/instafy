@@ -691,10 +691,23 @@ ends (an error, an abort, or the turn's end) ends as one that was tried too, so 
 "Searching the web…" on through a retry's run, nor "Didn't finish searching the web" after a turn
 that ended.
 
-`instafy web search` exits 0 only when it found results. With no search key in the space
-(`no_provider`), no results or no search available, it exits 2: that step was tried, so the line
-never says "searched the web" for it, and a search after it that found results is the one the line
-counts.
+`instafy web search` exits 0 only when it found results. A search that was sent and found nothing,
+or that no provider answered, exits 2: that step was tried, so the line never says "searched the
+web" for it, and a search after it that found results is the one the line counts.
+
+A call of the command that sent nothing is no step, as a call of the AI's own search that searched
+nothing is none. With no search key in the space (`no_provider`), or with the turn's searches used
+up, the command exits 3, and a call it refused (bad options, a refused query, a link-only site)
+exits 64. The runtime ends such a step `declined` when the one thing it names in the step is one
+`instafy web search` and that command is the last thing the step runs, alone, so the step's exit
+status is its own (`activity_labels.rs`, `search_command_sent_nothing`: from the step's argv and its
+exit code, never its output). A command Codex itself refused arrives `declined` already. Studio
+shows no step for a `declined` command whose only label is the web search: the line reads
+"Searching the web…" while the call runs, as for any call of the command, and then nothing of it,
+never "Tried searching the web" for a search there was nothing to send to. A step that also names
+something else (a page read in the same script), or whose exit may be another command's, reads as
+before: a command after the search (`instafy web search … > r.json && jq … r.json` exits 3 when jq
+can't read its filter), or one beside it in a pipeline.
 
 Whose words the step shows depends on who searched. For Instafy AI the proxy's search bridge says
 which queries it searched, as it sent them (`searched_queries` in the answer's `results`, which

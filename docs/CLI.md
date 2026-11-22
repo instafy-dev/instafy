@@ -1014,7 +1014,7 @@ count, results, tell, notice, budget, warnings}`:
 | `ok` | Results came back (`repeat: true` when the same search already ran in this turn: it is not sent again) |
 | `not_found` | The provider found nothing |
 | `unavailable` | No provider could answer: `code` is `turn_limit`, `day_limit`, `time_limit`, `rate_limited`, `key_refused`, `provider_error`, `unreachable` or `timeout`, and `tried` lists each provider that did not answer |
-| `no_provider` | No provider in the chain has its key in this space. `tell` says how to go on without one, and the answer carries no key card: that card comes from `instafy web search-key`, only for a person who asks to set up search |
+| `no_provider` | No provider in the chain has its key in this space. `tell` says how to go on without one, and the answer carries no key card: that card comes from `instafy web search-key`, only for a person who asks to set up search. In a run that has the AI's own web search (the runtime sets `INSTAFY_TURN_AI_WEB_SEARCH=1` for that run's commands, and for no other), `tell` says this command searched nothing and points to that search, for what the web-research skill allows, then to going on without one if that search answers that it did not run |
 
 Each result is `{rank, url, site, text?, linkOnly?, noReuse?, source?, provider?, attribution?}`. `text` holds the title and snippet, redacted and
 wrapped in `<untrusted_page_content url=… read_at=… viewer="search result">` like page text. A result restricted by an explicit `no-agents`
@@ -1082,7 +1082,8 @@ the last line of the text. Offline fixtures apply as for `instafy web read` (`vi
 | Exit | Meaning |
 |---|---|
 | 0 | `ok` |
-| 2 | `not_found`, `unavailable` or `no_provider` |
+| 2 | `not_found` or `unavailable` |
+| 3 | Nothing was sent: `no_provider`, or `unavailable` with `turn_limit`. The room shows no search step for it, nor for a call that exits 64, when the call is the last command its step runs (docs/Chat-Activity.md) |
 | 64 | Bad options, a refused query, or not in Octo's turn |
 | 70 | The command itself failed (provider or link-only list, fixtures), so nothing was searched |
 

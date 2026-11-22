@@ -1070,15 +1070,88 @@ describe("a web search", () => {
     expect(summarize([start, failed, command(WEB_READ)]).summary).toBe("Read 6 pages");
   });
 
-  // `instafy web search` exits 2 when the space has no search key
-  // (`no_provider`); a reference search after it that found results exits 0.
-  it("on the command line with no search key is never one that searched", () => {
-    const noKey = command(WEB_SEARCH, { exitCode: 2, command: "bash -lc 'instafy web search \"city museum hours\" --json'" });
+  // `instafy web search` that was sent and found nothing, or that no provider
+  // answered, exits 2: it was tried. A reference search after it that found
+  // results exits 0.
+  it("on the command line that found nothing is never one that searched", () => {
+    const nothing = command(WEB_SEARCH, { exitCode: 2, command: "bash -lc 'instafy web search \"city museum hours\" --json'" });
     const reference = command(WEB_SEARCH, {
       command: "bash -lc 'instafy web search \"city museum\" --chain reference-search --json'",
     });
-    expect(summarize([noKey]).summary).toBe("Tried searching the web");
-    expect(summarize([noKey, reference]).summary).toBe("Searched the web");
+    expect(summarize([nothing]).summary).toBe("Tried searching the web");
+    expect(summarize([nothing, reference]).summary).toBe("Searched the web");
+  });
+
+  // A local test, Nov 20: with no search key in the space, `instafy web
+  // search` sent nothing, and the turn read "Searching the web…" and then
+  // "Tried searching the web" for a search there was nothing to send to. The
+  // runtime now ends such a command `declined`, as it ends the AI's own search
+  // that searched nothing, and so does a command that was refused.
+  describe("on the command line that sent nothing", () => {
+    const searchCommand = "bash -lc 'instafy web search \"city museum hours\" --json'";
+    const call = (itemId: string, status: string, exitCode: number | null, activity: unknown = WEB_SEARCH) =>
+      step("command_execution", activity, { kind: "codex_command_execution", itemId, status, exitCode, command: searchCommand });
+
+    it("is no step", () => {
+      const start = call("call_1", "in_progress", null);
+      expect(summarize([start], "running").live).toBe("Searching the web…");
+      for (const exitCode of [3, 64, -1]) {
+        const nothing = call("call_1", "declined", exitCode);
+        const after = summarize([start, nothing], "running");
+        expect(after.live).toBe("Thinking…");
+        expect(after.stepCount).toBe(0);
+        expect(summarize([start, nothing]).summary).toBeNull();
+        expect(summarize([start, nothing]).details).toEqual([]);
+        expect(summarize([start, nothing], "cancelled").summary).toBe("Stopped");
+        expect(summarize([command(WEB_READ), start, nothing]).summary).toBe("Read 6 pages");
+      }
+      // A search after it that searched is the one the line counts, once.
+      const nothing = call("call_1", "declined", 3);
+      const own = step("web_search", WEB_SEARCH, { kind: "codex_web_search", itemId: "ws_1", query: "city museum hours" });
+      const both = summarize([start, nothing, own]);
+      expect(both.summary).toBe("Searched the web");
+      expect(both.details).toHaveLength(1);
+    });
+
+    it("is no step after a reload either", () => {
+      const reply: ChatMessage = {
+        id: "reply",
+        role: "assistant",
+        content: "I couldn't check today's hours.",
+        timestamp: 99,
+        metadata: {
+          source: "agent",
+          jobId: JOB,
+          outcome: "succeeded",
+          turnSteps: {
+            v: 1,
+            activities: [WEB_SEARCH, WEB_READ],
+            steps: [
+              { type: "command_execution", status: "declined", exitCode: 3, activity: 0 },
+              { type: "command_execution", status: "completed", exitCode: 0, activity: 1 },
+            ],
+          },
+        },
+      };
+      const stored = summarize(readTurnStepsRecord(reply, JOB)!);
+      expect(stored.summary).toBe("Read 6 pages");
+      expect(stored.details).toHaveLength(1);
+    });
+
+    it("stays a step when it names anything else, or is no search", () => {
+      // It also read a page: the step was tried, as before.
+      const alsoRead = { ...WEB_SEARCH, also: [entryOf(WEB_READ)] };
+      expect(summarize([call("call_2", "declined", 3, alsoRead)]).summary).toBe("Tried searching the web");
+      // Any other command that was refused reads as tried.
+      expect(summarize([call("call_3", "declined", -1, ADD_POINT)]).summary).toBe("Tried looking up places");
+      expect(summarize([call("call_4", "declined", -1, null)]).summary).toBe("Tried running a command");
+      // A label another job's message carries is no label of this turn's.
+      const foreign = call("call_5", "declined", 3);
+      (foreign.metadata as Record<string, unknown>).jobId = "another-job";
+      expect(summarize([foreign]).details).toHaveLength(1);
+      // An older runtime ends it with the command's own exit: tried, as it read.
+      expect(summarize([call("call_6", "failed", 3)]).summary).toBe("Tried searching the web");
+    });
   });
 });
 

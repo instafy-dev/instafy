@@ -88,6 +88,7 @@ describe("ComposerActionMenu", () => {
       onOpenNewBrowser?: () => void;
       onSelectConnector?: (connector: ProductConnector) => void;
       onBrowseConnectors?: () => void;
+      onConnectAi?: () => void;
       installedSkillNames?: ReadonlySet<string>;
     } = {},
   ) {
@@ -530,6 +531,37 @@ describe("ComposerActionMenu", () => {
     expect(menuState.dataset.open).toBe("false");
     expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')).toBeNull();
+  });
+
+  it("lists Connect an AI after Connect a tool, and closes the menu before opening the dialog", async () => {
+    const onConnectAi = vi.fn();
+    await renderMenu(true, true, { onSelectConnector: vi.fn(), onConnectAi });
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid^="composer-action-menu-"]'),
+    ).map((row) => row.dataset.testid);
+    const connectIndex = rows.indexOf("composer-action-menu-connect");
+    expect(connectIndex).toBeGreaterThanOrEqual(0);
+    expect(rows[connectIndex + 1]).toBe("composer-action-menu-add-ai");
+
+    const menuState = container.querySelector<HTMLDivElement>('[data-testid="mock-dialog-trigger"]')!;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')?.click(),
+    );
+    expect(menuState.dataset.open).toBe("true");
+    const connectAi = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-add-ai"]')!;
+    expect(connectAi.textContent).toContain("Connect an AI");
+    await act(async () => connectAi.click());
+    expect(onConnectAi).toHaveBeenCalledTimes(1);
+    expect(menuState.dataset.open).toBe("false");
+  });
+
+  it("hides Connect an AI without a handler or while mutations are disabled", async () => {
+    await renderMenu(true);
+    expect(container.querySelector('[data-testid="composer-action-menu-add-ai"]')).toBeNull();
+
+    await renderMenu(true, true, { onConnectAi: vi.fn(), mutationDisabled: true });
+    expect(container.querySelector('[data-testid="composer-action-menu-add-ai"]')).toBeNull();
   });
 
   it("hides Connect a tool without a handler or while mutations are disabled", async () => {

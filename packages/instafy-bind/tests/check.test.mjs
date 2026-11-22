@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { TYPED_READ, UNAVAILABLE_KEYS, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, typedReads, uncheckedRepeats, uncitedRows, unsaidReaders, unsortedNumbers } from "../src/check.mjs";
+import { TYPED_READ, UNAVAILABLE_KEYS, cardWaits, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, typedReads, typedWords, uncheckedRepeats, uncitedRows, unsaidReaders, unsortedNumbers } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -352,13 +352,16 @@ test("check fails a typed \"checked <date>\" or \"seen <date>\", linked or not, 
   try {
     const out = run("check", dir, "--expect", "Opening hours");
     assert.equal(out.status, 1, out.stdout + out.stderr);
-    assert.match(out.stdout, /^TYPED: 3 line\(s\) say "checked <date>" or "seen <date>" in typed words: "checked 20 Nov 2026 on museum\.example" \(app\.js\), "Journey planner · checked 20 Nov 2026; no connection result" \(app\.js\), "museum · seen 20 Nov" \(app\.js\)\.$/m);
-    assert.match(out.stdout, /^Those words are site\.trust's and site\.cite's, written from how a fact's page was read: draw the fact .* and take the typed words out\. A page nobody read, or a form that was never sent, was not checked: link it by its name alone, with no day\.$/m);
+    assert.ok(out.stdout.startsWith(`TYPED: 3 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:
+- app.js: delete "checked 20 Nov 2026 on museum.example", the whole line.
+- app.js: delete "checked 20 Nov 2026", from "Journey planner · checked 20 Nov 2026; no connection result".
+- app.js: delete "seen 20 Nov", from "museum · seen 20 Nov".
+Only site.trust(fact) and site.cite(fact) write those words, from a fact that says how its page was read (`), out.stdout);
     // each line links its page: it is the typed words that fail it
     assert.doesNotMatch(out.stdout, /UNLINKED/);
     assert.match(out.stdout, /1 of 1 expected item\(s\) shown/);
     const json = JSON.parse(run("check", dir, "--expect", "Opening hours", "--json").stdout);
-    assert.deepEqual([json.ok, json.unlinked, json.typed], [false, [], lines.map((line) => ({ file: "app.js", line }))]);
+    assert.deepEqual([json.ok, json.unlinked, json.typed], [false, [], lines.map((line) => ({ file: "app.js", line, words: typedWords(line) }))]);
     // with nothing named to check, the lines are still named
     const bare = run("check", dir);
     assert.equal(bare.status, 1, bare.stdout);
@@ -405,7 +408,7 @@ test("check fails a typed \"checked <date>\" or \"seen <date>\", linked or not, 
   try {
     const result = checkSite(both);
     assert.deepEqual([result.unlinked, result.typed], [[{ file: "app.js", line: "Source: Livraria Lello · checked November 8, 2026" }],
-      [{ file: "app.js", line: "Source: Livraria Lello · checked November 8, 2026" }]]);
+      [{ file: "app.js", line: "Source: Livraria Lello · checked November 8, 2026", words: ["checked November 8, 2026"] }]]);
   } finally {
     fs.rmSync(both, { recursive: true, force: true });
   }
@@ -428,7 +431,7 @@ test("typed \"checked <date>\" is read from a page's HTML, its scripts and data.
 <p class="note">Prices seen 5 Aug on <a href="https://shop.example/">shop.example</a></p><p>Not found yet: Night bus · checked 8 Nov</p>
 <!-- checked 1 Jan --><script>var caption = "Hours checked 8 Nov 2026"; document.querySelector("h1").title = caption;</script></main>`);
     assert.deepEqual(checkSite(html).typed, ["Prices seen 5 Aug on shop.example", "Not found yet: Night bus · checked 8 Nov", "Hours checked 8 Nov 2026"]
-      .map((line) => ({ file: "index.html", line })));
+      .map((line) => ({ file: "index.html", line, words: typedWords(line) })));
     assert.equal(run("check", html).status, 1);
   } finally {
     fs.rmSync(html, { recursive: true, force: true });
@@ -446,10 +449,10 @@ test("typed \"checked <date>\" is read from a page's HTML, its scripts and data.
     data.unchecked = ["Review searches: checked 19 Nov on reviews.example.net (no exact match)"];
     data.expect = ["Brooks Ghost 16, seen 5 Aug"];
     fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data));
-    assert.deepEqual(checkSite(dir).typed, [{ file: "data.json", line: "Review searches: checked 19 Nov on reviews.example.net (no exact match)" }]);
+    assert.deepEqual(checkSite(dir).typed, [{ file: "data.json", line: "Review searches: checked 19 Nov on reviews.example.net (no exact match)", words: ["checked 19 Nov on reviews.example.net"] }]);
     const out = run("check", dir, "--expect", "Brooks Ghost 16");
     assert.equal(out.status, 1, out.stdout + out.stderr);
-    assert.match(out.stdout, /^TYPED: 1 line\(s\) say "checked <date>" or "seen <date>" in typed words: "Review searches: checked 19 Nov on reviews\.example\.net \(no exact match\)" \(data\.json\)\.$/m);
+    assert.match(out.stdout, /^TYPED: 1 line\(s\) say "checked <date>" or "seen <date>" in typed words\. Delete those words from each:\n- data\.json: delete "checked 19 Nov on reviews\.example\.net", from "Review searches: checked 19 Nov on reviews\.example\.net \(no exact match\)"\.$/m);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -501,7 +504,7 @@ ${children}
     // words typed around a fact, and a fact whose own value types them, are still named
     fs.writeFileSync(path.join(dir, "app.js"), app(`      site.h("p", null, site.trust({ v: "Open daily · checked 20 Nov 2026", src: "Museum", url: museum, date: "2026-11-20", viewer: "shared browser" })),
       site.h("p", { "class": "trust" }, cite({ src: "Museum", url: museum, date: "2026-11-20" }), " · seen ", "20 Nov")`));
-    assert.deepEqual(checkSite(dir).typed, ["Open daily · checked 20 Nov 2026", "· seen 20 Nov"].map((line) => ({ file: "app.js", line })));
+    assert.deepEqual(checkSite(dir).typed, ["Open daily · checked 20 Nov 2026", "· seen 20 Nov"].map((line) => ({ file: "app.js", line, words: typedWords(line) })));
     assert.equal(run("check", dir, "--expect", "Opening hours").status, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -536,12 +539,224 @@ test("the typed words are a caption's: not a sentence for a visitor or one that 
     fs.writeFileSync(path.join(html, "index.html"), `<!doctype html><title>Visit</title><main><h1>Visit</h1>
 <p>The special exhibition can be seen 3 Oct 2026 to 15 Jan 2027.</p><p>Route: couldn't be checked 20 Nov, the form was not sent</p>
 <p>${long}</p><p><a href="https://museum.example/">Museum</a> · checked: 20 Nov 2026</p></main>`);
-    assert.deepEqual(checkSite(html).typed, [named, "Museum · checked: 20 Nov 2026"].map((line) => ({ file: "index.html", line })));
+    assert.deepEqual(checkSite(html).typed, [{ file: "index.html", line: named, words: ["checked 20 Nov 2026 on museum.example"] },
+      { file: "index.html", line: "Museum · checked: 20 Nov 2026", words: ["checked: 20 Nov 2026"] }]);
     const out = run("check", html);
     assert.equal(out.status, 1, out.stdout);
-    assert.match(out.stdout, /^TYPED: 2 line\(s\) say "checked <date>" or "seen <date>" in typed words: "…in high wind, .* \(hours checked 20 Nov 2026 on museum\.example\), .*…" \(index\.html\), "Museum · checked: 20 Nov 2026" \(index\.html\)\.$/m);
+    assert.match(out.stdout, /^TYPED: 2 line\(s\) say "checked <date>" or "seen <date>" in typed words\. Delete those words from each:\n- index\.html: delete "checked 20 Nov 2026 on museum\.example", from "…in high wind, .* \(hours checked 20 Nov 2026 on museum\.example\), .*…"\.\n- index\.html: delete "checked: 20 Nov 2026", from "Museum · checked: 20 Nov 2026"\.$/m);
   } finally {
     fs.rmSync(html, { recursive: true, force: true });
+  }
+});
+
+// A page to share went out saying a journey planner nobody ran was "checked 20 Nov 2026". Its check had named that
+// line twice, each time quoting what site.trust draws ("checked 8 Nov on maker.com ↗") as its example: the turn's
+// first answer was to reword the caption ("… checked 20 Nov 2026 in Instafy's browser"), and its last to run the
+// check and the card's command joined by ";". The fix for typed words is always to delete them, so the check says
+// which words, on each line, and quotes nothing the helpers draw, and it says that rewording never passes, the second
+// time as the first. A fact that says how its page was read gets "checked" from site.trust or site.cite, and a planner
+// nobody ran keeps its name and link.
+test("the check says which words to delete on each typed line, quotes nothing the helpers draw, and that rewording never passes", () => {
+  for (const [line, words] of [["Hours and distance · Museum on city.example · checked 20 Nov 2026", "checked 20 Nov 2026"],
+    ["Tip: go on Thursday. Museum · checked 20 Nov 2026 on museum.example", "checked 20 Nov 2026 on museum.example"],
+    ["Last checked: Thu 20 Nov", "checked: Thu 20 Nov"], ["Checked on November 8, 2026, by phone", "Checked on November 8, 2026"],
+    ["€549 at Shop · seen 17 Oct", "seen 17 Oct"], ["checked 20-Nov-2026 on shop.example.net.", "checked 20-Nov-2026 on shop.example.net"],
+    ["Prices checked 2026-11-20 on the shop's page", "checked 2026-11-20"], ["Open daily", ""]]) assert.deepEqual(typedWords(line), words ? [words] : [], line);
+  // a line that has them twice names both, so deleting what the check names passes
+  assert.deepEqual(typedWords("Hours checked 20 Nov 2026 on museum.example · €12 · seen 20 Nov"), ["checked 20 Nov 2026 on museum.example", "seen 20 Nov"]);
+  const twice = blankSite(`(function () {
+  "use strict";
+  site.start({ data: null, render: function () {
+    site.head({ title: "Tickets" });
+    document.getElementById("list").replaceChildren(site.h("p", {}, "Hours checked 20 Nov 2026 · Prices seen 20 Nov"));
+  } });
+})();
+`);
+  try {
+    assert.match(run("check", twice).stdout, /^- app\.js: delete "checked 20 Nov 2026" and "seen 20 Nov", from "Hours checked 20 Nov 2026 · Prices seen 20 Nov"\.$/m);
+  } finally {
+    fs.rmSync(twice, { recursive: true, force: true });
+  }
+
+  const page = (hours, planner) => `(function () {
+  "use strict";
+  var museum = "https://museum.example/visit";
+  var planner = "https://transit.example/planner?from=Main%20station&to=Museum";
+  site.start({ data: null, render: function () {
+    site.head({ title: "A visit to the museum", lede: "Opening hours and how to get there." });
+    document.getElementById("list").replaceChildren(
+      site.h("article", { "class": "card" },
+        site.h("h2", { text: "Opening hours" }),
+        site.h("p", { text: "Thursday: 10 am–8 pm" })),
+      site.h("footer", { "class": "notes" },
+        ${hours},
+        ${planner})
+    );
+  } });
+})();
+`;
+  const typedHours = 'site.h("p", {}, "Hours · ", site.link(museum, "Museum on museum.example"), " · checked 20 Nov 2026")';
+  const typedPlanner = (said) => `site.h("p", {}, "Route planner · ", site.link(planner, "City timetable"), " · ${said}; route details not confirmed")`;
+  const rewording = "Rewording a line around those words never passes: only deleting them does.";
+  const dir = blankSite(page(typedHours, typedPlanner("checked 20 Nov 2026")));
+  try {
+    const first = run("check", dir, "--expect", "Opening hours");
+    assert.equal(first.status, 1, first.stdout + first.stderr);
+    assert.equal(first.stdout, `TYPED: 2 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:
+- app.js: delete "checked 20 Nov 2026", from "Hours · Museum on museum.example · checked 20 Nov 2026".
+- app.js: delete "checked 20 Nov 2026", from "Route planner · City timetable · checked 20 Nov 2026; route details not confirmed".
+Only site.trust(fact) and site.cite(fact) write those words, from a fact that says how its page was read ({"v", "src", "url", "date", "viewer"}): where a line is about such a fact, that call goes in the words' place. A tool or a form nobody ran has no such fact: its line keeps its name and its link and says "not run", with no day. A day that is the page's own content, not when a source was read, goes in a cell or field of its own.
+Rewording a line around those words never passes: only deleting them does.
+1 of 1 expected item(s) shown: Opening hours.
+Read 2 file(s): the HTML text, the data files, and the text the page's scripts pass to site.h and site.head or hold in their lists and objects.
+`);
+    // nothing a helper draws is quoted: the arrow of a drawn link, a day beside a site's name
+    assert.doesNotMatch(first.stdout, /↗|maker\.com|\d on [a-z]+\.com/);
+
+    // the caption reworded, as that turn did: the same lines, and the check says again that rewording never passes
+    fs.writeFileSync(path.join(dir, "app.js"), page(typedHours.replace("checked 20 Nov 2026", "checked 20 Nov 2026 in the browser"), typedPlanner("checked 20 Nov 2026 in the browser")));
+    const reworded = run("check", dir, "--expect", "Opening hours");
+    assert.equal(reworded.status, 1, reworded.stdout);
+    assert.match(reworded.stdout, /^- app\.js: delete "checked 20 Nov 2026", from "Route planner · City timetable · checked 20 Nov 2026 in the browser; route details not confirmed"\.$/m);
+    assert.ok(reworded.stdout.includes(`goes in a cell or field of its own.\n${rewording}\n1 of 1 expected item(s) shown`), reworded.stdout);
+
+    // the words deleted: the hours' page drawn as the fact it is, the planner linked by its name, "not run", no day
+    fs.writeFileSync(path.join(dir, "app.js"), page('site.h("p", {}, "Hours · ", site.cite({ src: "Museum", url: museum, date: "2026-11-20", viewer: "shared browser" }))',
+      'site.h("p", {}, "Route planner · ", site.link(planner, "City timetable"), " · not run")'));
+    const passed = run("check", dir, "--expect", "Opening hours");
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout, /TYPED|Rewording/);
+    // the check keeps nothing of itself in the site's folder
+    assert.equal(fs.existsSync(path.join(dir, ".bind", "check.json")), false);
+    assert.deepEqual(checkSite(dir).files, ["app.js", "index.html"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // A page that logs someone's own checks is still named where a line says "<thing> checked <day>": those are a
+  // caption's words too ("Hours checked 8 Nov"), and nothing in them tells the two apart. With each day in a cell of
+  // its own, as the check says of a day that is the page's own content, nothing is typed.
+  const log = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-log-"));
+  try {
+    const page = (rows) => `<!doctype html><title>Car log</title><main><h1>Car log</h1>${rows}</main>`;
+    fs.writeFileSync(path.join(log, "index.html"), page("<ul><li>Tyres checked 3 Nov</li><li>Oil checked 12 Oct</li></ul>"));
+    assert.deepEqual(checkSite(log).typed.map((t) => t.line), ["Tyres checked 3 Nov", "Oil checked 12 Oct"]);
+    assert.match(run("check", log).stdout, /A day that is the page's own content, not when a source was read, goes in a cell or field of its own\.$/m);
+    fs.writeFileSync(path.join(log, "index.html"), page("<table><tr><th>Part</th><th>Checked</th></tr><tr><td>Tyres</td><td>3 Nov</td></tr><tr><td>Oil</td><td>12 Oct</td></tr></table>"));
+    assert.deepEqual(checkSite(log).typed, []);
+  } finally {
+    fs.rmSync(log, { recursive: true, force: true });
+  }
+
+  // typed inside a fact that says how its page was read: the helper draws that fact's caption already
+  const options = compareSite(["Brooks Ghost 16", "Hoka Arahi 7"]);
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(options, "data.json"), "utf8"));
+    data.items[0].facts = { weight: { v: "9.5 oz, checked 19 Nov 2026", src: "Brooks", url: "https://brooks.example/ghost-16", date: "2026-11-19", viewer: "server fetch" } };
+    data.items[1].facts = { weight: { v: "9.9 oz, seen 19 Nov", src: "A search", url: "https://hoka.example/arahi-7", date: "2026-11-19", viewer: "search result" } };
+    fs.writeFileSync(path.join(options, "data.json"), JSON.stringify(data));
+    assert.deepEqual(checkSite(options).typed, [{ file: "data.json", line: "9.5 oz, checked 19 Nov 2026", words: ["checked 19 Nov 2026"], fact: true },
+      { file: "data.json", line: "9.9 oz, seen 19 Nov", words: ["seen 19 Nov"] }]);
+    const out = run("check", options, "--expect", "Brooks Ghost 16");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^- data\.json: delete "checked 19 Nov 2026", from "9\.5 oz, checked 19 Nov 2026"\. Its fact says how its page was read, so site\.trust\(fact\) or site\.cite\(fact\) writes them from its "date" and "viewer"\.$/m);
+    assert.match(out.stdout, /^- data\.json: delete "seen 19 Nov", from "9\.9 oz, seen 19 Nov"\.$/m);
+  } finally {
+    fs.rmSync(options, { recursive: true, force: true });
+  }
+});
+
+// A line longer than the check quotes was cut to 160 characters before the words to delete were read from it: past
+// the cut, a second "seen 20 Nov" went unnamed, and a caption at the cut was named only in part ("checked 20 Nov"),
+// so deleting what the check named left "2026 on museum.example" on a page whose next check passed. The words come
+// from the whole line, and only the quote of it is cut. A check that found typed words also said "the check before
+// this one named typed words here too" after the card's own command, after a check that named other lines, and in a
+// copied folder: no check keeps anything of itself, and each says what rewording does.
+test("the words to delete come from the whole line, however long, and every check says rewording never passes", () => {
+  const lead = "The museum is open daily from ten in the morning and has a garden, a shop, two galleries, a library, a cafe and a hall.";
+  const first = "Hours checked 20 Nov 2026 on museum.example. The museum is open daily from ten in the morning, has a garden, a shop, two galleries, a library and a cafe. Prices seen 20 Nov";
+  const second = `${lead} Hours checked 20 Nov 2026 on museum.example.`;
+  assert.ok(first.length > 160 && second.length > 160);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-long-"));
+  const page = (lines) => `<!doctype html><title>The museum</title><main><h1>The museum</h1>${lines.map((line) => `<p>${line}</p>`).join("\n")}</main>`;
+  try {
+    fs.writeFileSync(path.join(dir, "index.html"), page([first, second]));
+    assert.deepEqual(checkSite(dir).typed.map((t) => t.words), [["checked 20 Nov 2026 on museum.example", "seen 20 Nov"], ["checked 20 Nov 2026 on museum.example"]]);
+    const out = run("check", dir, "--expect", "The museum");
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /^- index\.html: delete "checked 20 Nov 2026 on museum\.example" and "seen 20 Nov", from "Hours checked 20 Nov 2026 on museum\.example\. The museum .*…"\.$/m);
+    assert.match(out.stdout, /^- index\.html: delete "checked 20 Nov 2026 on museum\.example", from "The museum is open daily .*…"\.$/m);
+    assert.match(out.stdout, /^Rewording a line around those words never passes: only deleting them does\.$/m);
+    assert.doesNotMatch(out.stdout, /check before this one/);
+    assert.equal(JSON.parse(run("check", dir, "--expect", "The museum", "--json").stdout).typedAgain, undefined);
+
+    // deleting exactly the words named leaves nothing typed, and no stray year or site
+    let html = page([first, second]);
+    for (const words of ["checked 20 Nov 2026 on museum.example", "seen 20 Nov"]) html = html.replaceAll(words, "");
+    fs.writeFileSync(path.join(dir, "index.html"), html);
+    const passed = run("check", dir, "--expect", "The museum");
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout, /TYPED|Rewording/);
+    assert.doesNotMatch(fs.readFileSync(path.join(dir, "index.html"), "utf8"), /2026|museum\.example/);
+
+    // a later page with another typed line reads as a first check, and the check writes nothing in the site's folder
+    fs.writeFileSync(path.join(dir, "index.html"), page(["Tickets €12 · seen 21 Nov"]));
+    const later = run("check", dir, "--expect", "Tickets");
+    assert.match(later.stdout, /^- index\.html: delete "seen 21 Nov", from "Tickets €12 · seen 21 Nov"\.$/m);
+    assert.doesNotMatch(later.stdout, /check before this one/);
+    assert.equal(fs.existsSync(path.join(dir, ".bind", "check.json")), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The value check told a turn to say how a value was read in "viewer", and quoted a drawn caption as its example
+// ("checked 27 Oct on maker.com"): written that way, the typed-words scan held the card for words the page never shows,
+// and its answer, to delete them, deleted the reader site.trust needs. A fact's "viewer" names its reader: it is never
+// drawn, so it is no typed line, and the value check names readers as its example.
+test("a fact's \"viewer\" is never a typed line, and the value check's example for it is a reader", () => {
+  const dir = optionsSite("compare", (data) => {
+    data.items[2].facts.rating = { v: "4.4 of 5", src: "Maker" };
+    return data;
+  });
+  try {
+    const [problem] = checkValues(dir).problems;
+    assert.match(problem, /^Option C · Rating: "4\.4 of 5" has no "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it, and its reader in "viewer" \("server fetch", "shared browser" or "personal browser"\)\. /);
+    assert.doesNotMatch(problem, /checked \d|seen \d/);
+    const file = path.join(dir, "data.json");
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    data.items[2].facts.rating = { v: "4.4 of 5", src: "Maker", url: "https://maker.example/c", date: "2026-10-27", viewer: "checked 27 Oct on maker.example" };
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    assert.deepEqual(checkSite(dir).typed, []);
+    assert.doesNotMatch(run("check", dir, "--expect", "Option C").stdout, /TYPED/);
+    // the fact's own value still is one
+    data.items[2].facts.rating.v = "4.4 of 5, checked 27 Oct";
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    assert.deepEqual(checkSite(dir).typed.map((t) => t.line), ["4.4 of 5, checked 27 Oct"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A card shows a line under its title: the command's --summary, else the page's own <meta name="description">. Neither
+// was read for typed words, so "checked <date>" could reach the card of a page that passed its check.
+test("a page's description is read for typed words, and the card's own command reads its --summary too", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bind-check-summary-"));
+  const page = (description) => `<!doctype html><html><head><title>Museum hours</title><meta name="description" content="${description}"></head><body><main><h1>Museum hours</h1><p>Thursday: 10 am–8 pm</p></main></body></html>`;
+  try {
+    fs.writeFileSync(path.join(dir, "index.html"), page("Opening hours &amp; prices · checked 20 Nov 2026"));
+    assert.deepEqual(checkSite(dir).typed, [{ file: "index.html", line: "Opening hours & prices · checked 20 Nov 2026", words: ["checked 20 Nov 2026"] }]);
+    assert.equal(run("check", dir, "--expect", "Museum hours").status, 1);
+    assert.match(cardWaits(dir).lines.join("\n"), /^- index\.html: delete "checked 20 Nov 2026", from "Opening hours & prices · checked 20 Nov 2026"\.$/m);
+
+    fs.writeFileSync(path.join(dir, "index.html"), page("Opening hours and prices"));
+    assert.equal(cardWaits(dir), null);
+    assert.equal(cardWaits(dir, { summary: "3 museums · 2 days" }), null);
+    const waits = cardWaits(dir, { summary: "3 museums · prices seen 20 Nov" });
+    assert.deepEqual(waits.typed, [{ file: "--summary", line: "3 museums · prices seen 20 Nov", words: ["seen 20 Nov"] }]);
+    assert.match(waits.lines.join("\n"), /^- --summary: delete "seen 20 Nov", from "3 museums · prices seen 20 Nov"\.$/m);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -931,7 +1146,7 @@ test("check fails for a value that only says nothing and for a value without its
     assert.match(problems[1], /^Option B · Rating: "n\/a" says nothing/);
     // the page to add is one that gives the value: a count of what was found, with none found ("0 of 2 reviews
     // found"), cites no page and is a note instead, never the one page that was read
-    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it, and how in "viewer" \("checked 27 Oct on maker\.com"\)\. When no page gives it \(such as a count of what you found, with none found\), leave out "v" and say why in "note"\. Without a source the page shows it as not checked\.$/);
+    assert.match(problems[2], /^Option C · Rating: "4\.4 of 5" has no "src", "url" \(the page\) or "date" \(the day\): add the page that gives this value and the day you read it, and its reader in "viewer" \("server fetch", "shared browser" or "personal browser"\)\. When no page gives it \(such as a count of what you found, with none found\), leave out "v" and say why in "note"\. Without a source the page shows it as not checked\.$/);
     assert.match(problems[3], /^Option C · Warranty: "2 years" has no "url" \(the page\): add the page that gives this value and the day you read it/);
     const out = run("check", dir, "--expect", "Option A, Option B, Option C");
     assert.equal(out.status, 1, "every item is shown, and the values still fail the check");
