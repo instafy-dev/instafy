@@ -1363,7 +1363,7 @@ fn is_a_page_to_open(entry: &str, read: Option<&[PageRead]>) -> bool {
     if carries_an_address(entry) {
         return true;
     }
-    let words = words_of(entry);
+    let words = words_in(entry);
     words.iter().any(Word::is_a_page_word)
         && names_of_its_page(&words)
             .into_iter()
@@ -1430,7 +1430,7 @@ impl Word {
 }
 
 /// The words of `text`, in order ([`Word`]).
-fn words_of(text: &str) -> Vec<Word> {
+fn words_in(text: &str) -> Vec<Word> {
     let ends_a_phrase = |c: char| {
         matches!(
             c,
@@ -1578,7 +1578,7 @@ impl PageRead {
             .and_then(|url| url.path_segments()?.rfind(|part| !part.is_empty()))
             .unwrap_or_default();
         let title = text("title").trim();
-        let title = words_of(if title.is_empty() { last_part } else { title })
+        let title = words_in(if title.is_empty() { last_part } else { title })
             .iter()
             .filter(|word| **word != Word::End)
             .map(|word| word.key().to_string())
@@ -1598,7 +1598,7 @@ impl PageRead {
             .into_iter()
             .flatten()
             .filter_map(JsonValue::as_str)
-            .map(|fact| texts_of(&words_of(fact)))
+            .map(|fact| texts_of(&words_in(fact)))
             .collect();
         Self { title, site, facts }
     }
