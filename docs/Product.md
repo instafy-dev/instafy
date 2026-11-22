@@ -829,6 +829,11 @@ with `+` and the primary microphone/send action at the right. The surface has 28
 existing keyboard-aware bottom safe area. The editor stays
 mounted as its draft and primary action change, and longer drafts still grow upward normally.
 
+**Connect an AI** in the composer `+` menu, after **Connect a tool**, opens the Add AI
+connection dialog that Your AI opens: a ChatGPT sign-in or an API key, each of which
+gets an agent of its own. Like **Connect a tool**, it is hidden while the space is
+read-only.
+
 **Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
 featured tools that can be selected today (Notion, GitHub and FreeFinance, until the Slack and Discord
 packs are published) and ends with **Browse all tools**; the same tools are the chip row on the
