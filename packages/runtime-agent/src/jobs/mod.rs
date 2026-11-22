@@ -166,11 +166,14 @@ const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 /// How much of the browser skill's "Routing preflight" section the routing step reads: all of the
 /// shipped one, with little to spare, so a rule added there takes one out. A space's longer copy
-/// is cut here and marked.
+/// is cut here and marked. It is counted as the step reads the section
+/// ([`browser_routing_section_for_search_state`]).
 const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_273;
-/// What the routing step reads after the browser skill's routing section when Octo's turn for the
+/// What the routing step reads above the browser skill's routing section when Octo's turn for the
 /// message can search the web: the job's grant lets that turn use the AI's own web search
-/// (`job_proxy_auth`), which the routing step itself never does. Only the fact: the section says
+/// (`job_proxy_auth`), which the routing step itself never does. It comes above the section, so
+/// the section is read knowing it: after the section, it still let news put on a page go to the
+/// browser first (a local test, Nov 20). Only the fact: the section says
 /// what it changes (availability for dates at places nobody named, answered in a reply, stays
 /// with Octo, which searches first, as other research answered in a reply does, unless a site
 /// must be used first). It also says that Instafy's browser can't search: told only that research
@@ -181,9 +184,11 @@ const BROWSER_SKILL_ROUTING_MAX_CHARS: usize = 2_273;
 const ROUTING_SEARCH_FACT: &str =
     "Octo can search the web for this message; Instafy's browser can't.\n";
 /// What the routing step reads after [`ROUTING_SEARCH_FACT`] when this runtime also has
-/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too.
-/// Without it, such research goes to the browser first, as it did before Octo could search, also
-/// where Octo can search for a reply ([`ROUTING_NO_SEARCH_FIRST_FACT`]).
+/// [`RESEARCH_PAGES_SEARCH_FIRST_ENV`] on: research that ends in a page then stays with Octo too,
+/// and the section is given without the words that hold only until it does
+/// ([`browser_routing_section_for_search_state`]). Without it, such research goes to the browser
+/// first, as it did before Octo could search, also where Octo can search for a reply
+/// ([`ROUTING_NO_SEARCH_FIRST_FACT`]).
 const ROUTING_SEARCH_FIRST_FACT: &str =
     "Research that ends in a page searches first for this message.\n";
 /// What the routing step reads after [`ROUTING_SEARCH_FACT`] instead, where Octo can search but
@@ -299,7 +304,7 @@ enum AgentRoutingPreflightRoute {
     WriteCoordinationRequired,
     /// The message runs in Instafy's browser from its first step (`browser`); with
     /// `continue_building`, Octo then builds from what it found (`browser_then_build`). Offered
-    /// only where the browser skill says when (`browser_routing_snapshot_for_job`).
+    /// only where the browser skill says when (`browser_routing_snapshot_for_job_where`).
     Browser {
         continue_building: bool,
     },
@@ -18975,13 +18980,60 @@ fn format_collaboration_routing_preflight_snapshot(
     ))
 }
 
+/// The browser skill's routing section as the routing step reads it for this message. The
+/// section puts in braces the words that hold only until research that ends in a page searches
+/// first: a condition ("{ when it searches first}"), or a whole sentence on where such research
+/// goes until then. Where it does search first ([`ROUTING_SEARCH_FIRST_FACT`]) the step is given
+/// the section without those words, so it reads plainly that such research stays `direct`, and
+/// never the sentence that sends it to the browser first. Given both sentences and the line that
+/// says which one holds, it still sent news put on a page to the browser first, after each of
+/// three rewordings (local tests, the last on Nov 20: "current news research that must happen
+/// before creating a shareable page"). In the two other states, without search and where such
+/// research doesn't search first, the step is given the words and not the braces: with search off
+/// its input is byte for byte what it was. Which words are marked is the skill's; this only
+/// leaves them out. A brace in inline code is text. A brace with no partner on its line, or one
+/// inside another, leaves the section as it is written: nothing is left out on a guess.
+fn browser_routing_section_for_search_state(section: &str, pages_search_first: bool) -> String {
+    let mut read = String::with_capacity(section.len());
+    let (mut in_code, mut marked) = (false, false);
+    for ch in section.chars() {
+        match ch {
+            '\n' if marked => return section.to_string(),
+            '\n' => {
+                in_code = false;
+                read.push(ch);
+            }
+            '`' if !marked => {
+                in_code = !in_code;
+                read.push(ch);
+            }
+            '{' if marked => return section.to_string(),
+            '{' if !in_code => marked = true,
+            '}' if marked => marked = false,
+            '}' if !in_code => return section.to_string(),
+            _ if marked && pages_search_first => {}
+            _ => read.push(ch),
+        }
+    }
+    if marked { section.to_string() } else { read }
+}
+
 /// The browser skill's "Routing preflight" section from the space's own copy, which says when a
-/// message goes straight to Instafy's browser: None when the copy has no such section, so a
+/// message goes straight to Instafy's browser, as this message's search state reads it
+/// ([`browser_routing_section_for_search_state`]): None when the copy has no such section, so a
 /// space whose copy predates it keeps today's routes.
-fn format_browser_routing_preflight_snapshot(workspace_dir: &Path) -> Option<String> {
+fn format_browser_routing_preflight_snapshot(
+    workspace_dir: &Path,
+    pages_search_first: bool,
+) -> Option<String> {
     let path = ".agents/skills/instafy-browser-automation/SKILL.md";
     let content = read_workspace_file_utf8(workspace_dir, path)?;
     let excerpt = extract_markdown_h2_section(&content, "Routing preflight")?;
+    // Fenced blocks go first, as the snapshot leaves them out: a brace in one marks nothing.
+    let excerpt = browser_routing_section_for_search_state(
+        &strip_markdown_fenced_blocks(&excerpt),
+        pages_search_first,
+    );
     Some(format_routing_skill_snapshot(
         "browser",
         path,
@@ -19005,11 +19057,13 @@ fn message_carries_attachments(job: &LeaseJob) -> bool {
 /// (`browser_choice_applies`: not a hand-back, a worker, a plan, an unattended run or a browser
 /// turn) and that Octo answers (not a group chat's turn where Octo first decides whether to
 /// answer at all), with no attachments, short enough to be a card's task, in a space whose copy
-/// of the skill says when.
-fn browser_routing_snapshot_for_job(
+/// of the skill says when. `pages_search_first`: research that ends in a page searches first for
+/// this message, which the section is then read for.
+fn browser_routing_snapshot_for_job_where(
     job: &LeaseJob,
     workspace_dir: &Path,
     prompt_text: &str,
+    pages_search_first: bool,
 ) -> Option<String> {
     let own_words = job
         .payload
@@ -19022,8 +19076,19 @@ fn browser_routing_snapshot_for_job(
         && !message_carries_attachments(job)
         && !prompt_text.trim().is_empty()
         && prompt_text.trim().encode_utf16().count() <= ROUTED_BROWSER_TASK_MAX_UTF16_UNITS)
-        .then(|| format_browser_routing_preflight_snapshot(workspace_dir))
+        .then(|| format_browser_routing_preflight_snapshot(workspace_dir, pages_search_first))
         .flatten()
+}
+
+/// [`browser_routing_snapshot_for_job_where`] where research that ends in a page doesn't search
+/// first, as tests read it.
+#[cfg(test)]
+fn browser_routing_snapshot_for_job(
+    job: &LeaseJob,
+    workspace_dir: &Path,
+    prompt_text: &str,
+) -> Option<String> {
+    browser_routing_snapshot_for_job_where(job, workspace_dir, prompt_text, false)
 }
 
 /// The addresses the person typed, which a browser run opens without the word check
@@ -19222,6 +19287,7 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
         active_plan_group_id,
         pending,
         browser_routes,
+        false,
     );
     start + &rest
 }
@@ -19231,21 +19297,34 @@ fn build_agent_routing_preflight_prompt_with_browser_routes(
 /// the chat, its plan group and then its message, is the rest, and its history goes in after the
 /// message (`agent_routing_primary_prompt`). So a provider serves the start from its cache to
 /// whichever chat routes next, under the routing step's one cache key
-/// (`routing_preflight_run_options`).
+/// (`routing_preflight_run_options`). `pages_search_first`: research that ends in a page searches
+/// first for this message ([`ROUTING_SEARCH_FIRST_FACT`]).
 fn agent_routing_preflight_prompt(
     workspace_dir: &Path,
     prompt_text: &str,
     active_plan_group_id: Option<&str>,
     pending: Option<&worker_input_routing::PendingContext>,
     browser_routes: Option<&str>,
+    pages_search_first: bool,
 ) -> (String, String) {
     // A pending worker reply is answered here; it never goes to the browser.
     let browser_routes = browser_routes.filter(|_| pending.is_none());
-    let browser_route_lines = if browser_routes.is_some() {
-        "- `browser`: runs in Instafy's browser from its first step; its reply answers.\n\
-        - `browser_then_build`: the same, then a build from what it found.\n"
-    } else {
-        ""
+    // What each browser route does; the skill's section says when. Where research that ends in a
+    // page searches first, `browser_then_build`'s line stops at the build: "a build from what it
+    // found" is the shape of research put on a page, and the routing step chose the route by it
+    // ("This asks for current news research that must happen before creating a shareable page,
+    // so use browser_then_build", a local test, Nov 20) though the section kept such research
+    // with Octo. In every other state the line is as it was.
+    let browser_route_lines = match (browser_routes.is_some(), pages_search_first) {
+        (false, _) => "",
+        (true, false) => {
+            "- `browser`: runs in Instafy's browser from its first step; its reply answers.\n\
+            - `browser_then_build`: the same, then a build from what it found.\n"
+        }
+        (true, true) => {
+            "- `browser`: runs in Instafy's browser from its first step; its reply answers.\n\
+            - `browser_then_build`: the same, then a build.\n"
+        }
     };
     // A `direct` request that needs the browser first still ends with its card: routed as a
     // change that must write files, it would run in the lane that cannot ask for the browser.
@@ -19335,9 +19414,11 @@ pub(crate) struct RoutingPreflightRequest {
 }
 
 /// `searches`: Octo's turn for this message can search the web, which the routing step then reads
-/// after the browser skill's routing section ([`ROUTING_SEARCH_FACT`]), and `pages_search_first`:
+/// above the browser skill's routing section ([`ROUTING_SEARCH_FACT`]), and `pages_search_first`:
 /// research that ends in a page searches first there too ([`ROUTING_SEARCH_FIRST_FACT`]), or
-/// doesn't ([`ROUTING_NO_SEARCH_FIRST_FACT`]), which the line after it says either way. With the
+/// doesn't ([`ROUTING_NO_SEARCH_FIRST_FACT`]), which the line after it says either way. Where it
+/// does, the section is read without the words that hold only until then
+/// ([`browser_routing_section_for_search_state`]). With the
 /// browser routes, the routing step also reads the space's pages as a turn that may write files
 /// reads them, each made in this chat or in another and read-only here
 /// ([`space_pages::space_pages_lines`]), after the part every chat shares: a change to another
@@ -19351,16 +19432,27 @@ fn routing_preflight_request(
     pages_search_first: bool,
 ) -> RoutingPreflightRequest {
     let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
+    // Research that ends in a page searches first only where Octo can search at all.
+    let pages_search_first = searches && pages_search_first;
     let browser_routes = pending
         .is_none()
-        .then(|| browser_routing_snapshot_for_job(job, workspace_dir, prompt_text))
+        .then(|| {
+            browser_routing_snapshot_for_job_where(
+                job,
+                workspace_dir,
+                prompt_text,
+                pages_search_first,
+            )
+        })
         .flatten()
         .map(|routes| match (searches, pages_search_first) {
             (false, _) => routes,
             (true, false) => {
-                format!("{routes}{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}")
+                format!("\n{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}{routes}")
             }
-            (true, true) => format!("{routes}{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"),
+            (true, true) => {
+                format!("\n{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}{routes}")
+            }
         });
     let pages = if browser_routes.is_some() {
         space_pages::space_pages_lines(
@@ -19377,6 +19469,7 @@ fn routing_preflight_request(
         active_plan_group_id.as_deref(),
         pending,
         browser_routes.as_deref(),
+        pages_search_first,
     );
     let (prompt, history_metrics) =
         agent_routing_primary_prompt(&format!("{shared_start}{pages}{rest}"), &job.payload);

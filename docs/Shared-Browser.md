@@ -1146,7 +1146,8 @@ where a turn has it; Instafy's browser has no web search, and opens a search
 engine only when the person named one. Never invent a page path. A turn using
 CLI search opens the result's page too, by the research skill's "Searching". A
 page that ends without what the turn needs (it has no page, fails, is refused or
-covered, or keeps changing) ends that page, not the task: the turn goes on in
+covered, reads as only its menu or keeps changing) ends that page, not the
+task: the turn goes on in
 the same turn, never to the same address, to a link on a page it read, then to
 that site's home page, menu and search box (unless the site didn't answer, is
 closed to Octo because it is link-only or the person declined it, or is a search
@@ -1570,7 +1571,8 @@ building turn that must make a page can't ask for the browser and, on an AI
 with no web search of its own, reads only pages whose addresses it already
 knows. When Octo can search the web for the message (the job's grant lets its
 turn use the AI's own web search), the routing step reads one line that says
-so, and that Instafy's browser can't, after the section: availability for
+so, and that Instafy's browser can't, above the section, so the section is
+read knowing it: availability for
 dates where nobody named the places,
 answered in a reply, then stays with Octo, as other research answered in a
 reply does, and searches first (search finds the places, then at most one card
@@ -1584,7 +1586,20 @@ search runs ("in Octo's own turn: the browser can't") and that a map isn't such
 research: told only that such research searches first, the routing step read it
 as research to do first, in the browser, and sent news, a comparison and a page
 of places, and trips and events on a map, to the browser before the turn that
-could search (a local test, Nov 20). Without the first line, on every AI
+could search (a local test, Nov 20). The section puts those words in braces:
+"{ when it searches first}" in its first rule, and the `browser_then_build`
+line's whole sentence on research that ends in a page. They hold only until
+such research searches first, and where it does the routing step is given the
+section without them, so it reads plainly that research that ends in a page
+stays `direct` and nothing of browsing first, and `browser_then_build`'s own
+line in the list of routes stops at "then a build" ("a build from what it
+found" is the shape of research put on a page). Given both sentences and the
+line that said which held, news put on a page still went to the browser first,
+its reason "current news research that must happen before creating a shareable
+page" (a local test, Nov 20). In every other state the step is given the words
+without the braces. A brace in inline code is text, and one with no partner on
+its line, or inside another, leaves the section as it is written. Without the
+first line, on every AI
 with no web search of its own, the routing input is as it was. With the first
 line and the setting off, which is every message on a person's own ChatGPT
 login until it is on, the second line says instead that research that ends in
@@ -3544,7 +3559,9 @@ unless the policy is `"covered"`.
   Every browser turn is asked to end its reply with one finding per page, one
   JSON object per line, each fact under a page it read that states it rather
   than one that only quotes it, and saying which of its values the turn chose
-  rather than the page, since later turns read only these lines; and a page
+  rather than the page, since later turns read only these lines (in its reply,
+  which the person reads, a fact has its page's link and the day it was read,
+  and a status its time too); and a page
   that stopped it as a stop with its word (`no-page`, `timed-out` and
   `covered` among them). Told also that a fact carries what it leaves out, a
   comparison's browser turn wrote "weight and price are not stated in the page
