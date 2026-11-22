@@ -32,7 +32,8 @@ use super::routes::{
     blocking, caller_token, coded, on_mirror, project_of, resolve_rev, Admission, HostedState,
 };
 use crate::apply::{
-    normalize_relative_path, stage_archive, validate_apply_paths, ApplyManifest, StagedArchive,
+    normalize_relative_path, stage_archive, validate_apply_paths, ApplyManifest, Destinations,
+    StagedArchive,
 };
 use crate::apply_idempotency::{
     normalize_apply_idempotency_key, normalize_apply_request_fingerprint,
@@ -259,7 +260,8 @@ async fn apply(
             ApplyArchive::InMemory(bytes) => bytes.len() as u64,
             ApplyArchive::TempFile { size, .. } => *size,
         };
-        let paths = validate_apply_paths(files, deletes, size, max_archive_bytes)?;
+        let paths =
+            validate_apply_paths(files, deletes, size, max_archive_bytes, Destinations::Apart)?;
         match archive {
             ApplyArchive::InMemory(bytes) => {
                 stage_archive(Cursor::new(bytes), paths, max_archive_bytes, &dir)

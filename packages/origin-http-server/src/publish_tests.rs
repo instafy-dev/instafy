@@ -1588,6 +1588,69 @@ fn a_selection_leaves_other_staged_changes_alone() {
     assert!(!sc.status().contains("doc.md"), "{}", sc.status());
 }
 
+/// A save records a tracked path below an entry `.gitignore` now names,
+/// beside the save's other changes: the deletion of `drafts/x` where a
+/// file the space ignores took the place of its folder, and an edit and a
+/// deletion inside a folder the space now ignores. What is ignored stays
+/// on disk only. (`git add -A` refused such a save whole, "paths are
+/// ignored": its walk for new files met the ignored entry above a named
+/// path.)
+#[test]
+fn a_tracked_path_below_a_newly_ignored_entry_is_saved() {
+    for all_dirty in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            seed: vec![
+                ("drafts/x", b"draft\n".to_vec()),
+                ("private/a.md", b"a\n".to_vec()),
+                ("private/b.md", b"b\n".to_vec()),
+            ],
+            ..Options::default()
+        });
+        fs::remove_dir_all(sc.ws.join("drafts")).unwrap();
+        sc.write("drafts", b"local notes\n");
+        sc.write(".gitignore", b"drafts\nprivate/\n");
+        sc.write("private/a.md", b"a, edited\n");
+        fs::remove_file(sc.ws.join("private/b.md")).unwrap();
+        sc.write("private/c.md", b"new and ignored\n");
+        sc.write("README.md", b"edited\n");
+
+        let report = if all_dirty {
+            sc.publish(Selection::AllDirty)
+        } else {
+            sc.publish_paths(&[
+                "README.md",
+                ".gitignore",
+                "drafts/x",
+                "private/a.md",
+                "private/b.md",
+            ])
+        };
+        let case = format!("all_dirty={all_dirty}: {report:?}");
+        assert_eq!(report.git_sync_status, SyncStatus::Published, "{case}");
+        assert!(report.rejected_paths.is_empty(), "{case}");
+        assert_eq!(sc.remote_file("README.md").as_deref(), Some("edited\n"));
+        assert_eq!(
+            sc.remote_file(".gitignore").as_deref(),
+            Some("drafts\nprivate/\n")
+        );
+        assert_eq!(sc.remote_file("drafts/x"), None, "{case}");
+        assert_eq!(sc.remote_file("drafts"), None, "{case}");
+        assert_eq!(
+            sc.remote_file("private/a.md").as_deref(),
+            Some("a, edited\n")
+        );
+        assert_eq!(sc.remote_file("private/b.md"), None, "{case}");
+        assert_eq!(sc.remote_file("private/c.md"), None, "{case}");
+        assert_eq!(sc.disk("drafts").as_deref(), Some("local notes\n"));
+        assert_eq!(
+            sc.disk("private/c.md").as_deref(),
+            Some("new and ignored\n")
+        );
+        assert_eq!(sc.status(), "", "{case}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Static rules for the publish modules.
 // ---------------------------------------------------------------------------
@@ -5933,15 +5996,155 @@ async fn saves_after_a_flush_wait_for_the_next_refresh() {
 }
 
 fn apply_archive(path: &str, content: &[u8]) -> String {
+    apply_archive_of(&[(path, content)])
+}
+
+/// The `archiveBase64` of an `/apply-json` that writes `files`.
+fn apply_archive_of(files: &[(&str, &[u8])]) -> String {
     use base64::Engine as _;
     use std::io::Write as _;
     let mut writer = zip::write::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    writer
-        .start_file(path, zip::write::FileOptions::<()>::default())
-        .unwrap();
-    writer.write_all(content).unwrap();
+    for (path, content) in files {
+        writer
+            .start_file(*path, zip::write::FileOptions::<()>::default())
+            .unwrap();
+        writer.write_all(content).unwrap();
+    }
     let archive = writer.finish().unwrap().into_inner();
     base64::engine::general_purpose::STANDARD.encode(archive)
+}
+
+/// A person's `/apply-json` (no `autoCommitAfterApply`) that writes `files`
+/// and deletes `deletes`: its status and body.
+async fn apply_save(
+    base: &str,
+    sc: &Scenario,
+    files: &[(&str, &[u8])],
+    deletes: &[&str],
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(path, content)| serde_json::json!({ "path": path, "size": content.len() }))
+        .collect();
+    post_json(
+        &reqwest::Client::new(),
+        format!("{base}/apply-json"),
+        serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": entries,
+                "deletes": deletes,
+            },
+            "archiveBase64": apply_archive_of(files),
+        }),
+    )
+    .await
+}
+
+/// The names in the folder `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A save a turn on another computer sends to a Desktop folder: a file
+/// that became a folder (`a` to `a/x`), a folder that became a file (`b/x`
+/// to `b`) and a rename by case only (`Foo.txt` to `foo.txt`), each delete
+/// beside the write that replaces it. `/apply` takes it, and the git sync
+/// that follows records it. On a disk that ignores case, the saved version
+/// keeps the file's old name, which that disk takes for the new one.
+/// (`/apply` refused such a save whole: "manifest destinations overlap",
+/// "collide".)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_through_apply_records_file_and_folder_swaps() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        hook: true,
+        seed: vec![
+            ("a", b"a file\n".to_vec()),
+            ("b/x", b"in b\n".to_vec()),
+            ("Foo.txt", b"old name\n".to_vec()),
+        ],
+        ..Options::default()
+    });
+    let ignores_case = sc.ws.join("FOO.TXT").exists();
+    let (base, server) = serve(&sc).await;
+
+    let (status, body) = apply_save(
+        &base,
+        &sc,
+        &[
+            ("a/x", b"new in a\n"),
+            ("b", b"b is a file\n"),
+            ("foo.txt", b"new name\n"),
+        ],
+        &["a", "b/x", "Foo.txt"],
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(sc.disk("a/x").as_deref(), Some("new in a\n"));
+    assert_eq!(sc.disk("b").as_deref(), Some("b is a file\n"));
+    assert_eq!(sc.disk("foo.txt").as_deref(), Some("new name\n"));
+    let names = names_in(&sc.ws);
+    assert!(names.contains(&"foo.txt".to_string()), "{names:?}");
+    assert!(!names.contains(&"Foo.txt".to_string()), "{names:?}");
+
+    let (status, body) = post_json(
+        &reqwest::Client::new(),
+        format!("{base}/git/sync"),
+        serde_json::json!({ "paths": ["a", "a/x", "b", "b/x", "Foo.txt", "foo.txt"] }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let saved_name = if ignores_case { "Foo.txt" } else { "foo.txt" };
+    let mut expected = vec!["README.md", "a/x", "b", "doc.md", "logo.bin", saved_name];
+    expected.sort();
+    let tree = git_in(&sc.remote, &["ls-tree", "-r", "--name-only", "main"]);
+    assert_eq!(tree.lines().collect::<Vec<_>>(), expected, "{body}");
+    assert_eq!(sc.remote_file("a/x").as_deref(), Some("new in a\n"));
+    assert_eq!(sc.remote_file("b").as_deref(), Some("b is a file\n"));
+    assert_eq!(sc.remote_file(saved_name).as_deref(), Some("new name\n"));
+    server.abort();
+}
+
+/// Such a save never loses what it does not name, and its names are still
+/// checked on the folder its deletes left: a file never replaces a folder
+/// that holds a file the save leaves alone (409 `path_type_conflict`), and
+/// a rename by case only of a folder (`Docs/a.md` to `docs/a.md`) still
+/// meets the folder `Docs`, which stays when its file goes (409
+/// `path_alias`). Each time the delete that ran first is put back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_through_apply_never_replaces_what_it_does_not_name() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        seed: vec![
+            ("b/x", b"in b\n".to_vec()),
+            ("Docs/a.md", b"docs\n".to_vec()),
+        ],
+        ..Options::default()
+    });
+    sc.write("b/keep", b"not in the save\n");
+    let (base, server) = serve(&sc).await;
+
+    let (status, body) = apply_save(&base, &sc, &[("b", b"b is a file\n")], &["b/x"]).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "path_type_conflict", "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["b"]), "{body}");
+    assert_eq!(sc.disk("b/x").as_deref(), Some("in b\n"));
+    assert_eq!(sc.disk("b/keep").as_deref(), Some("not in the save\n"));
+
+    let (status, body) = apply_save(&base, &sc, &[("docs/a.md", b"docs\n")], &["Docs/a.md"]).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "path_alias", "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["docs/a.md"]), "{body}");
+    assert_eq!(names_in(&sc.ws.join("Docs")), ["a.md"]);
+    assert!(!names_in(&sc.ws).contains(&"docs".to_string()));
+    assert_eq!(sc.status(), "?? b/keep");
+    server.abort();
 }
 
 /// A Desktop apply that commits (`autoCommitAfterApply`) stages exactly the
