@@ -204,6 +204,13 @@ function createStepClock(limitMs) {
     // Resolves when the step's time is up; never while a prompt waits.
     expired,
     isUp: () => up,
+    // How much of the step's time is left: all of it before the step starts,
+    // what was left while a prompt waits, and none once it answered or its
+    // time is up.
+    timeLeft: () => {
+      if (up || state === "over") return 0;
+      return Math.max(0, state === "running" ? left - (Date.now() - startedAt) : left);
+    },
     start() {
       if (state === "idle") run();
     },
@@ -234,6 +241,14 @@ let resolvedPage = null;
 // The controls of the reading this step last gave (snapshot), in its order,
 // for a step that names some of them in its answer (fieldListLine).
 let readingControls = null;
+// Whether that reading showed only the page's menu, header and footer, or
+// none of its controls (notDrawnOf), or nothing while the page hides
+// controls (addressOnly): a click or an open then waits for the rest and
+// reads once more by itself (readOnceDrawn).
+let readingNotDrawn = false;
+// How long the step has waited for such a page when it reads it again, for
+// that reading's words; null for a reading that waited for nothing.
+let notDrawnLookMs = null;
 // The page this command acts on: the page the person chose for the run
 // (EXPECTED_BROWSER_PAGE_ID), or one of the tabs Octo opened in this run and
 // selected (tabs.json). Snapshots, targets, approvals and the action feed are
@@ -906,7 +921,47 @@ function shownRuleInPage() {
     }
     return true;
   };
-  return { styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown, optionOffered };
+  // Why a person cannot see `element`, for a reading's count of the controls
+  // the page hides: "" when they can; "marked" when it is under
+  // aria-hidden="true" or inert; "unrendered" when it is not rendered or is
+  // transparent; else "unreachable" (no size, clipped to nothing, or where
+  // the page cannot be scrolled to).
+  const hiddenWhy = (element) => {
+    if (elementShown(element)) return "";
+    for (let node = element; isElement(node); node = flatParent(node)) {
+      if (hiddenFromPeople(node)) return "marked";
+    }
+    return rendered(element) ? "unreachable" : "unrendered";
+  };
+  // Whether `node` is itself the page's menu, header or footer, by the
+  // landmarks a reading's `area` reads (describeInPage): a nav, or a header
+  // or footer that is the page's own.
+  const frameLandmark = (node) => {
+    const tag = String(node.tagName).toUpperCase();
+    const role = String(node.getAttribute("role") || "").trim().toLowerCase();
+    if (tag === "NAV" || role === "navigation" || role === "banner" || role === "contentinfo") return true;
+    return (tag === "HEADER" || tag === "FOOTER") && !(node.parentElement && node.parentElement.closest(
+      "article, aside, main, nav, section, [role='article'], [role='complementary'], [role='main'], [role='navigation'], [role='region']",
+    ));
+  };
+  const mainLandmark = (node) =>
+    String(node.tagName).toUpperCase() === "MAIN" ||
+    String(node.getAttribute("role") || "").trim().toLowerCase() === "main";
+  // Whether `start` sits in the page's menu, header or footer and not in its
+  // main part: a list of links a page's main part holds as a nav is that
+  // page's content.
+  const framed = (start) => {
+    let found = false;
+    for (let node = start, depth = 0; isElement(node) && depth < 64; node = flatParent(node), depth += 1) {
+      if (mainLandmark(node)) return false;
+      found = found || frameLandmark(node);
+    }
+    return found;
+  };
+  return {
+    styleOf, isElement, flatParent, hiddenFromPeople, reachable, textRendered, elementShown, optionOffered, hiddenWhy,
+    frameLandmark, mainLandmark, framed,
+  };
 }
 
 // Runs inside the page (see withShownRule). The text a person can see, in
@@ -1365,7 +1420,27 @@ function describeInPage(rule, forms, names, element, sources, mode, pass) {
       4_000,
     );
   };
-  if (mode === "name") return { name: checkedName() };
+  // The first name a reading would show the control by (describeElement), for
+  // one a full list leaves out (leftOutOf): its labels before its own text,
+  // never what a field holds. Its text is the text it draws, as a listed
+  // control's (shownText): never words its hidden parts, scripts or styles
+  // hold, which a list's last links named run into their own (a local test,
+  // Nov 22).
+  const leftLabel = () => {
+    const field = ["INPUT", "SELECT", "TEXTAREA"].includes(String(element.tagName).toUpperCase());
+    const drawnText = () => {
+      try {
+        return names.shownTextOf(element, 240);
+      } catch (_) {
+        return "";
+      }
+    };
+    return [
+      element.getAttribute("aria-label"), ariaLabelledByText, labels, element.getAttribute("placeholder"),
+      element.getAttribute("title"), field ? "" : drawnText(), element.getAttribute("name"),
+    ].map((value) => bounded(value, 240)).find(Boolean) || "";
+  };
+  if (mode === "name") return { name: checkedName(), label: leftLabel() };
   let shown = true;
   try {
     shown = rule.elementShown(element);
@@ -2134,11 +2209,52 @@ function listInPage(rule, rules, describe, request) {
   // What the parts of the page around the listed controls answer for a
   // card's heading, shared between them for this one list (cardHeadingOf).
   const pass = new Map();
+  // What a reading says of the controls it leaves out (leftOutOf): whether
+  // one is a form field, and whether it sits in the page's menu, header or
+  // footer, as it says of the ones it lists.
+  const fieldKind = (element) => {
+    try {
+      const tag = String(element.tagName).toUpperCase();
+      if (tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (tag === "INPUT") return !["button", "submit", "reset", "image"].includes(String(element.type).toLowerCase());
+      return ["combobox", "searchbox", "textbox", "spinbutton"].includes(
+        String(element.getAttribute("role") || "").trim().toLowerCase(),
+      );
+    } catch (_) {
+      return false;
+    }
+  };
+  const framedIn = (element) => {
+    try {
+      return rule.framed(element);
+    } catch (_) {
+      return false;
+    }
+  };
+  const whyHidden = (element) => {
+    try {
+      return rule.hiddenWhy(element);
+    } catch (_) {
+      return "";
+    }
+  };
   return elements.map((element, ordinal) => {
     try {
-      if (listed.has(ordinal)) return describe(element, request.sources, undefined, pass);
-      const { name } = describe(element, request.sources, "name");
-      return glances[ordinal].shown ? { shown: true, left: true, name } : { shown: false, name };
+      if (listed.has(ordinal)) {
+        const described = describe(element, request.sources, undefined, pass);
+        if (described && typeof described === "object") {
+          described.framed = framedIn(element);
+          if (described.shown === false) {
+            described.field = fieldKind(element);
+            described.why = whyHidden(element);
+          }
+        }
+        return described;
+      }
+      const { name, label } = describe(element, request.sources, "name");
+      const facts = { name, label, field: fieldKind(element), framed: framedIn(element) };
+      if (glances[ordinal].shown) return { shown: true, left: true, ...facts };
+      return { shown: false, why: whyHidden(element), ...facts };
     } catch (_) {
       return null;
     }
@@ -2152,15 +2268,78 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
   `const describe = ${DESCRIBE_IN_PAGE};
   return (${listInPage})((${shownRuleInPage})(), (${fieldListRulesInPage})(), describe, request);`,
 );
-// Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Where a click on `element` lands: Playwright clicks the
-// middle of its first part in view, and what is drawn there takes the click.
+// Runs inside the page, joined in front of the page functions that name a
+// part of it (a click's cover, clickLandingInPage; what covers a page's main
+// part, mainPartInPage), so it must not use anything from this file's scope.
+// What `hit` is, for the browser's words: the tag, role and label of the
+// nearest element around it that has a role, a label or is a control, else
+// its own. Its label is what the page gives it as one (aria-label,
+// aria-labelledby, title, alt); one with no role, or one that says it has
+// none, and no label is named by its first words a person sees.
+function partNameInPage(doc, hit, selector) {
+  const roots = [doc.body, doc.documentElement];
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  let cover = hit;
+  for (let node = hit, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 8; node = up(node), depth += 1) {
+    if (node.getAttribute("role") || node.matches(selector) ||
+      ["aria-label", "aria-labelledby", "title", "alt"].some((name) => node.getAttribute(name))) {
+      cover = node;
+      break;
+    }
+  }
+  const squeeze = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 120);
+  const labelledText = String(cover.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
+    .join(" ");
+  const coverRole = squeeze(cover.getAttribute("role")).split(" ")[0];
+  const coverLabel = [
+    cover.getAttribute("aria-label"),
+    labelledText,
+    cover.getAttribute("title"),
+    cover.getAttribute("alt"),
+  ].map(squeeze).find(Boolean) || "";
+  const FIRST_WORDS = 8;
+  const unseenTags = ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA"];
+  const seen = (parent) => {
+    for (let node = parent, depth = 0; node && node.nodeType === 1 && depth < 512; node = up(node), depth += 1) {
+      if (unseenTags.includes(String(node.tagName).toUpperCase()) ||
+        String(node.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true" || node.hasAttribute("inert")) {
+        return false;
+      }
+    }
+    return typeof parent.checkVisibility !== "function" ||
+      parent.checkVisibility({ checkOpacity: true, opacityProperty: true, checkVisibilityCSS: true, visibilityProperty: true });
+  };
+  const firstWords = () => {
+    const words = [];
+    const walker = doc.createTreeWalker(cover, 4);
+    for (let node = walker.nextNode(), count = 0; node && words.length <= FIRST_WORDS && count < 400; node = walker.nextNode(), count += 1) {
+      if (node.parentElement && seen(node.parentElement)) words.push(...String(node.nodeValue || "").split(/\s+/).filter(Boolean));
+    }
+    return words.length > FIRST_WORDS ? `${words.slice(0, FIRST_WORDS).join(" ")}\u2026` : words.join(" ");
+  };
+  const roleless = !coverRole || coverRole === "presentation" || coverRole === "none";
+  const coverName = roots.includes(cover) ? "" : coverLabel || (roleless ? squeeze(firstWords()) : "");
+  return { tag: String(cover.tagName || "").toLowerCase(), role: coverRole, name: coverName };
+}
+// Runs inside the page through Playwright, with the shown rule and
+// partNameInPage joined in front (CLICK_LANDING_IN_PAGE), so it must not use
+// anything from this file's scope. Where a click on `element` lands:
+// Playwright clicks the middle of its first part in view, and what is drawn
+// there takes the click.
 // `other` is true when that is inside another control within this one (a
 // form's button in a section, an item of a list or menu it holds), or inside
 // a frame within it, which a reading never reads: the click would act on
 // something the step was not judged for. `covered` is true when it is
 // something outside the control (a notice, a dialog, a pinned bar), which
-// the click would go to instead; its own label is the control's. `consent`
+// the click would go to instead; its own label is the control's. `own` says
+// that what is there is the menu, header or footer the control itself sits
+// in, or a box of it around the control (the page gives the control no
+// pointer there, or lays that part's own backdrop over it): nothing else
+// covers it. `consent`
 // says that cover is a cookie or consent notice: a container whose id, class,
 // label or title names it (`request.consent`, the describer's words), or a
 // small one close by whose text speaks of cookies. `cover` names what is
@@ -2171,8 +2350,8 @@ const DESCRIBE_ALL_IN_PAGE = new Function(
 // (or one that says it has none: "presentation", "none") and no label is
 // named by its first words a person sees instead (a bare `<ol>` read as no
 // name at all): never text in a style sheet, a script or a part hidden from
-// people, which no reading shows either.
-function clickLandingInPage(element, request) {
+// people, which no reading shows either (partNameInPage).
+function clickLandingInPage(rule, nameOf, element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
   for (const rect of Array.from(element.getClientRects())) {
@@ -2244,61 +2423,195 @@ function clickLandingInPage(element, request) {
     const text = depth < 6 && typeof node.textContent === "string" ? node.textContent : "";
     consent = names.test(named) || names.test(labelledBy) || (text.length <= 1_500 && /\bcookies?\b/i.test(text));
   }
-  let cover = hit;
-  for (let node = hit, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 8; node = up(node), depth += 1) {
-    if (node.getAttribute("role") || node.matches(request.selector) ||
-      ["aria-label", "aria-labelledby", "title", "alt"].some((name) => node.getAttribute(name))) {
-      cover = node;
-      break;
-    }
+  // The part the control sits in takes the click itself only where that part
+  // is the page's menu, header or footer around the control, or a box inside
+  // it (rule.framed): never the page's body or root, nor a box that holds the
+  // page's main part, which a page-wide dim behind an open dialog is drawn on.
+  // Taken for the control's own part, a link under such a dim opened its
+  // address past the dialog (a local test, Nov 22).
+  let own = false;
+  if (!roots.includes(hit) && rule.framed(hit) && !hit.querySelector("main, [role='main']")) {
+    for (let node = up(element), depth = 0; node && depth < 512 && !own; node = up(node), depth += 1) own = node === hit;
   }
-  const squeeze = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 120);
-  const labelledText = String(cover.getAttribute("aria-labelledby") || "")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 8)
-    .map((id) => (doc.getElementById(id) && doc.getElementById(id).textContent) || "")
-    .join(" ");
-  const coverRole = squeeze(cover.getAttribute("role")).split(" ")[0];
-  const coverLabel = [
-    cover.getAttribute("aria-label"),
-    labelledText,
-    cover.getAttribute("title"),
-    cover.getAttribute("alt"),
-  ].map(squeeze).find(Boolean) || "";
-  const FIRST_WORDS = 8;
-  const unseenTags = ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA"];
-  const seen = (parent) => {
-    for (let node = parent, depth = 0; node && node.nodeType === 1 && depth < 512; node = up(node), depth += 1) {
-      if (unseenTags.includes(String(node.tagName).toUpperCase()) ||
-        String(node.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true" || node.hasAttribute("inert")) {
-        return false;
+  return { other: false, covered: true, own, consent, cover: nameOf(doc, hit, request.selector) };
+}
+const CLICK_LANDING_IN_PAGE = new Function(
+  "...args",
+  `return (${clickLandingInPage})((${shownRuleInPage})(), (${partNameInPage}), ...args);`,
+);
+// Runs inside the page, with the shown rule and partNameInPage joined in
+// front (MAIN_PART_IN_PAGE), so it must not use anything from this file's
+// scope. What a page shows in its main part (its main landmark, else all of it
+// outside its menu, header and footer), asked only of a reading that lists no
+// control outside those (notDrawnOf): whether a person sees anything in that
+// part (`shows`: text, a picture, a frame or a canvas, judged as the reading's
+// text is; true too when the page is too large to say), so a chat button or a
+// notice the page lays beside an empty main part is none of it; what
+// is laid over the middle of the main part (`cover`, named as a click's cover
+// is), the box that hides it or the first control it holds (`hider`: its tag
+// and role, never its label, which no person sees, and how it is hidden),
+// and how many form fields the page hides in it (`fields`).
+function mainPartInPage(rule, nameOf, request) {
+  const doc = document;
+  if (!doc.body) return null;
+  const view = doc.defaultView;
+  const up = rule.flatParent;
+  const skipped = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "INPUT", "SELECT"]);
+  const pictures = new Set(["IMG", "SVG", "VIDEO", "CANVAS", "IFRAME", "FRAME", "OBJECT", "EMBED"]);
+  const range = doc.createRange();
+  let budget = 20_000;
+  let shows = false;
+  const shownText = (node) => {
+    const parent = up(node);
+    if (!rule.isElement(parent) || !/\S/.test(node.nodeValue || "")) return false;
+    if (rule.styleOf(parent).visibility !== "visible" || !rule.textRendered(parent)) return false;
+    range.selectNodeContents(node);
+    return rule.reachable(range.getBoundingClientRect(), parent, "static", doc);
+  };
+  const walk = (node, inMain, depth) => {
+    if (shows || depth > 512) return;
+    budget -= 1;
+    if (budget <= 0) {
+      shows = true;
+      return;
+    }
+    if (node.nodeType === 3) {
+      shows = shownText(node);
+      return;
+    }
+    if (!rule.isElement(node)) return;
+    const tag = String(node.tagName).toUpperCase();
+    if (skipped.has(tag)) return;
+    if (pictures.has(tag)) {
+      const rect = node.getBoundingClientRect();
+      shows = rect.width >= 40 && rect.height >= 40 && rule.elementShown(node);
+      return;
+    }
+    const main = inMain || rule.mainLandmark(node);
+    if (!main && rule.frameLandmark(node)) return;
+    const style = rule.styleOf(node);
+    if (style.display === "none" || rule.hiddenFromPeople(node) || Number.parseFloat(style.opacity) === 0 ||
+      style.contentVisibility === "hidden") {
+      return;
+    }
+    const children = node.shadowRoot
+      ? node.shadowRoot.childNodes
+      : tag === "SLOT"
+        ? node.assignedNodes({ flatten: true })
+        : node.childNodes;
+    for (const child of children) walk(child, main, depth + 1);
+  };
+  // The page's main landmark: the first one it renders, as a page may keep
+  // others hidden beside it (an ordinary page read as not drawn by the hidden
+  // one ahead of it, a local test, Nov 22), else its first, which then hides
+  // the part.
+  const mains = Array.from(doc.querySelectorAll("main, [role='main']")).slice(0, 16);
+  const rendered = (node) => {
+    try {
+      return rule.hiddenWhy(node) !== "unrendered";
+    } catch (_) {
+      return true;
+    }
+  };
+  const main = mains.find(rendered) || mains[0] || null;
+  walk(main || doc.body, Boolean(main), 0);
+  const inside = (node, container) => {
+    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  // The middle of the main part where it is in view, else of the view.
+  let point = { x: view.innerWidth / 2, y: view.innerHeight / 2 };
+  if (main) {
+    const box = main.getBoundingClientRect();
+    const left = Math.max(box.left, 0);
+    const top = Math.max(box.top, 0);
+    const right = Math.min(box.right, view.innerWidth);
+    const bottom = Math.min(box.bottom, view.innerHeight);
+    if (right - left >= 1 && bottom - top >= 1) point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+  }
+  let hit = doc.elementFromPoint(point.x, point.y);
+  for (let depth = 0; hit && hit.shadowRoot && depth < 32; depth += 1) {
+    const inner = hit.shadowRoot.elementFromPoint(point.x, point.y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  // Only what the page lays over itself covers it: a box that is fixed,
+  // absolute or sticky, or one inside such a box, that neither holds the main
+  // part nor sits in it.
+  let cover = null;
+  const roots = [doc.body, doc.documentElement];
+  if (hit && rule.isElement(hit) && !roots.includes(hit) && !(main && (inside(hit, main) || inside(main, hit)))) {
+    for (let node = hit, depth = 0; rule.isElement(node) && !roots.includes(node) && depth < 64; node = up(node), depth += 1) {
+      if (main && inside(main, node)) break;
+      if (["fixed", "absolute", "sticky"].includes(rule.styleOf(node).position)) {
+        cover = nameOf(doc, hit, request.selector);
+        break;
       }
     }
-    return typeof parent.checkVisibility !== "function" ||
-      parent.checkVisibility({ checkOpacity: true, opacityProperty: true, checkVisibilityCSS: true, visibilityProperty: true });
-  };
-  const firstWords = () => {
-    const words = [];
-    const walker = doc.createTreeWalker(cover, 4);
-    for (let node = walker.nextNode(), count = 0; node && words.length <= FIRST_WORDS && count < 400; node = walker.nextNode(), count += 1) {
-      if (node.parentElement && seen(node.parentElement)) words.push(...String(node.nodeValue || "").split(/\s+/).filter(Boolean));
+  }
+  // What hides `start`: the nearest box at or around it that the page turned
+  // off, hid from people, does not display, or drew transparent.
+  const hiderOf = (start) => {
+    for (let node = start, depth = 0; rule.isElement(node) && !roots.includes(node) && depth < 64; node = up(node), depth += 1) {
+      let how = "";
+      const style = rule.styleOf(node);
+      if (node.hasAttribute("inert")) how = "inert";
+      else if (String(node.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true") how = "aria-hidden";
+      else if (style.display === "none") how = "display";
+      else if (Number.parseFloat(style.opacity) === 0) how = "opacity";
+      else if (style.visibility !== "visible") how = "visibility";
+      if (how) {
+        let box = node;
+        // Visibility is inherited: the outermost box that has it hides the part.
+        if (how === "visibility") {
+          for (let parent = up(box), levels = 0;
+            rule.isElement(parent) && !roots.includes(parent) && rule.styleOf(parent).visibility !== "visible" && levels < 64;
+            parent = up(parent), levels += 1) {
+            box = parent;
+          }
+        }
+        return {
+          tag: String(box.tagName || "").toLowerCase(),
+          role: String(box.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0],
+          how,
+        };
+      }
     }
-    return words.length > FIRST_WORDS ? `${words.slice(0, FIRST_WORDS).join(" ")}\u2026` : words.join(" ");
+    return null;
   };
-  const roleless = !coverRole || coverRole === "presentation" || coverRole === "none";
-  const coverName = roots.includes(cover) ? "" : coverLabel || (roleless ? squeeze(firstWords()) : "");
-  return {
-    other: false,
-    covered: true,
-    consent,
-    cover: {
-      tag: String(cover.tagName || "").toLowerCase(),
-      role: coverRole,
-      name: coverName,
-    },
-  };
+  // The main part itself, or else the first control in it that the page
+  // hides, a form field before any other; and how many form fields the page
+  // hides in it. A dialog the page keeps closed elsewhere is no part of it.
+  let hider = main ? hiderOf(main) : null;
+  let fields = 0;
+  if (main) {
+    let first = null;
+    let firstIsField = false;
+    for (const control of Array.from(main.querySelectorAll(request.selector)).slice(0, 2_000)) {
+      let hidden = false;
+      try {
+        hidden = ["marked", "unrendered"].includes(rule.hiddenWhy(control));
+      } catch (_) {
+        hidden = false;
+      }
+      if (!hidden) continue;
+      const field = ["INPUT", "TEXTAREA", "SELECT"].includes(String(control.tagName).toUpperCase());
+      if (field) fields += 1;
+      if (!first || (field && !firstIsField)) {
+        first = control;
+        firstIsField = field;
+      }
+    }
+    if (!hider && first) hider = hiderOf(first);
+  }
+  return { kind: "main-part", shows, cover, hider, fields };
 }
+const MAIN_PART_IN_PAGE = new Function(
+  "...args",
+  `return (${mainPartInPage})((${shownRuleInPage})(), (${partNameInPage}), ...args);`,
+);
 const SHOWN_TEXT_IN_PAGE = withShownRule(shownTextInPage);
 const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header", "footer", "aside"]);
 
@@ -2306,8 +2619,10 @@ const AREA_NAMES = new Set(["dialog", "menu", "tabs", "nav", "search", "header",
 // person cannot see; they are left out of the observation but still count for
 // the secret-screen check, and their number tells the model some are left out.
 // `described`: what DESCRIBE_ALL_IN_PAGE said of this control, when it was
-// read with the rest of the page.
-async function describeElement(locator, index, hiddenNames, described = undefined) {
+// read with the rest of the page. `left`: the reading's record of the
+// controls it leaves out (leftOutRecord), which takes this one when the page
+// hides it.
+async function describeElement(locator, index, hiddenNames, described = undefined, left = null) {
   const attributes = described !== undefined
     ? described
     : await locator.evaluate(DESCRIBE_IN_PAGE, PAGE_POLICY_SOURCES).catch(() => null);
@@ -2315,6 +2630,7 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     if (hiddenNames) {
       hiddenNames.push(typeof attributes.name === "string" ? attributes.name.slice(0, 4_000) : "");
     }
+    if (left) left.hidden.push(leftOutFacts(attributes));
     return null;
   }
   // The box the page gave with the rest of the control's facts, when it gave
@@ -2401,6 +2717,9 @@ async function describeElement(locator, index, hiddenNames, described = undefine
     nameHints,
     expanded: typeof attributes.expanded === "boolean" ? attributes.expanded : null,
     area: AREA_NAMES.has(attributes.area) ? attributes.area : "",
+    // Whether it sits in the page's menu, header or footer (the shown rule's
+    // `framed`), for a reading that shows nothing else (notDrawnOf).
+    framed: attributes.framed === true,
     optionCount: Number.isSafeInteger(attributes.optionCount) && attributes.optionCount >= 0
       ? Math.min(attributes.optionCount, MAX_SELECT_OPTIONS)
       : null,
@@ -3493,6 +3812,31 @@ async function fieldRowsOf(page) {
   }
 }
 
+// A reading's record of the controls it leaves out: the ones the page hides
+// (`hidden`: each with its names for the secret-screen check, why the shown
+// rule left it out, whether it is a form field and whether it sits in the
+// page's menu, header or footer), the
+// ones a person can see that the full list has no room for (`full`: each also
+// with the name a reading would list it by), how many
+// lie past the controls a reading judges (`unjudged`), and how many are a
+// cookie notice's accept (`accepts`). Before it a reading gave one number for
+// all of them, and a planner page whose reading listed its menu's 11 controls
+// with "95 left out" could not say whether the planner's fields were among
+// the 95 (a local test, Nov 20).
+function leftOutRecord() {
+  return { hidden: [], full: [], unjudged: 0, accepts: 0 };
+}
+const HIDDEN_WHYS = new Set(["marked", "unrendered", "unreachable"]);
+function leftOutFacts(entry) {
+  return {
+    name: entry && typeof entry.name === "string" ? entry.name.slice(0, 4_000) : "",
+    label: entry && typeof entry.label === "string" ? entry.label.slice(0, MAX_LABEL_CHARS) : "",
+    why: entry && HIDDEN_WHYS.has(entry.why) ? entry.why : "",
+    field: Boolean(entry && entry.field === true),
+    framed: Boolean(entry && entry.framed === true),
+  };
+}
+
 // The controls a person can see, in document order. Snapshots and actions
 // both index this list, so an index means the same control in both. The page
 // is asked once for its controls and once to judge and describe them all
@@ -3506,13 +3850,16 @@ async function fieldRowsOf(page) {
 // left out too, so no step can target it: Octo never accepts cookies, and a
 // turn that saw one listed pressed it, was refused, and stopped there.
 // `accepts` collects them, for the browser's own decline of the notice
-// (declineCookieBanner), which looks for its refusal beside them.
-async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null) {
+// (declineCookieBanner), which looks for its refusal beside them. `left`
+// (leftOutRecord) takes what each control left out is and why, for the
+// reading's split of that count.
+async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null, left = null) {
   const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
   const judged = matches.slice(0, MAX_JUDGED_CONTROLS);
   if (leftNames) {
     for (let ordinal = judged.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
   }
+  if (left) left.unjudged = matches.length - judged.length;
   // The rows of the list the focused field opened that are no controls of
   // their own (a planner's stops drawn as plain rows) come after the page's
   // controls: a type step names them, and a click takes them.
@@ -3529,23 +3876,26 @@ async function collectInteractiveElements(page, hiddenNames = null, leftNames = 
     const name = entry && typeof entry.name === "string" ? entry.name.slice(0, 4_000) : "";
     if (entry && entry.shown === false) {
       if (hiddenNames) hiddenNames.push(name);
+      if (left) left.hidden.push(leftOutFacts(entry));
       continue;
     }
     // The list holds at most MAX_INTERACTIVE_ELEMENTS, whatever the page answered.
     if ((entry && entry.left === true) || elements.length >= MAX_INTERACTIVE_ELEMENTS) {
       if (leftNames) leftNames.push(name);
+      if (left) left.full.push(leftOutFacts(entry));
       continue;
     }
     const locator = handles[ordinal];
     // The shown rule in describeInPage covers what Playwright's isVisible
     // checks (rendered, visibility visible, a box with a size).
-    const description = await describeElement(locator, elements.length, hiddenNames, entry);
+    const description = await describeElement(locator, elements.length, hiddenNames, entry, left);
     if (!description) {
       continue;
     }
     if (isConsentAccept(description, page.url())) {
       if (leftNames) leftNames.push(name || description.label);
       if (accepts) accepts.push({ locator, description });
+      if (left) left.accepts += 1;
       continue;
     }
     elements.push({ locator, description });
@@ -4282,6 +4632,338 @@ async function declineCookieBanner(page, interactive, leftOut = []) {
   return false;
 }
 
+// What a reading says of the controls it leaves out, beside their number
+// (`omittedControls`): how many the page hides (`hiddenByPage`: in a closed
+// menu or drawer, or not drawn yet) and how many of those are form fields
+// (`hiddenFields`), how many a person can see that the full list has no room
+// for (`listFull`: scrolling reaches them), with the names of the first of
+// those, form fields before the rest (`listFullNames`), and how many are a
+// cookie notice's accept, which is never listed (`cookieAccept`). A control
+// the page hides is never named: its name is nothing a person can see.
+// Nothing for a reading that leaves none out.
+const LEFT_OUT_NAMES = 8;
+const LEFT_OUT_NAME_CHARS = 80;
+function leftOutOf(left, withheld) {
+  const full = left.full.length + left.unjudged;
+  if (!left.hidden.length && !full && !left.accepts) return null;
+  const names = [];
+  if (!withheld) {
+    for (const entry of [...left.full.filter((each) => each.field), ...left.full.filter((each) => !each.field)]) {
+      const name = Array.from(strictlyMasked(entry.label.replace(/\s+/g, " ").trim())).slice(0, LEFT_OUT_NAME_CHARS).join("");
+      if (name && !names.includes(name)) names.push(name);
+      if (names.length >= LEFT_OUT_NAMES) break;
+    }
+  }
+  const hiddenFields = left.hidden.filter((entry) => entry.field).length;
+  return {
+    hiddenByPage: left.hidden.length,
+    ...(hiddenFields ? { hiddenFields } : {}),
+    listFull: full,
+    ...(names.length ? { listFullNames: names } : {}),
+    ...(left.accepts ? { cookieAccept: left.accepts } : {}),
+  };
+}
+
+// What mainPartInPage says of the page, or null when the page cannot say in
+// time or answers anything else.
+async function mainPartOf(page) {
+  const part = await within(
+    FIELD_READ_MS,
+    page.evaluate(MAIN_PART_IN_PAGE, { kind: "main-part", selector: INTERACTIVE_SELECTOR }).catch(() => null),
+    null,
+  );
+  return part && part.kind === "main-part" && typeof part.shows === "boolean" ? part : null;
+}
+
+// Whether a reading's text names controls the page hides: two of their names
+// (one, when it hides one) are lines of it. A page read while it was drawing
+// reads so, its words shown and its controls not yet.
+function textNamesHidden(hidden, text) {
+  const lines = new Set(
+    String(text || "").split("\n").map((line) => line.replace(/\s+/g, " ").trim().toLowerCase()).filter(Boolean),
+  );
+  const named = new Set();
+  for (const entry of hidden) {
+    const name = entry.name.replace(/\s+/g, " ").trim().toLowerCase();
+    if (name.length >= 3 && lines.has(name)) named.add(name);
+    if (named.size >= 2) return true;
+  }
+  return named.size >= 1 && hidden.length === 1;
+}
+
+// A reading that shows only a page's frame is no reading of the page: a
+// journey planner read as its site's menu alone, 11 controls listed and 95
+// left out, in all 11 readings of five turns, and each turn said the planner
+// showed no route; a help article's click answered with no control, 42 left
+// out and the site's shell, and the turn ended on it (a local test, Nov 20).
+// So when every control a reading lists sits in the page's menu, header or
+// footer, or it lists none, and the page hides more controls than it lists,
+// the reading says so: when nothing else shows either (no text, picture or
+// frame outside those parts: mainPartInPage), only the page's menu shows; and
+// when it lists none while its text names some of them, none of its controls
+// shows yet. Null for every other reading, and for a page that cannot say.
+async function notDrawnOf(page, interactive, left, text) {
+  if (left.hidden.length <= interactive.length) return null;
+  if (!interactive.every(({ description }) => description.framed === true)) return null;
+  const part = await mainPartOf(page);
+  if (!part) return null;
+  if (part.shows && !(interactive.length === 0 && textNamesHidden(left.hidden, text))) return null;
+  return { part, onlyMenu: !part.shows };
+}
+
+// Runs inside the page. The addresses of the scripts and frames the page
+// itself holds, each with the status its site answered with where the page
+// may know it (its own site's, or one that lets it), for telling which of
+// them did not load (failedLoadsOf).
+function pagePartsInPage(request) {
+  const statuses = new Map();
+  try {
+    for (const entry of performance.getEntriesByType("resource").slice(0, 2_000)) {
+      if (Number.isSafeInteger(entry.responseStatus)) statuses.set(entry.name, entry.responseStatus);
+    }
+  } catch (_) {
+    statuses.clear();
+  }
+  const parts = [];
+  const add = (kind, address) => {
+    const url = String(address || "");
+    if (url) parts.push({ kind, url, status: statuses.get(url) || 0 });
+  };
+  for (const script of Array.from(document.scripts).slice(0, request.limit)) add("script", script.src);
+  for (const frame of Array.from(document.querySelectorAll("iframe[src], frame[src]")).slice(0, request.limit)) {
+    add("frame", frame.src);
+  }
+  return { kind: "page-parts", parts };
+}
+
+// The scripts and frames of the page that did not load, each as its kind,
+// its site and, where the browser gives one, its reason (a network error's
+// code, or the status the site answered with): a page whose main part a
+// script draws stays empty when that script never came, and no reading could
+// tell that from a page still drawing. Four things say so, whether or not
+// anything watched the page load. The browser marks each script the page
+// asked for that failed, an error status from another site's server too
+// (Page.getResourceTree); it keeps a log of the requests that failed on the
+// network, with the error, and hands it over when asked (Log.enable); the
+// page knows the status of what its own site answered; and a frame whose
+// page did not load holds the browser's own error page. Only a script or a
+// frame the page itself holds counts, and only its site is kept, never its
+// path or query. Empty when the browser or the page cannot say.
+const FAILED_LOADS_LISTED = 4;
+async function failedLoadsOf(page) {
+  const failed = new Map();
+  const failedScripts = new Set();
+  let session = null;
+  try {
+    session = await page.context().newCDPSession(page);
+    session.on("Log.entryAdded", (event) => {
+      const entry = event && event.entry;
+      if (!entry || entry.source !== "network" || entry.level !== "error" || typeof entry.url !== "string") return;
+      const error = /net::ERR_[A-Z0-9_]{1,60}/.exec(String(entry.text || ""));
+      if (error && !failed.has(entry.url)) failed.set(entry.url, error[0]);
+    });
+    // The entries kept so far come before the answer.
+    await within(FIELD_READ_MS, session.send("Log.enable"), null);
+    await session.send("Log.disable").catch(() => {});
+    const tree = await within(FIELD_READ_MS, session.send("Page.getResourceTree").catch(() => null), null);
+    const resources = tree && tree.frameTree && Array.isArray(tree.frameTree.resources) ? tree.frameTree.resources : [];
+    for (const resource of resources.slice(0, 2_000)) {
+      if (resource && resource.type === "Script" && resource.failed === true && typeof resource.url === "string") {
+        failedScripts.add(resource.url);
+      }
+    }
+  } catch (_) {
+    failed.clear();
+    failedScripts.clear();
+  } finally {
+    if (session) await session.detach().catch(() => {});
+  }
+  const answer = await within(
+    FIELD_READ_MS,
+    page.evaluate(pagePartsInPage, { kind: "page-parts", limit: 400 }).catch(() => null),
+    null,
+  );
+  const parts = answer && answer.kind === "page-parts" && Array.isArray(answer.parts) ? answer.parts : [];
+  const siteOf = (address) => {
+    try {
+      const url = new URL(address);
+      return ["http:", "https:"].includes(url.protocol) && /^[a-z0-9.-]{1,253}$/i.test(url.hostname) ? url.hostname : "";
+    } catch (_) {
+      return "";
+    }
+  };
+  const loads = [];
+  const add = (kind, address, error) => {
+    const site = siteOf(address);
+    if (site && !loads.some((load) => load.kind === kind && load.site === site)) {
+      loads.push({ kind, site, ...(error ? { error } : {}) });
+    }
+  };
+  for (const part of parts) {
+    if (!part || !["script", "frame"].includes(part.kind) || typeof part.url !== "string") continue;
+    const error = failed.get(part.url) ||
+      (Number.isSafeInteger(part.status) && part.status >= 400 && part.status <= 599 ? `HTTP ${part.status}` : "");
+    // Another site's error status is the page's to know only when that site
+    // lets it, so such a script is named without a reason.
+    if (error || (part.kind === "script" && failedScripts.has(part.url))) add(part.kind, part.url, error);
+  }
+  try {
+    for (const frame of page.mainFrame().childFrames().slice(0, 50)) {
+      if (!frame.url().startsWith("chrome-error://")) continue;
+      const element = await within(FIELD_READ_MS, frame.frameElement().catch(() => null), null);
+      const address = element ? await element.evaluate((node) => String(node.src || "")).catch(() => "") : "";
+      add("frame", address, "");
+    }
+  } catch (_) {
+    // The frames the page holds could not be asked.
+  }
+  // What the browser itself kept from loading (its ad blocker) comes last.
+  const blocked = (load) => load.error === "net::ERR_BLOCKED_BY_CLIENT";
+  return [...loads.filter((load) => !blocked(load)), ...loads.filter(blocked)].slice(0, FAILED_LOADS_LISTED);
+}
+
+// The words of a reading that shows only a page's frame (notDrawnOf): what
+// covers the page's main part, by its tag and role (partTagWords), or that it
+// is not drawn; the box that hides it and how; and the scripts and frames of
+// the page that did not load. A reading a click or an open came back to after
+// waiting says how long that was. They are the browser's own words, and the
+// runtime reads why a step stopped from them (shared_browser_activity.rs,
+// step_stop): a cover's name is the page's, so it is the reading's record's
+// (coverRecordOf), never these words'. Named in them, a cover called "We
+// couldn't reach that site" made a covered page read as one the browser could
+// not reach, and a key in a cover's name went out unmasked (a local test,
+// Nov 22).
+const HIDDEN_HOW = {
+  inert: "turned off",
+  "aria-hidden": "marked as hidden",
+  display: "not displayed",
+  visibility: "not visible",
+  opacity: "transparent",
+};
+const PART_TAG_PATTERN = /^[a-z][a-z0-9-]{0,40}$/;
+const PART_ROLE_PATTERN = /^[a-z]{2,24}$/;
+// A part of the page by its tag and role alone (" (<div role=\"status\">)"),
+// or "" when the page gave no tag a reading names.
+function partTagWords(part) {
+  const tag = typeof part?.tag === "string" && PART_TAG_PATTERN.test(part.tag) ? part.tag : "";
+  if (!tag) return "";
+  const role = typeof part.role === "string" && PART_ROLE_PATTERN.test(part.role) ? part.role : "";
+  return ` (<${tag}${role ? ` role="${role}"` : ""}>)`;
+}
+// What covers a page's main part, for the reading's record (`notDrawn.cover`):
+// its tag, role and name, the name masked as the reading's text is and left
+// out where the page's text may not be named (pageTextMayBeNamed), as a
+// covered click's words leave it out. Null when the page gave no tag.
+async function coverRecordOf(page, cover) {
+  const tag = typeof cover?.tag === "string" && PART_TAG_PATTERN.test(cover.tag) ? cover.tag : "";
+  if (!tag) return null;
+  const role = typeof cover.role === "string" && PART_ROLE_PATTERN.test(cover.role) ? cover.role : "";
+  const raw = typeof cover.name === "string" ? cover.name.replace(/\s+/g, " ").trim() : "";
+  const name = raw && (await pageTextMayBeNamed(page))
+    ? Array.from(strictlyMasked(raw)).slice(0, MAX_LABEL_CHARS).join("")
+    : "";
+  return { tag, ...(role ? { role } : {}), ...(name ? { name } : {}) };
+}
+function notDrawnMessage(state, notLoaded) {
+  const { part, onlyMenu } = state;
+  const what = onlyMenu ? "only its menu" : "none of its controls";
+  const said = [];
+  if (part.cover) {
+    said.push(`Something else on the page covers its main part${partTagWords(part.cover)}, so ${what} could be read.`);
+  } else if (onlyMenu) {
+    said.push("The page is still busy: only its menu shows so far, and its main part is not drawn.");
+  } else {
+    said.push("The page is still busy: none of its controls shows yet, though its text names some of them.");
+  }
+  const hider = part.hider;
+  if (hider && PART_TAG_PATTERN.test(String(hider.tag || "")) && HIDDEN_HOW[hider.how]) {
+    const role = typeof hider.role === "string" && PART_ROLE_PATTERN.test(hider.role) ? ` role="${hider.role}"` : "";
+    const fields = Number.isSafeInteger(part.fields) && part.fields > 0 ? part.fields : 0;
+    said.push(
+      `The page hides ${onlyMenu ? "that part" : "them"} (<${hider.tag}${role}>, ${HIDDEN_HOW[hider.how]})${
+        fields ? `, with ${fields} form field${fields === 1 ? "" : "s"}` : ""}.`,
+    );
+  }
+  if (notLoaded.length) {
+    const loads = notLoaded.map((load) => `a ${load.kind} from ${load.site}${
+      load.error ? ` (${load.error === "net::ERR_BLOCKED_BY_CLIENT" ? "blocked by the browser" : load.error})` : ""}`);
+    said.push(`Part of this page did not load: ${loads.join(", ")}.`);
+  }
+  const waited = notDrawnLookMs === null ? 0 : Math.max(1, Math.round(notDrawnLookMs / 1000));
+  said.push(notDrawnLookMs === null
+    ? "Take a snapshot in a moment."
+    : `It still read so ${waited} second${waited === 1 ? "" : "s"} after this step: this result is the page as it is now.`);
+  return said.join(" ");
+}
+
+// How long a click or an open whose own reading shows only its page's frame,
+// or nothing while the page hides controls (notDrawnOf, addressOnly), waits
+// for the rest before it reads the page once more by itself: as long as a
+// step looks at a page that still reads as before it (UNCHANGED_LOOK_MS). It
+// reads again as soon as the page reads otherwise, and, while the page goes
+// on drawing in that time, at most twice more; its last reading says how long
+// the step waited (notDrawnMessage). A click whose own look already found its
+// page reading as before it (settleAfterAction) waits no more: `looked`.
+// Left to the turn, the second look never came: each turn took the first
+// reading for the page. The wait is the step's own time, never more: it
+// leaves the step room for one more reading and its answer
+// (notDrawnReserveMs), and no reading starts once that room is gone, so the
+// last reading stands. A step that waited past its time lost its own answer
+// to the late one (pageAsItIs): a page that answered after 14 seconds was
+// said not to answer, and its address was refused for 10 minutes (a local
+// test, Nov 22).
+const NOT_DRAWN_LOOK_MS = 6_000;
+const NOT_DRAWN_READS = 3;
+// What a page that drew something takes to settle before it is read.
+const NOT_DRAWN_SETTLE_MS = 1_250;
+// The step's time a reading again needs, with the step's answer after it: at
+// least NOT_DRAWN_READ_RESERVE_MS, and twice what the step's first reading of
+// the page took.
+const NOT_DRAWN_READ_RESERVE_MS = 3_000;
+function notDrawnReserveMs(firstReadMs) {
+  return Math.max(NOT_DRAWN_READ_RESERVE_MS, 2 * Math.max(0, firstReadMs));
+}
+async function readOnceDrawn(page, read, { looked = false } = {}) {
+  readingNotDrawn = false;
+  // A click that looked has waited already, and its reading says so.
+  notDrawnLookMs = looked ? UNCHANGED_LOOK_MS : null;
+  try {
+    const firstAt = Date.now();
+    let result = await read();
+    if (!readingNotDrawn || looked) return result;
+    const reserve = notDrawnReserveMs(Date.now() - firstAt);
+    // Whether the step's time still holds a wait of `ms` and a reading after it.
+    const holds = (ms = 0) => stepClock.timeLeft() - reserve >= ms;
+    if (!holds(UNCHANGED_EVERY_MS)) return result;
+    const startedAt = Date.now();
+    let seen = await readingOf(page);
+    for (let reads = 1; reads <= NOT_DRAWN_READS && readingNotDrawn; reads += 1) {
+      // Past the window, the last reading is the page as it is.
+      if (reads > 1 && Date.now() - startedAt >= NOT_DRAWN_LOOK_MS) break;
+      let changed = false;
+      while (!changed && Date.now() - startedAt < NOT_DRAWN_LOOK_MS && holds(UNCHANGED_EVERY_MS + NOT_DRAWN_SETTLE_MS)) {
+        await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
+        const now = await readingOf(page);
+        changed = now !== seen;
+        seen = now;
+      }
+      if (changed) {
+        // What the page drew is read once it has settled.
+        await page.waitForTimeout(250).catch(() => {});
+        await page.evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 }).catch(() => {});
+      }
+      if (!holds()) break;
+      notDrawnLookMs = Date.now() - startedAt;
+      readingNotDrawn = false;
+      result = await read();
+      if (!changed) break;
+    }
+    return result;
+  } finally {
+    notDrawnLookMs = null;
+  }
+}
+
 // The model-facing view of the page: what a person can see of it. Text,
 // title, address, control names and link targets are masked on every site and
 // in every approval mode; a secret screen withholds the text and stays
@@ -4292,12 +4974,14 @@ async function declineCookieBanner(page, interactive, leftOut = []) {
 // the page again after it.
 async function snapshot(page, { withhold = false, decline = false } = {}) {
   readingControls = null;
+  readingNotDrawn = false;
   const startUrl = page.url();
   refuseLinkOnlyPage(page);
   const hiddenNames = [];
   const leftNames = [];
   const accepts = [];
-  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames, accepts);
+  const left = leftOutRecord();
+  const interactive = await collectInteractiveElements(page, hiddenNames, leftNames, accepts, left);
   const rawUrl = page.url();
   const renderedText = await page
     .locator("body")
@@ -4374,10 +5058,22 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   // A page that is not blank but reads with no text and no controls has not
   // drawn yet (still loading, or hidden while it loads). It is answered as
   // busy, never as an empty page, so Octo reads it again instead of taking
-  // "nothing" for what the page says.
+  // "nothing" for what the page says; a click or an open does so itself when
+  // the page hides controls it will show (readOnceDrawn).
   if (!view.secretScreen && !view.text.trim() && interactive.length === 0) {
+    readingNotDrawn = left.hidden.length > 0;
     return addressOnly(page);
   }
+  // A page that shows only its menu, header and footer, or none of its
+  // controls, has not drawn the rest: its reading says so, with what covers
+  // or hides the rest and what of the page did not load. A withheld page says
+  // nothing of what it holds.
+  const notDrawn = view.secretScreen ? null : await notDrawnOf(page, interactive, left, visibleText);
+  const notLoaded = notDrawn ? await failedLoadsOf(page) : [];
+  const notDrawnWords = notDrawn ? notDrawnMessage(notDrawn, notLoaded) : "";
+  const notDrawnCover = notDrawn && notDrawn.part.cover ? await coverRecordOf(page, notDrawn.part.cover) : null;
+  readingNotDrawn = Boolean(notDrawn);
+  const leftOut = leftOutOf(left, view.secretScreen);
   const pageOrigin = pageOriginOf(rawUrl);
   const maskLink = (href) => {
     if (!href) return href;
@@ -4406,7 +5102,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
         url: rawUrl, title, text, names: shownNames, signals, withhold: false,
       }).text), shownText),
     secretScreen: view.secretScreen,
-    ...(view.message ? { message: view.message } : {}),
+    ...(view.message || notDrawnWords ? { message: view.message || notDrawnWords } : {}),
     interactiveElements: interactive.map(({ description }, index) =>
       publicElementDescription({
         ...description,
@@ -4432,8 +5128,27 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
     ),
     // How many controls were left out, because a person cannot see them yet,
     // the list is full or one is a cookie notice's accept, so a cut list does
-    // not read as the whole page.
+    // not read as the whole page, and how many for each reason (leftOutOf).
     ...(hiddenNames.length + leftNames.length ? { omittedControls: hiddenNames.length + leftNames.length } : {}),
+    ...(leftOut ? { leftOut } : {}),
+    // For a reading that shows only the page's frame: why the shown rule left
+    // out the controls the page hides, how many of them sit outside its menu,
+    // header and footer, what covers its main part (its name masked), and the
+    // scripts and frames that did not load.
+    ...(notDrawn
+      ? {
+        notDrawn: {
+          hidden: {
+            notDisplayed: left.hidden.filter((entry) => entry.why === "unrendered").length,
+            markedHidden: left.hidden.filter((entry) => entry.why === "marked").length,
+            outOfReach: left.hidden.filter((entry) => entry.why === "unreachable").length,
+          },
+          hiddenOutsideMenu: left.hidden.filter((entry) => !entry.framed).length,
+          ...(notDrawnCover ? { cover: notDrawnCover } : {}),
+          ...(notLoaded.length ? { notLoaded } : {}),
+        },
+      }
+      : {}),
     ...(signInHint ? { signIn: signInHint } : {}),
   };
 }
@@ -4779,7 +5494,7 @@ class CoveredByNotice extends Error {
 
 async function clickLanding(target) {
   const landing = await target.locator
-    .evaluate(clickLandingInPage, { kind: "click-landing", selector: INTERACTIVE_SELECTOR, consent: CONSENT_NAMES_SOURCE })
+    .evaluate(CLICK_LANDING_IN_PAGE, { kind: "click-landing", selector: INTERACTIVE_SELECTOR, consent: CONSENT_NAMES_SOURCE })
     .catch(() => null);
   return landing && typeof landing.other === "boolean" ? landing : null;
 }
@@ -4952,18 +5667,27 @@ async function settledLanding(page, target, wait = {}) {
 // cover takes a control on its page, they say to try once more, and the page
 // keeps a mark of it (coveredBefore); the next time, the step is left to the
 // person. Told only to try again, a turn would ask the person again at every
-// try under a cover that stays.
+// try under a cover that stays. When what takes the click is the part the
+// control itself sits in (TakenByOwnPart), a plain link's address opens
+// instead (openLinkInstead).
 async function refuseCovered(page, target, landing) {
   if (landing.covered !== true) return;
   if (landing.consent === true) throw new CoveredByNotice();
   const control = quotedControlLabel(target.description);
   const cover = await coverWords(page, landing.cover);
-  throw new Error(
-    (await coveredBefore(page, target))
-      ? `Something else on the page still covers ${control}${cover}, so nothing was clicked. Leave this step to the person and tell them what covers it.`
-      : `Something else on the page covers ${control}${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`,
-  );
+  const words = (await coveredBefore(page, target))
+    ? `Something else on the page still covers ${control}${cover}, so nothing was clicked. Leave this step to the person and tell them what covers it.`
+    : `Something else on the page covers ${control}${cover}, so nothing was clicked. Take a fresh snapshot and try once more.`;
+  throw landing.own === true ? new TakenByOwnPart(words) : new Error(words);
 }
+
+// What a click throws when the page gives it to the part its control sits
+// in, not to the control: a menu that takes its links' pointer, or lays its
+// own backdrop over them. Nothing else is in the way, and the refusal named
+// that part as the cover: a menu's link was said to be covered by the menu's
+// own nav (a local test, Nov 20). A plain link has an address, which opens
+// instead; any other control keeps a covered click's words.
+class TakenByOwnPart extends Error {}
 
 // Runs inside the page. Whether a cover took the control on this page before,
 // marking it now. The mark is the document's, like the withheld mark
@@ -6707,7 +7431,7 @@ async function executeTabCommand(browser, method, requestPath, body, tabs) {
       const settled = await resolveExpectedPage(browser);
       await emitNavigationResult(settled);
       return withActivity(
-        { openedTab: true, ...(await snapshotForResult(settled, { decline: true })) },
+        { openedTab: true, ...(await readOnceDrawn(settled, () => snapshotForResult(settled, { decline: true }))) },
         stepActivity(settled, "open_tab", stepApproval()),
       );
     } catch (error) {
@@ -7623,7 +8347,10 @@ async function openPageStep(browser, page, rawUrl) {
   await settleAfterAction(page);
   page = await resolveExpectedPage(browser);
   await emitNavigationResult(page);
-  return withActivity(await snapshotForResult(page, { decline: true }), stepActivity(page, "navigate", stepApproval()));
+  return withActivity(
+    await readOnceDrawn(page, () => snapshotForResult(page, { decline: true })),
+    stepActivity(page, "navigate", stepApproval()),
+  );
 }
 
 // A click on a plain link that a cookie notice the browser could not decline
@@ -7851,7 +8578,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // within the page, ran nothing, and the step said its address was opened.
     // So does a plain link the page does not take a click on in time
     // (ClickNotTaken: one that keeps moving, or whose events something else
-    // takes): a museum's "Opening hours" link timed out after 17 seconds, the
+    // takes), and one the page gives no click of its own (TakenByOwnPart):
+    // a museum's "Opening hours" link timed out after 17 seconds, the
     // turn said that page did not finish loading, and the next message read
     // the hours at the link's address (a local test, Nov 17). A link whose
     // click began a load its site does not answer fails as such a load does,
@@ -7868,6 +8596,9 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       }
       if (error instanceof ClickNotTaken) {
         return await openLinkInstead(browser, page, rawDestination, `${quotedControlLabel(target.description)} did not take the click in time`);
+      }
+      if (error instanceof TakenByOwnPart) {
+        return await openLinkInstead(browser, page, rawDestination, `The page gives a click on ${quotedControlLabel(target.description)} to the part it sits in, not to the link`);
       }
       return null;
     };
@@ -7996,7 +8727,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // A click that checks or unchecks a box, a radio button or a switch on the
     // page it was on chooses an option: Details name it with the form's typing.
     const chose = !moved && isCheckableDescription(target.description);
-    const reading = await snapshotAfterStep(page, withholding);
+    const reading = await readOnceDrawn(page, () => snapshotAfterStep(page, withholding), { looked: unchanged });
     const withheld = reading.secretScreen === true;
     // Every click says what it hit and what it was seen to change
     // (clickedLine), or that the page reads as before, and names a field it

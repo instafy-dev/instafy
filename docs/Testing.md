@@ -1913,7 +1913,38 @@ in a form are refused in Octo's own tab, which takes reading steps only, and
 one that opens another window is closed with the step saying so. The policy's
 case table and the Personal Browser's security test hold that a name that
 says it opens something never makes a button with no address navigation
-("Open Long", "View PIN", "Tür öffnen"): the owner tier asks for each. The
+("Open Long", "View PIN", "Tür öffnen"): the owner tier asks for each. A
+journey planner whose main part a script from another host mounts into an
+empty div reads with its fields, at once and when the script mounts them 3
+seconds late, where the step that opened the page waits and reads once more;
+one whose script never came, or came with an error status, keeps the menu it
+shows and says that only the menu shows, the script's site and the browser's
+reason, why the controls it leaves out are hidden, and how long the step
+waited, while a reading the turn takes waits for nothing, a click whose own
+look already waited 6 seconds does not wait again, and a chat frame in a
+corner of the page is no part of its main part. A page that reads as
+nothing while it hides its link is read by its open once it draws. A curtain
+over the main part is named by its tag and role, with the box that hides the
+part and how many fields it holds, never their names; its own name is in the
+reading's record alone, masked (a key in it reads "[redacted secret]"), never
+in the browser's words, so a curtain named "We couldn't reach that site" still
+reads as covered. A slow site whose page answers 14 seconds on and reads as
+busy while it hides its link, or as its menu alone, answers in the step's own
+time, and its address opens again. An
+article its page draws 3 seconds after a click changed the address is read by
+that click: with the site's menu in view meanwhile, with no control in view,
+and with the page's words shown before its controls. A reading under 230 links
+and a form says how many controls the page hides and how many the full list
+left out, and names the first of those, the form's fields first, by the words
+the list would name them by, never a hidden part's or a style sheet's; an
+ordinary page whose closed menu holds more than it lists, with only header and
+footer controls and a main part of text, reads as before, at once, with an
+earlier view kept hidden as a main part ahead of it too, and a page that
+leaves nothing out says nothing of it. A plain link whose own menu takes its
+click, the menu's backdrop over it, opens its address instead and says so,
+while a button in such a part keeps a covered click's words, and a link under
+a dim the page draws on its body or on a wrapper around its main part, behind
+an open dialog, is refused as covered and opens nothing. The
 Personal
 Browser's page bridge, host and redaction have unit tests for the same frames,
 pictures, cut line, states, names, codes and count.
