@@ -131,8 +131,10 @@ use self::workspace_change_detection::GitStatusEntry;
 /// search carries whatever its words has a room of its own). `AGENTS.md`, read whole and first,
 /// took the rules on when to ask and on what a reply didn't find from the runtime's own lines and
 /// the skills (Nov 16), about 500 bytes, and the room grew by as much: the skills loaded after it,
-/// the router last of all, keep the room they had.
-const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_500;
+/// the router last of all, keep the room they had. So did the research skill, which a lookup's
+/// words load before the router, when it took the words on a page its reader couldn't read and on
+/// news and status pages read whole (Nov 22): about 280 bytes, and the room grew by 300.
+const PROJECT_MEMORY_MAX_TOTAL_BYTES: usize = 50_800;
 const PROJECT_MEMORY_MAX_FILE_BYTES: usize = 12_000;
 const PROJECT_MEMORY_MAX_OTHER_LEARNINGS: usize = 50;
 const PROMPT_REFERENCED_FILE_MAX_FILES: usize = 4;

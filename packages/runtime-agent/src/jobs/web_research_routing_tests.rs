@@ -1335,13 +1335,17 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
         .and_then(|rest| rest.split("\n## ").next())
         .expect("its section");
     assert!(search.contains("a web search on <date> found, on <that result's site>: …"));
-    // With no search, the line beside the answer that has no key, in a section a browser turn leaves out too.
+    // News or a score, searched or not: on the news line, which a turn reads before any search, in a section a
+    // browser turn leaves out too; no longer only beside the answer that has no key.
+    assert!(search.contains(
+        "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check."
+    ));
     let searching = RESEARCH_SKILL
         .split("\n## Searching\n")
         .nth(1)
         .and_then(|rest| rest.split("\n## ").next())
         .expect("Searching");
-    assert!(searching.contains("read the subject's own news or results page before saying it doesn't show or you couldn't check"));
+    assert!(!searching.contains("News or a score"));
     assert!(
         RESEARCH_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES,
         "{}",
