@@ -35,7 +35,11 @@ import {
 } from "../../../utils/agentAvatar";
 import { defaultAgentFace, hatchlingSeed, resolveAiFace, type Hatchling } from "../../../utils/aiFace";
 import { normalizeCustomAgentHandle } from "../../../assistants/localBuiltInAssistantCatalog";
-import { formatCredentialKind, resolveCredentialLabel } from "../../../utils/credentialFormatting";
+import {
+  formatCredentialKind,
+  resolveCredentialAccountHint,
+  resolveCredentialLabel,
+} from "../../../utils/credentialFormatting";
 import {
   AI_PROVIDER_OPTIONS,
   modelOptionsForProvider,
@@ -165,20 +169,6 @@ function resolveCredentialProviderId(
     return "gemini";
   }
   return "openai";
-}
-
-function resolveCredentialAccountHint(
-  credential: Pick<ControllerCredentialListItem, "kind" | "id" | "metadata">,
-): string | null {
-  const metadata = credential.metadata as Record<string, unknown> | null | undefined;
-  const accountId = typeof metadata?.account_id === "string" ? metadata.account_id.trim() : "";
-  if (credential.kind === "codex_auth_json" && accountId) {
-    return `acct …${accountId.slice(-6)}`;
-  }
-  if (credential.kind === "codex_auth_json") {
-    return `id …${credential.id.slice(0, 6)}`;
-  }
-  return null;
 }
 
 const CREDENTIAL_TEST_FAILURE_MAX_CHARS = 220;
