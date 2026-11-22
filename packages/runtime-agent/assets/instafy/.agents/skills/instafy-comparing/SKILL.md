@@ -30,8 +30,8 @@ For every reader and browser. Pages are found as "Finding a page" in `instafy-br
 
 - Requested reviews: that many per exact model, from independent publishers, not its maker/shops or a sibling model.
 - A review no page you read links to: the AI's own web search finds it ("<exact model> review") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.
-- With no search, open up to two reviewers' own sites that way and follow their links, and say which sites you tried. Only then is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.
-- A review nobody could look for (no reviewer's site could be tried) is "not checked" on the page and in the reply, and goes in neither line. The reply says once that you can't search for reviews here and offers to read a site the person names.
+- With no search, open up to two reviewers' own sites that way and follow their links. Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.
+- A review no reviewer's page could be read for (none could be tried, or each one stopped you) is "not checked" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.
 - Short: "<item>: 1 of 2 reviews found", in the reply and on the page, citing only those reviews.
 
 ## A value nobody found

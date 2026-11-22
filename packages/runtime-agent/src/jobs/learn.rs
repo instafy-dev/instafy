@@ -868,8 +868,9 @@ const LEGACY_COMPARING_SHA256: &[&str] = &[
     // page, or for dates from the place's own booking form.
     "ce1087c66c678cb4fcf2c07693b7aaa02f0ec79f6a3d17ce5dcf8f999ce82143", // v2
     // From before a review no page links to was looked for on up to two reviewers' own sites,
-    // with no search, before it counted as not found, one nobody could look for was "not
-    // checked", and "I didn't find" was only for a value looked for.
+    // with no search, and counted as not found only once a reviewer's page was read, one no
+    // reviewer's page could be read for was "not checked", and "I didn't find" was only for a
+    // value looked for.
     "68e895d6befa87ac4f44e96f3822478037d3b4a11d39eb364e63f89ce4167906", // v3
 ];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the

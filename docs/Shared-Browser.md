@@ -1171,9 +1171,11 @@ no times". A planner that showed no fields in a chat isn't opened the same way
 again there: its link and the start and stop to type in it are given instead. A
 comparison's models, those a page's menu names included, each read on its own
 page, and its reviews are `instafy-comparing`'s: with no search, a review no
-page links to is looked for on up to two reviewers' own sites, which the turn
-names, before it counts as not found, and one nobody could look for is "not
-checked", with one offer to read a site the person names.
+page links to is looked for on up to two reviewers' own sites, and counts as not
+found only once a reviewer's page was read; one no reviewer's page could be read
+for (none could be tried, or each one stopped the turn) is "not checked", and
+the reply names such reviews once, with an offer to read a site the person
+names, never what the turn can't do.
 A cookie banner is the browser's own: it declines one with its
 own reject button before Octo reads the page (above). A sign-in, a bot check,
 a paywall or a refused read ends that page, never the task: nothing a turn carries tells it to stop there, so neither a card's
@@ -3681,7 +3683,7 @@ unless the policy is `"covered"`.
   has no provider-hosted search tool, and its part says so. Its unread line
   names a page by its own address, or as a tab or link on a page it read, named
   with that page; a page it has neither for (a review no page it read links to,
-  once it has tried the reviewers' own sites) is a value it didn't find, for its
+  once it has read a reviewer's own page) is a value it didn't find, for its
   missing line: a comparison's first answer
   named such reviews as unread, and its second pass tried a search engine's
   results page twice, which the browser refused.
