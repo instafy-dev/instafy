@@ -124,7 +124,10 @@ impl Case {
         });
         // A chat of one person, as the controller leases its turn: the history ends with the
         // message, and it is what a card may name for Studio to open it by itself.
-        if matches!(self, Self::AWaitingCard | Self::RefusedTwice) {
+        if matches!(
+            self,
+            Self::AWaitingCard | Self::RefusedTwice | Self::AfterARead
+        ) {
             payload["conversation_history"] = json!([{"role":"user","content":self.request()}]);
             payload["metadata"]["groupParticipation"] = json!({
                 "decision":"respond","reason":"single_human_conversation",
