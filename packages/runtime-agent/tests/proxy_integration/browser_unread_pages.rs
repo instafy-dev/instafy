@@ -36,12 +36,25 @@ const SECOND_PASS_OPENING: &str = "Your unread line named pages this request sti
 const FIRST_WORDS: &str = "Read 2 pages on maker.example.";
 const READ_HOME: &str = r#"{"url": "https://maker.example/", "title": "Laptops", "facts": ["Lists the Laptop 12, 13 and 16."]}"#;
 const READ_13: &str = r#"{"url": "https://maker.example/laptops/13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
-/// The pages the turn's unread line names.
+/// The pages the turn's unread line names, each as that line asks: a link on the maker's home
+/// page, named with its site, or a page's own address.
 const UNREAD: [&str; 3] = [
-    "Laptop 12's own page",
-    "Laptop 16's own page",
+    "maker.example's Laptop 12 link",
+    "maker.example's Laptop 16 link",
     "https://reviews.example/laptop-12",
 ];
+/// What a fill-in whose only gap is reviews names unread: wishes, with no address and no tab or
+/// link on a page it read, beside the same value in its missing line.
+const WISHES: [&str; 3] = [
+    "independent reviews of Laptop 12",
+    "independent reviews of Laptop 13",
+    "independent reviews of Laptop 16",
+];
+const MISSING_REVIEWS: &str = r#"{"missing": ["reviews"]}"#;
+/// What the turn's missing line names once the runtime has taken those wishes for what they are.
+const MISSING_WITH_WISHES: &str = r#"{"missing":["reviews","independent reviews of Laptop 12","independent reviews of Laptop 13","independent reviews of Laptop 16"]}"#;
+/// A tab and a link on pages the turn read, named with their pages by their titles.
+const ON_PAGES_READ: [&str; 2] = ["Laptop 13's Specs tab", "the Laptops page's Laptop 12 link"];
 const SECOND_WORDS: &str = "Read 3 more pages on maker.example and reviews.example.";
 const READ_12: &str = r#"{"url": "https://maker.example/laptop-12", "title": "Laptop 12", "facts": ["Weight: 1.3 kg"]}"#;
 const READ_16: &str = r#"{"url": "https://maker.example/laptop-16", "title": "Laptop 16", "facts": ["Battery: 85 Wh"]}"#;
@@ -235,6 +248,25 @@ fn a_turn_whose_only_line_was_a_refused_address_still_reads_its_unread_pages_via
     run_on_a_large_stack(Case::RefusedOnlyLine)
 }
 
+/// A fill-in whose only gap is reviews: its unread line names three wishes, with no address and
+/// no tab or link on a page it read. No second pass starts for them, so nothing is opened and
+/// nobody is asked anything: the turn ends after its one pass, and its missing line names them.
+/// Sent to a second pass as pages to "read only", they had it open a search engine nobody named
+/// by its home page, type the search there and leave the person a prompt for it, which ran out
+/// (a local test, Nov 20). A tab and a link on pages the turn read, named beside the same
+/// wishes, still get their pass, told only those two.
+#[test]
+fn unread_entries_that_are_no_page_start_no_second_pass_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::unread_pages::unread_entries_that_are_no_page_start_no_second_pass_via_proxy",
+            "browser-unread-pages-wishes",
+        );
+    }
+    run_on_a_large_stack(Case::Wishes)
+}
+
 /// The address the browser refused for the turn's step, and the line the turn wrote for it.
 const REFUSED: &str = DEVICE_REFUSED;
 const REFUSED_AS_NO_PAGE: &str =
@@ -262,6 +294,8 @@ enum Case {
     SecondPassPauses,
     /// The second pass opens a page on the device's browser and writes no finding line.
     SecondPassWritesNoLines,
+    /// The turn's unread line names only wishes: no address, and no tab or link on a page read.
+    Wishes,
 }
 
 impl Case {
@@ -396,6 +430,10 @@ async fn provider_request(
             Case::RefusedOnlyLine => final_answer(&format!(
                 "{REFUSED_FIRST_WORDS}\n{REFUSED_AS_NO_PAGE}\n{}",
                 unread_line(&UNREAD)
+            )),
+            Case::Wishes => final_answer(&format!(
+                "{FIRST_WORDS}\n{READ_HOME}\n{READ_13}\n{MISSING_REVIEWS}\n{}",
+                unread_line(&WISHES)
             )),
             _ => final_answer(&first_answer()),
         };
@@ -610,6 +648,7 @@ async fn run_case(case: Case) -> Result<()> {
         Case::NotFoundLink => {
             the_link_for_a_value_not_found_is_read(&workspace, project_id, &state).await?
         }
+        Case::Wishes => wishes_start_no_second_pass(&workspace, project_id, &state).await?,
         Case::SecondPassPauses | Case::SecondPassWritesNoLines => {
             let calls = second_pass_on_the_device(&workspace, project_id, &state, case).await?;
             let browser = &device.as_ref().context("the device's browser")?.0;
@@ -1088,6 +1127,105 @@ async fn words_then_the_wrap_up_then_a_second_pass(
     assert_eq!(
         summary,
         format!("{FIRST_PROSE}\n\n{READ_HOME}\n{READ_13}\n{QUESTION_MISSING}")
+    );
+    Ok(())
+}
+
+/// The turn read two pages, named reviews missing and three wishes unread. It ends after its one
+/// pass: no request but the turn's own reaches the provider, no step is taken, and its missing
+/// line names the wishes, which its note keeps for the build. With a tab and a link on pages it
+/// read beside the same wishes, one second pass is told only those two.
+async fn wishes_start_no_second_pass(
+    workspace: &Path,
+    project_id: Uuid,
+    state: &Provider,
+) -> Result<()> {
+    let client = CodexClient::new(CodexConfig {
+        workspace_dir: workspace.to_path_buf(),
+    });
+    let options = CodexRunOptions {
+        persist_conversation_thread: true,
+        ..Default::default()
+    };
+    let turn = the_turn(&client, &options).await?;
+    let mut summary = turn.final_json["summary"]
+        .as_str()
+        .context("the turn's answer")?
+        .to_string();
+    assert!(summary.ends_with(&unread_line(&WISHES)), "{summary}");
+    let job = browser_job(project_id, true);
+    let task_usage = TaskUsage::default();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &job,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &task_usage,
+        ),
+    )
+    .await
+    .context("the end of the turn timed out")?;
+    assert!(second_passes(state).is_empty(), "no second pass on a wish");
+    assert_eq!(state.requests.lock().unwrap().len(), 1, "the turn only");
+    assert!(ended.artifacts.is_empty(), "{:?}", ended.artifacts);
+    assert!(ended.messages.is_empty(), "no step was taken");
+    assert!(task_usage.artifact().is_none(), "no pass was started");
+    assert_eq!(
+        summary,
+        format!("{FIRST_WORDS}\n{READ_HOME}\n{READ_13}\n{MISSING_WITH_WISHES}")
+    );
+    // Its note keeps what it didn't find, the wishes among it, for the build after it.
+    let mut done = runtime_agent::jobs::JobExecution {
+        summary,
+        suggested_replies: Vec::new(),
+        provider: "codex-embedded".to_string(),
+        artifacts: Vec::new(),
+        provider_conversation_state: None,
+        messages: Vec::new(),
+        messages_streamed: false,
+        final_messages: Vec::new(),
+    };
+    move_findings_into_details(&job, &mut done);
+    assert_eq!(done.summary, "", "a hand-back follows: no reply bubble");
+    assert_eq!(
+        done.final_messages[0].content,
+        format!("{FIRST_WORDS}\n\n{READ_HOME}\n{READ_13}\n{MISSING_WITH_WISHES}")
+    );
+
+    // A tab and a link on pages it read, beside the same wishes: one pass, told only those two.
+    let named: Vec<&str> = WISHES.iter().chain(&ON_PAGES_READ).copied().collect();
+    let mut summary = format!(
+        "{FIRST_WORDS}\n{READ_HOME}\n{READ_13}\n{MISSING_REVIEWS}\n{}",
+        unread_line(&named)
+    );
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        end_browser_turn_answer(
+            &client,
+            &job,
+            its_answer(&options, &turn)?,
+            &mut summary,
+            &TaskUsage::default(),
+        ),
+    )
+    .await
+    .context("the second pass timed out")?;
+    let passes = second_passes(state);
+    assert_eq!(passes.len(), 1, "one second pass");
+    assert_eq!(state.requests.lock().unwrap().len(), 2, "and no third");
+    let asked = last_user_text(&passes[0]);
+    assert!(
+        asked.contains(&serde_json::to_string(&ON_PAGES_READ).unwrap()),
+        "{asked}"
+    );
+    assert!(!asked.contains("independent reviews"), "{asked}");
+    // The second pass wrote no missing line, so the turn's stays, the wishes in it.
+    let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
+    assert_eq!(
+        summary,
+        format!("{FIRST_WORDS}\n{MISSING_WITH_WISHES}\n\n{SECOND_WORDS}\n\n{lines}")
     );
     Ok(())
 }

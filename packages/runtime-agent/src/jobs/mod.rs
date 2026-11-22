@@ -11227,6 +11227,9 @@ impl JobProcessor {
             held_pages.reply(&mut retry_outcome.summary, &retry_outcome.files);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_unopened_pages);
             save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
+            // As after a first attempt: a step its browser part didn't take ends the build's reply
+            // in the runtime's one line.
+            end_with_the_step_not_done(job, &mut retry_outcome.summary);
             user_input_request::append_outcome_artifact(&mut retry_artifacts, &retry_outcome);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
@@ -11524,6 +11527,9 @@ impl JobProcessor {
                 "metadata": { "reason": "another_chats_page" },
             }));
         }
+        // A step the browser part before this build didn't take, because of the person's answer
+        // to its prompt: the runtime's one line for it ends the build's reply.
+        end_with_the_step_not_done(job, &mut outcome.summary);
         user_input_request::append_outcome_artifact(&mut artifacts, &outcome);
         Ok(JobExecution {
             summary: outcome.summary,
@@ -17181,8 +17187,8 @@ fn apply_terminal_shared_browser_summary(
 /// when it wrote no finding line (`browser_hand_back::add_the_pages_it_opened`).
 /// The runtime's line for that step ([`terminal_shared_browser_summary`]) goes
 /// under its words, unless a build answers after it
-/// (`browser_hand_back::its_build_answers`), which says which step didn't run
-/// and that it can ask again. Replaced with that line, the words of a turn that
+/// (`browser_hand_back::its_build_answers`): that build's reply ends in the
+/// same line ([`end_with_the_step_not_done`]). Replaced with that line, the words of a turn that
 /// had read what it was asked reached no one, and held back as a pause, the
 /// page its message asked for was never made (a local test, Nov 19).
 fn end_on_the_persons_answer(
@@ -17200,6 +17206,24 @@ fn end_on_the_persons_answer(
     if !browser_hand_back::its_build_answers(job.payload.get("metadata"), summary) {
         browser_hand_back::add_under_the_words(summary, terminal_shared_browser_summary(code));
     }
+}
+
+/// Ends the reply of the build after a browser part whose step a person's answer to its prompt
+/// ended (`browser_hand_back::step_not_done_code`) with the runtime's line for that step
+/// ([`terminal_shared_browser_summary`]), once, after everything else the reply says: what
+/// happened to the step and what the person does next, in the words a browser turn with no build
+/// after it ends in. Left to the build, an expired prompt's reply said "the browser's form step
+/// wasn't completed because it received no answer" and never that Octo can ask again (a local
+/// test, Nov 20). An empty reply stays empty, as a build that answers with nothing but a card
+/// posts it alone (`post_only_the_card`), and so does a decline (`NO_RESPONSE`).
+fn end_with_the_step_not_done(job: &LeaseJob, summary: &mut String) {
+    let Some(code) = browser_hand_back::step_not_done_code(job.payload.get("metadata")) else {
+        return;
+    };
+    if summary.trim().is_empty() || participation_decline_sentinel(summary) {
+        return;
+    }
+    save_report::append_not_saved(summary, &[terminal_shared_browser_summary(code).to_string()]);
 }
 
 /// What the person reads when a Shared Browser run ended on its approval
@@ -17220,7 +17244,7 @@ fn terminal_shared_browser_summary(code: &str) -> &'static str {
         }
         // What they do next: the step is final, so the turn tries nothing else.
         "approval_denied" => {
-            "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead."
+            "You said no, so that step didn't happen, and nothing from it was sent. Tell me what to try instead."
         }
         // The page moved to another site after the person's yes, or a
         // second yes in the run was left unused because the control changed.
@@ -18119,7 +18143,10 @@ struct UnreadPagesRead {
 /// needs that it didn't open (`browser_hand_back::UNREAD_LINE`). When it names any, the runtime
 /// runs the turn once more on its own thread, told only those pages, before the build, and adds
 /// what that second pass read to the turn's answer; the second pass's own unread line starts no
-/// third. Never after a Stop, nor when the turn stopped for the person (a sign-in or cookie
+/// third. Only for an entry a pass can open, one with its own address or a tab or link on a page
+/// the turn read: any other is a value the turn didn't find, which starts no pass and joins its
+/// missing line (`browser_hand_back::take_pages_to_read`). Never after a Stop, nor when the turn
+/// stopped for the person (a sign-in or cookie
 /// pause, a step's approval that ended it, a secret) or the browser refused one of its steps as
 /// theirs: the page needs the person. Nor when its answer, as the turn wrote it, holds no finding
 /// line: the wrap-up pass asks for the lines of the pages it read first ([`end_browser_turn_answer`]),
@@ -18153,7 +18180,15 @@ async fn read_the_unread_pages(
         &turn.pages,
         &turn.tried,
     );
-    let pages = browser_hand_back::take_unread_pages(summary);
+    // Only the entries a pass can open: one with no address, and no tab or link on a page the
+    // turn read, is a value it didn't find, which its missing line now names. Without its
+    // finding lines nothing says which pages it read: the wrap-up pass asks for them and for
+    // its unread line again, which is read here then, so this one is only taken out.
+    let pages = if wrote_lines {
+        browser_hand_back::take_pages_to_read(summary)
+    } else {
+        browser_hand_back::take_unread_pages(summary)
+    };
     let canceled = turn
         .options
         .cancel_signal
@@ -34114,7 +34149,7 @@ mod tests {
             let expected = match code {
                 // What they do next, since the turn tries nothing else.
                 "approval_denied" => {
-                    "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead."
+                    "You said no, so that step didn't happen, and nothing from it was sent. Tell me what to try instead."
                 }
                 // Not a safety stop: the person said yes, and the page moved on.
                 "approval_stale" => {
@@ -34260,7 +34295,7 @@ mod tests {
             ),
             (
                 "approval_denied",
-                "You said no, so that step didn't happen, and nothing from it was sent. Tell Octo what to try instead.",
+                "You said no, so that step didn't happen, and nothing from it was sent. Tell me what to try instead.",
             ),
         ] {
             let job = browser_then_build_job();
@@ -34383,9 +34418,9 @@ mod tests {
         ));
     }
 
-    /// After a Deny, a part whose build answers posts no runtime line for that step, which its
-    /// build says with the offer to ask again: under the part's own words, "Tell Octo what to try
-    /// instead." came right before the build's answer. A stop it wrote for the page of the step
+    /// After a Deny, a part whose build answers posts no runtime line for that step, which ends
+    /// its build's reply ([`end_with_the_step_not_done`]): under the part's own words, "Tell Octo
+    /// what to try instead." came right before the build's answer. A stop it wrote for the page of the step
     /// the person said no to is no stop, so a part that read pages posts nothing; one that a page
     /// elsewhere stopped posts its own words alone (a local test, Nov 19: the tip's part wrote
     /// `blocked` for the planner page it had read, beside what it read there).
@@ -34443,10 +34478,116 @@ mod tests {
             assert_eq!(execution.summary, posted, "{elsewhere}");
             let note = &execution.final_messages[0].content;
             assert!(!note.contains(&refused), "{note}");
-            assert!(!note.contains("Tell Octo what to try instead."), "{note}");
+            assert!(!note.contains("what to try instead."), "{note}");
             assert!(note.contains(museum) && note.contains(read), "{note}");
             assert_eq!(note.contains(paywall), !elsewhere.is_empty(), "{note}");
         }
+    }
+
+    /// One ending for a step that didn't run, in one voice: the build after a browser part whose
+    /// step a person's answer ended has the runtime's own line for that answer under its reply,
+    /// once, as a browser turn with no build after it has. The build is asked only to write "not
+    /// checked" where that step's value would go and never to try it again: asked to say which
+    /// step didn't run and to offer to ask again, an expired prompt's build wrote "the browser's
+    /// Google form step wasn't completed because it received no answer, so those reviews remain
+    /// not checked", with no offer (a local test, Nov 20). And a denied turn with no build after
+    /// it says it once: its own account and next step ("submit the order on the page yourself")
+    /// came right above the runtime's, which read "Tell Octo what to try instead."
+    #[test]
+    fn a_step_that_didnt_run_ends_a_reply_in_the_runtimes_one_line() {
+        let expired = "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again.";
+        let denied = "You said no, so that step didn't happen, and nothing from it was sent. Tell me what to try instead.";
+        let stale = "The page changed after you said yes, so I didn't do that step. Send a message and I'll ask again.";
+        let build_after = |step_not_done: JsonValue| {
+            test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": "Continue with the browser's findings.",
+                    "metadata": { "browserHandBack": {
+                        "version": 1,
+                        "verified": true,
+                        "reply": "",
+                        "personRequest": "Fill in what's still missing.",
+                        "findings": [{
+                            "url": "https://maker.example/laptop-12",
+                            "title": "Laptop 12",
+                            "facts": ["Weight: 1.3 kg"],
+                        }],
+                        "missing": ["reviews"],
+                        "stepNotDone": step_not_done,
+                    } },
+                }),
+            )
+        };
+        let reply = "Added the Laptop 12's weight to the comparison. Its reviews read \"not checked\".";
+        for (answer, line) in [("expired", expired), ("denied", denied), ("stale", stale)] {
+            let job = build_after(json!({
+                "answer": answer, "step": "search", "host": "search.example",
+            }));
+            // What the build reads of that step: "not checked" for its cells, never to try it
+            // again, and no line of its own to write about it.
+            let section =
+                browser_hand_back::format_browser_hand_back_section(job.payload.get("metadata"))
+                    .expect("the build's hand-back");
+            assert!(
+                section.contains(
+                    "Wherever a value only that step would give goes, write \"not checked\", in place of `notFound`'s words for it."
+                ),
+                "{section}"
+            );
+            for asked in ["Say in one line", "that you can ask again"] {
+                assert!(!section.contains(asked), "{answer}: {asked}");
+            }
+            // Its reply ends in the runtime's line, once, however often the end is reached.
+            let mut summary = format!("{reply}\n");
+            end_with_the_step_not_done(&job, &mut summary);
+            assert_eq!(summary, format!("{reply}\n\n{line}"), "{answer}");
+            end_with_the_step_not_done(&job, &mut summary);
+            assert_eq!(summary.matches(line).count(), 1, "{answer}");
+            // An empty reply stays empty, as a build that answers with nothing but a card posts
+            // it alone, and a decline stays the bare word the controller keeps out of the chat.
+            for kept in ["", "NO_RESPONSE"] {
+                let mut summary = kept.to_string();
+                end_with_the_step_not_done(&job, &mut summary);
+                assert_eq!(summary, kept, "{answer}");
+            }
+        }
+        // No such step, an answer that is none of the person's, a record the controller didn't
+        // check, a browser turn and any other turn: the reply stays as it is.
+        let mut unchecked = build_after(json!({ "answer": "expired", "step": "search" }));
+        unchecked.payload["metadata"]["browserHandBack"]["verified"] = json!(false);
+        for job in [
+            build_after(JsonValue::Null),
+            build_after(json!({ "answer": "allowed", "step": "search" })),
+            unchecked,
+            browser_then_build_job(),
+            test_lease_job(Some("feature"), json!({ "prompt_text": "Make a page." })),
+        ] {
+            let mut summary = reply.to_string();
+            end_with_the_step_not_done(&job, &mut summary);
+            assert_eq!(summary, reply);
+        }
+
+        // A denied turn with no build after it: its words, then the line, once; a turn that
+        // wrote the line itself has it once too.
+        let question = test_lease_job(
+            Some("feature"),
+            json!({
+                "browser_hand_back_after_a_prompt": true,
+                "metadata": { "browserTransport": "shared" },
+            }),
+        );
+        let words = "I filled in the order form with a medium pizza and the delivery time.";
+        for wrote in [words.to_string(), format!("{words}\n\n{denied}")] {
+            let mut summary = wrote;
+            end_on_the_persons_answer(&question, &mut summary, &mut None, "approval_denied", &[]);
+            assert_eq!(summary, format!("{words}\n\n{denied}"));
+        }
+        assert!(!denied.contains("Octo"), "{denied}");
+        // Nothing the turn reads asks it for an ending of its own: its run instructions say only
+        // that the step is final (`codex`'s `a_step_that_ran_out_of_its_own_time_goes_on_from_a_snapshot`),
+        // and the step's own answer says that Instafy tells the person
+        // (`shared_browser`'s `mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result`).
     }
 
     /// The run's artifact names the step that ended it, never a later call, which asked the

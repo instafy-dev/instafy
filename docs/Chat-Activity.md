@@ -302,7 +302,7 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   written. A turn whose browser step
   ended its run on the approval lane (a step the person said no to or left, or a page waiting for
   their input) shows no draft: the runtime replies with its own sentence ("You said no, so that
-  step didn't happen, and nothing from it was sent. Tell Octo what to try instead."), never the
+  step didn't happen, and nothing from it was sent. Tell me what to try instead."), never the
   model's words before it. The file
   changes stay under the reply and its cards. Run traces keep their full view.
 - Octo is not asked for replies the person could send next, and none is shown or sent for them:

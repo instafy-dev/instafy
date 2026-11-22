@@ -3423,17 +3423,22 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
             true,
         ),
         // Unanswered is not a denial, but it still ends the browser for this
-        // turn, so prompts never chain while the person is away.
+        // turn, so prompts never chain while the person is away. That the step
+        // wasn't done, and that a new message asks again, is the runtime's one
+        // line under the reply (`jobs::terminal_shared_browser_summary`): the
+        // turn says neither.
         "approval_timeout" => (
-            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.".to_string(),
+            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Instafy tells them the step wasn't done and that a new message asks again: your reply says neither.".to_string(),
             false,
         ),
         // The person said no: the words a turn repeats in its note, and why it tries nothing
         // else. Told the run's consent was blocked and to start a fresh run, a browser part
         // repeated those words in its Details note (a local test, Nov 8). A later call reads
-        // [`terminal_consent_later_call_result`].
+        // [`terminal_consent_later_call_result`]. The runtime's one line under the reply says
+        // the step didn't happen and asks what to try instead: a turn that said so too ended a
+        // denied submit with two endings and two next steps (a local test, Nov 20).
         "approval_denied" => (
-            "The person said no, so this step didn't happen. Don't try it another way.".to_string(),
+            "The person said no, so this step didn't happen. Don't try it another way. Instafy tells them so and asks what to try instead: your reply says neither.".to_string(),
             true,
         ),
         _ => (

@@ -1841,7 +1841,11 @@ opens" only on a site the chat was given (the person's messages or the task
 named an address on it, or the site's name alone, or the chat's browser turns
 read a page on it past its root, which opens without anyone giving it; a page's
 link or text gives its address, never its site), and otherwise "a site's home
-page always opens", which names no site; then "Go on in this turn as "Finding a
+page always opens", which names no site, unless the refused address is a search
+(it carries a query): a search nobody gave on a site nobody gave is told of no
+home page, though one still opens. Told one always opens, a turn refused a
+search engine's results address opened that engine's home page, typed the
+search and left the person a prompt for it. Then "Go on in this turn as "Finding a
 page" says." Told instead to open the official site of what the task names, a
 turn tried a path it made up on a bookshop's site and ended without the opening
 hours its home page showed. Sent to the root of whatever site it refused, a
@@ -2054,9 +2058,10 @@ while the person is away. What the person reads tells the two apart, with no cod
 prompt, gone by then, reads "Your OK didn't come in time, so I didn't do that
 step. Send a message when you're ready and I'll ask again.", never that Octo is
 still waiting, a denial reads "You said no, so that step didn't
-happen, and nothing from it was sent. Tell Octo what to try instead.", and the
+happen, and nothing from it was sent. Tell me what to try instead.", and the
 step tells the turn "The person said no, so this step didn't happen. Don't try
-it another way." and each later call of the run "The person said no to an
+it another way. Instafy tells them so and asks what to try instead: your reply
+says neither." and each later call of the run "The person said no to an
 earlier step, so the browser is done for this turn. End this turn now.",
 `approval_stale` (the page changed after the yes) reads "The page changed
 after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
@@ -2072,10 +2077,11 @@ is left out, unless the browser told a step that very stop there, since the
 step never reached its page. A question's turn says the line under its words.
 A turn whose findings go back to its build hands them back as any finished
 turn does, without the line, and one that read no page hands its build the
-message; that build makes the change from what was read, writes "not checked"
-in place of what it didn't find where only that step would give a value, and
-says in one line which step didn't run and that it can ask again, without
-trying it again or getting its values another way. Every other end (a pause
+message; that build makes the change from what was read and writes "not checked"
+in place of what it didn't find where only that step would give a value,
+without trying it again or getting its values another way, and the runtime
+ends the build's reply with the same line. Neither turn is asked to say which
+step didn't run: the line says it, once, the same every time. Every other end (a pause
 the person continues in the browser, a safety stop, the browser gone, and any
 end under an older controller, which would refuse the hand-back of a part that
 posted no words) replaces the turn's words with its line and holds the build
@@ -2083,8 +2089,12 @@ back, as Studio and the controller judge it too. The code, with the kind and
 site of the step that ended the run, stays in the run's
 `browser/terminal-consent` artifact, which the controller reads for the
 build's `stepNotDone`. The tool result tells
-the model that an unanswered prompt is not a denial and that it must end the
-turn without retrying.
+the model that an unanswered prompt is not a denial, that it must end the
+turn without retrying, and that Instafy, not its reply, says the step wasn't
+done; the turn's run instructions say only that such a step is final. Told to
+say which step did not go through, a denied submit's turn ended with its own
+account and next step ("submit the order on the page yourself") right above
+the line.
 
 A run also stops when Instafy's browser goes away under it. The controller
 exits with code 75 when it cannot connect to the browser over CDP, when the
@@ -3588,7 +3598,13 @@ unless the policy is `"covered"`.
   address, and a turn whose answer holds no finding line gets the wrap-up pass
   below first, which also asks for its unread line, and the second pass then
   reads the pages that line names. A page its finding lines list already, read or
-  stopped at, is never one the second pass is told to read. The second pass's
+  stopped at, is never one the second pass is told to read. Nor is an entry
+  with no address that names no tab or link on a page the turn read (by that
+  page's title or site, as "<page>'s <link> link" or "linked from <page>"): it
+  is a value the turn didn't find, so it starts no pass and joins the turn's
+  missing line. Sent to the pass as pages to read, three such entries
+  ("independent reviews of <model>") had it open a search engine nobody named,
+  type the search and leave the person a prompt for it. The second pass's
   own unread line starts no third pass, and it ends with its own missing line
   too, told to name each value still missing after both passes: when its
   findings join the turn's, that line replaces the first pass's, which stays
