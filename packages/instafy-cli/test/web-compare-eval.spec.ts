@@ -436,7 +436,7 @@ describe("the shopping comparison eval (fixtures)", () => {
     const browser = flat(fs.readFileSync(path.join(skills, "instafy-browser-automation/SKILL.md"), "utf8"));
     for (const rule of [
       "## Finding a page",
-      "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.",
+      "A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task.",
       "then the official site of what the task names; then another official source.",
       // a stopped page ends that page, never the research: the next source is "Finding a page"'s
       "ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
