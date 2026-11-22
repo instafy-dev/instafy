@@ -36,15 +36,15 @@ const SECOND_PASS_OPENING: &str = "Your unread line named pages this request sti
 const FIRST_WORDS: &str = "Read 2 pages on maker.example.";
 const READ_HOME: &str = r#"{"url": "https://maker.example/", "title": "Laptops", "facts": ["Lists the Laptop 12, 13 and 16."]}"#;
 const READ_13: &str = r#"{"url": "https://maker.example/laptops/13", "title": "Laptop 13", "facts": ["Battery: 74 Wh"]}"#;
-/// The pages the turn's unread line names, each as that line asks: a link on the maker's home
-/// page, named with its site, or a page's own address.
+/// The pages the turn's unread line names: two models' pages the maker's home page lists
+/// (`READ_HOME`), by their names, and a page's own address.
 const UNREAD: [&str; 3] = [
-    "maker.example's Laptop 12 link",
-    "maker.example's Laptop 16 link",
+    "Laptop 12's own page",
+    "Laptop 16's own page",
     "https://reviews.example/laptop-12",
 ];
-/// What a fill-in whose only gap is reviews names unread: wishes, with no address and no tab or
-/// link on a page it read, beside the same value in its missing line.
+/// What a fill-in whose only gap is reviews names unread: wishes, with no address and no page of
+/// theirs named with a page it read, beside the same value in its missing line.
 const WISHES: [&str; 3] = [
     "independent reviews of Laptop 12",
     "independent reviews of Laptop 13",
@@ -249,12 +249,12 @@ fn a_turn_whose_only_line_was_a_refused_address_still_reads_its_unread_pages_via
 }
 
 /// A fill-in whose only gap is reviews: its unread line names three wishes, with no address and
-/// no tab or link on a page it read. No second pass starts for them, so nothing is opened and
-/// nobody is asked anything: the turn ends after its one pass, and its missing line names them.
-/// Sent to a second pass as pages to "read only", they had it open a search engine nobody named
-/// by its home page, type the search there and leave the person a prompt for it, which ran out
-/// (a local test, Nov 20). A tab and a link on pages the turn read, named beside the same
-/// wishes, still get their pass, told only those two.
+/// no page of theirs named with a page it read. No second pass starts for them, so nothing is
+/// opened and nobody is asked anything: the turn ends after its one pass, and its missing line
+/// names them. Sent to a second pass as pages to "read only", they had it open a search engine
+/// nobody named by its home page, type the search there and leave the person a prompt for it,
+/// which ran out (a local test, Nov 20). A tab and a link on pages the turn read, named beside
+/// the same wishes, still get their pass, told only those two.
 #[test]
 fn unread_entries_that_are_no_page_start_no_second_pass_via_proxy() -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
@@ -294,7 +294,7 @@ enum Case {
     SecondPassPauses,
     /// The second pass opens a page on the device's browser and writes no finding line.
     SecondPassWritesNoLines,
-    /// The turn's unread line names only wishes: no address, and no tab or link on a page read.
+    /// The turn's unread line names only wishes: no address, and no page named with a page read.
     Wishes,
 }
 
@@ -458,6 +458,10 @@ async fn provider_request(
         (Case::SecondPassWritesNoLines, _) => final_answer(SECOND_PROSE),
         (Case::Reads, _) => final_answer(&format!(
             "{SECOND_WORDS}\n{READ_12}\n{READ_16}\n{READ_12_REVIEW}\n{MISSING_SECOND}\n{}",
+            unread_line(&[STILL_UNREAD])
+        )),
+        (Case::Wishes, _) => final_answer(&format!(
+            "{SECOND_WORDS}\n{READ_12}\n{READ_16}\n{READ_12_REVIEW}\n{MISSING_REVIEWS}\n{}",
             unread_line(&[STILL_UNREAD])
         )),
         _ => final_answer(&second_answer()),
@@ -1134,7 +1138,8 @@ async fn words_then_the_wrap_up_then_a_second_pass(
 /// The turn read two pages, named reviews missing and three wishes unread. It ends after its one
 /// pass: no request but the turn's own reaches the provider, no step is taken, and its missing
 /// line names the wishes, which its note keeps for the build. With a tab and a link on pages it
-/// read beside the same wishes, one second pass is told only those two.
+/// read beside the same wishes, one second pass is told only those two, and its own missing line
+/// then names what is still missing.
 async fn wishes_start_no_second_pass(
     workspace: &Path,
     project_id: Uuid,
@@ -1221,11 +1226,13 @@ async fn wishes_start_no_second_pass(
         "{asked}"
     );
     assert!(!asked.contains("independent reviews"), "{asked}");
-    // The second pass wrote no missing line, so the turn's stays, the wishes in it.
+    // The second pass ends with its own missing line, as every real one did: what is still
+    // missing after both passes, the value the wishes were for among it. That line replaces the
+    // turn's, the wishes in it, as it replaces every name of the first pass's.
     let lines = [READ_HOME, READ_13, READ_12, READ_16, READ_12_REVIEW].join("\n");
     assert_eq!(
         summary,
-        format!("{FIRST_WORDS}\n{MISSING_WITH_WISHES}\n\n{SECOND_WORDS}\n\n{lines}")
+        format!("{FIRST_WORDS}\n\n{SECOND_WORDS}\n{MISSING_REVIEWS}\n\n{lines}")
     );
     Ok(())
 }

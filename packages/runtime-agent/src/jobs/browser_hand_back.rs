@@ -5167,10 +5167,18 @@ mod tests {
             assert!(section.contains(
                 "Don't try it again, or get its values another way (another page, a search or a tool), in this turn."
             ));
-            // The step is said once, by the runtime: the build is asked for no line about it.
+            // The step is said once, by the runtime: the build is asked for no line about it, and
+            // told, as the browser turn is by the step's own answer, that its reply says neither
+            // that the step wasn't done nor what the person can do.
             for asked in ["Say in one line", "ask again", "which step didn't run"] {
                 assert!(!section.contains(asked), "{asked}: {section}");
             }
+            assert!(
+                section.contains(
+                    "Instafy tells the person under your reply that the step wasn't done and what they can do: your reply says neither."
+                ),
+                "{section}"
+            );
             assert_eq!(step_not_done_code(Some(&metadata)), Some(code), "{answer}");
             assert!(crate::shared_browser_activity::ANSWER_CODES.contains(&code));
             // Only on a record the controller checked.
@@ -6163,14 +6171,17 @@ mod tests {
     }
 
     /// The runtime holds each unread entry to what its line asks before a second pass starts
-    /// ([`take_pages_to_read`]): an entry with no address that names no tab or link on a page the
-    /// turn read is a value it didn't find, so no pass is told to read it, and the answer's
-    /// missing line names it. A fill-in whose only gap was reviews read the maker's page, had a
-    /// search address refused and ended as told, with three wishes in its unread line; told to
-    /// "read only those now", its pass opened a search engine nobody named by its home page,
+    /// ([`take_pages_to_read`]): an entry with no address that names its page, tab or link with
+    /// no page the turn read is a value it didn't find, so no pass is told to read it, and the
+    /// answer's missing line names it. A fill-in whose only gap was reviews read the maker's page,
+    /// had a search address refused and ended as told, with three wishes in its unread line; told
+    /// to "read only those now", its pass opened a search engine nobody named by its home page,
     /// typed the search and left the person a prompt for it (a local test, Nov 20). An entry with
-    /// its own address, a site's name included, and a tab or link named on a page read still go
-    /// to the pass, as the warranty behind a product page's own link did (a local test, Nov 8).
+    /// its own address, a site's name included, and one named with a page or site the turn read,
+    /// in the shapes turns write, still go to the pass, as the warranty behind a product page's
+    /// own link did (a local test, Nov 8): a site's news releases by the site's name, a tab by a
+    /// model's one word or one digit, the other models' pages a page read lists, and a reviewer's
+    /// site read, which passes told every entry went to (a local test, Nov 20).
     #[test]
     fn an_unread_entry_that_is_no_page_starts_no_pass_and_is_named_missing() {
         let read = r#"{"url": "https://maker.example/products/laptop-12", "title": "Laptop 12 | Maker", "facts": ["Weight: 1.3 kg"]}"#;
@@ -6221,15 +6232,18 @@ mod tests {
             format!("{read}\n{}", json!({ "missing": [wishes[0]] }))
         );
 
-        // What a pass can open goes to it, as the turn wrote it and in its order: a tab or a
-        // link named on the page it read, by that page's title, by a part of it or by its
-        // site's name, and an entry with an address of its own, a reviewer's home page by its
-        // site's name included. The wishes beside them still go to the missing line.
+        // What a pass can open goes to it, as the turn wrote it and in its order: a page, tab or
+        // link named with the page it read, by that page's title, by words of it or by its
+        // site's name, after "'s", "from" or "on … page", and an entry with an address of its
+        // own, a reviewer's home page by its site's name included. The wishes beside them still
+        // go to the missing line.
         let pages = [
             "Laptop 12's Specs tab",
             "the Laptop 12 page's Warranty link",
             "Maker's Support link",
+            "Maker's individual news release pages for the March 3 headline",
             "the Laptop 16 page linked from the Laptop 12 page",
+            "the Warranty link on the Laptop 12 page",
             "https://reviews.example/laptop-12",
             "reviews.example",
             "reviews.example's Laptops link on its home page",
@@ -6250,10 +6264,61 @@ mod tests {
         );
         let prompt = unread_pages_prompt(&pages.map(str::to_string));
         assert!(!prompt.contains("independent reviews"), "{prompt}");
+        // The shapes turns write for a page or site they read, each with that page: a one-word
+        // name inside a longer title, a model's one digit, a site's own name with "pages" and no
+        // tab or link, the other models' pages a read page lists, and a reviewer's site, by its
+        // title or, with none, by its address, its "'s" inside the name included.
+        for (page_read, entry) in [
+            (
+                r#"{"url": "https://maker.example/cameras/kit", "title": "Maker KIT (our smallest camera)"}"#,
+                "KIT\u{2019}s linked Technical Specifications tab",
+            ),
+            (
+                r#"{"url": "https://store.maker.example/phone-9", "title": "Maker Phone 9 - Maker Store"}"#,
+                "Phone 9's Specs tab",
+            ),
+            (
+                r#"{"url": "https://www.maker.example/news", "title": "News & Insights - Maker"}"#,
+                "Maker's individual news release pages for the March 3 headline, the May 5 headline and the June 16 headline",
+            ),
+            (
+                r#"{"url": "https://www.maker.example/news", "title": "News & Insights - Maker"}"#,
+                "the 'New charger' release link on the News & Insights page",
+            ),
+            (
+                r#"{"url": "https://maker.example/cameras", "title": "Cameras | Maker"}"#,
+                "Maker\u{2019}s KIT camera product pages for the other two models",
+            ),
+            (
+                r#"{"url": "https://maker.example/", "title": "Laptops", "facts": ["Lists the Laptop 12, 13 and 16."]}"#,
+                "Laptop 16's own page",
+            ),
+            (
+                r#"{"url": "https://www.thereviewer.example/", "title": "The Reviewer"}"#,
+                "The Reviewer\u{2019}s Laptop 12 review page",
+            ),
+            (
+                r#"{"url": "https://www.thereviewer.example/reviews", "facts": ["Lists 20 reviews."]}"#,
+                "The Reviewer\u{2019}s Laptop 12 review page",
+            ),
+            (
+                r#"{"url": "https://www.annsguide.example/", "title": "Ann's Guide | Tech Reviews"}"#,
+                "Laptop 12 reviews from Ann\u{2019}s Guide\u{2019}s site search results",
+            ),
+        ] {
+            let mut summary = format!("{page_read}\n{}", json!({ "unread": [entry, wishes[0]] }));
+            assert_eq!(take_pages_to_read(&mut summary), [entry], "{page_read}");
+            assert_eq!(
+                not_found_of(&summary),
+                [format!("I didn't find {}", wishes[0])]
+            );
+        }
 
-        // A tab or link is one on a page the turn read: named on no page, on a page that
-        // stopped the turn or on a site it never opened, it is a wish, and so is a page named
-        // by a number with a dot in it, which is no address.
+        // A name is one of a page the turn read: none at all, the name of a page that stopped
+        // the turn or of a site it never opened, and a page named by a number with a dot in it,
+        // which is no address, are wishes. So is a page named only after "of", "for" or "on",
+        // which name what an entry is about ("review links for Laptop 12"), and a value no page
+        // word names ("Laptop 12's battery life").
         let stopped = r#"{"url": "https://shop.example/laptop-14", "title": "Laptop 14", "stopped": "paywall"}"#;
         for wish in [
             "a link to an independent review",
@@ -6261,14 +6326,21 @@ mod tests {
             "a search engine's Reviews tab",
             "Laptop 14's Specs tab",
             "the 13.5-inch model's own page",
-            "Laptop 12's own page",
+            "a link to an independent review of Laptop 12",
+            "review links for Laptop 12",
+            "independent Laptop 12 review links",
+            "independent review pages for Laptop 12",
+            "independent review pages on Laptop 12",
+            "two independent reviews for each of Laptop 12 and Laptop 16",
+            "a second independent review page for each laptop",
+            "Laptop 12's battery life",
         ] {
             let mut summary = format!("{read}\n{stopped}\n{}", json!({ "unread": [wish] }));
             assert!(take_pages_to_read(&mut summary).is_empty(), "{wish}");
             assert_eq!(not_found_of(&summary), [format!("I didn't find {wish}")]);
         }
-        // A word of one letter is no separator in a title: "Plan a Trip" is one part of it, so a
-        // wish that shares only one of its words names no tab or link there.
+        // A name is read by its words in a row in a title, a word of one letter among them:
+        // "Plan a Trip's Fares tab" names the planner's page, and "a trip review's link" none.
         let trip = r#"{"url": "https://transit.example/plan", "title": "Plan a Trip | Transit", "facts": ["Fares are listed."]}"#;
         let mut summary = format!(
             "{trip}\n{}",
@@ -6282,7 +6354,8 @@ mod tests {
             not_found_of(&summary),
             ["I didn't find a trip review's link"]
         );
-        // With no page read at all, only an address is a page to open.
+        // With only a page that stopped the turn in its lines, only an address is a page to
+        // open: a stopped page is never tried another way.
         let mut summary = format!(
             "{stopped}\n{}",
             json!({ "unread": ["Laptop 14's Specs tab", "https://reviews.example/laptop-14"] })
@@ -6291,17 +6364,55 @@ mod tests {
             take_pages_to_read(&mut summary),
             ["https://reviews.example/laptop-14"]
         );
+        // With no page in its lines at all (its one line was an address the browser refused
+        // it), nothing holds a name to a page: an entry that names its page goes to the pass as
+        // the turn wrote it, and a wish still doesn't.
+        let mut summary = format!(
+            "Looked for the Laptop 12's review.\n{}",
+            json!({ "unread": [
+                "Laptop 12's own page",
+                "independent reviews of Laptop 12",
+                "https://reviews.example/laptop-12",
+            ] })
+        );
+        assert_eq!(
+            take_pages_to_read(&mut summary),
+            ["Laptop 12's own page", "https://reviews.example/laptop-12"]
+        );
+        assert_eq!(
+            not_found_of(&summary),
+            [format!("I didn't find {}", wishes[0])]
+        );
         // No unread line, or an empty one: nothing to read and nothing named missing.
         for unread in ["", "\n{\"unread\": []}"] {
             let mut summary = format!("{read}{unread}");
             assert!(take_pages_to_read(&mut summary).is_empty());
             assert_eq!(summary, read);
         }
-        // The names a missing line gives stay bounded, however many wishes join it.
+        // The names a missing line gives stay bounded, however many wishes join it, and a long
+        // one is cut after a whole word: "I didn't find …" never ends in half of one.
         let many: Vec<String> = (0..40).map(|index| format!("wish {index}")).collect();
         let mut summary = format!("{read}\n{}", json!({ "unread": many }));
         assert!(take_pages_to_read(&mut summary).is_empty());
         assert_eq!(missing_names_in(&summary).len(), MISSING_MAX);
+        // Before a comma too, and a single word longer than the bound is cut at it.
+        let long = "independent review pages for the Laptop 12, the Laptop 13 and the Laptop 16, each from a reviewer who has tested the battery, the screen and the keyboard";
+        let at_a_comma = "independent review pages for the Laptop 12 from a reviewer who has tested the battery, the screen and the keyboard, every one";
+        let one_word = "x".repeat(200);
+        let mut summary = format!(
+            "{read}\n{}",
+            json!({ "unread": [long, at_a_comma, one_word] })
+        );
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        let word_cut = "x".repeat(MISSING_NAME_MAX_CHARS);
+        assert_eq!(
+            missing_names_in(&summary),
+            [
+                "independent review pages for the Laptop 12, the Laptop 13 and the Laptop 16, each from a reviewer who has tested the",
+                "independent review pages for the Laptop 12 from a reviewer who has tested the battery, the screen and the keyboard",
+                word_cut.as_str(),
+            ]
+        );
     }
 
     /// What every browser turn and its build read of findings is generic: how to compare items,
