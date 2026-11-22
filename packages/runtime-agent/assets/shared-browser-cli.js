@@ -204,6 +204,13 @@ function createStepClock(limitMs) {
     // Resolves when the step's time is up; never while a prompt waits.
     expired,
     isUp: () => up,
+    // How much of the step's time is left: all of it before the step starts,
+    // what was left while a prompt waits, and none once it answered or its
+    // time is up.
+    timeLeft: () => {
+      if (up || state === "over") return 0;
+      return Math.max(0, state === "running" ? left - (Date.now() - startedAt) : left);
+    },
     start() {
       if (state === "idle") run();
     },
@@ -1415,12 +1422,22 @@ function describeInPage(rule, forms, names, element, sources, mode, pass) {
   };
   // The first name a reading would show the control by (describeElement), for
   // one a full list leaves out (leftOutOf): its labels before its own text,
-  // never what a field holds.
+  // never what a field holds. Its text is the text it draws, as a listed
+  // control's (shownText): never words its hidden parts, scripts or styles
+  // hold, which a list's last links named run into their own (a local test,
+  // Nov 22).
   const leftLabel = () => {
     const field = ["INPUT", "SELECT", "TEXTAREA"].includes(String(element.tagName).toUpperCase());
+    const drawnText = () => {
+      try {
+        return names.shownTextOf(element, 240);
+      } catch (_) {
+        return "";
+      }
+    };
     return [
       element.getAttribute("aria-label"), ariaLabelledByText, labels, element.getAttribute("placeholder"),
-      element.getAttribute("title"), field ? "" : element.textContent, element.getAttribute("name"),
+      element.getAttribute("title"), field ? "" : drawnText(), element.getAttribute("name"),
     ].map((value) => bounded(value, 240)).find(Boolean) || "";
   };
   if (mode === "name") return { name: checkedName(), label: leftLabel() };
@@ -2308,18 +2325,21 @@ function partNameInPage(doc, hit, selector) {
   const coverName = roots.includes(cover) ? "" : coverLabel || (roleless ? squeeze(firstWords()) : "");
   return { tag: String(cover.tagName || "").toLowerCase(), role: coverRole, name: coverName };
 }
-// Runs inside the page through Playwright, so it must not use anything from
-// this file's scope. Where a click on `element` lands: Playwright clicks the
-// middle of its first part in view, and what is drawn there takes the click.
+// Runs inside the page through Playwright, with the shown rule and
+// partNameInPage joined in front (CLICK_LANDING_IN_PAGE), so it must not use
+// anything from this file's scope. Where a click on `element` lands:
+// Playwright clicks the middle of its first part in view, and what is drawn
+// there takes the click.
 // `other` is true when that is inside another control within this one (a
 // form's button in a section, an item of a list or menu it holds), or inside
 // a frame within it, which a reading never reads: the click would act on
 // something the step was not judged for. `covered` is true when it is
 // something outside the control (a notice, a dialog, a pinned bar), which
 // the click would go to instead; its own label is the control's. `own` says
-// that what is there is the part the control itself sits in (the page gives
-// the control no pointer there, or lays that part's own backdrop over it):
-// nothing else covers it. `consent`
+// that what is there is the menu, header or footer the control itself sits
+// in, or a box of it around the control (the page gives the control no
+// pointer there, or lays that part's own backdrop over it): nothing else
+// covers it. `consent`
 // says that cover is a cookie or consent notice: a container whose id, class,
 // label or title names it (`request.consent`, the describer's words), or a
 // small one close by whose text speaks of cookies. `cover` names what is
@@ -2331,7 +2351,7 @@ function partNameInPage(doc, hit, selector) {
 // named by its first words a person sees instead (a bare `<ol>` read as no
 // name at all): never text in a style sheet, a script or a part hidden from
 // people, which no reading shows either (partNameInPage).
-function clickLandingInPage(nameOf, element, request) {
+function clickLandingInPage(rule, nameOf, element, request) {
   const view = element.ownerDocument.defaultView;
   let point = null;
   for (const rect of Array.from(element.getClientRects())) {
@@ -2403,13 +2423,21 @@ function clickLandingInPage(nameOf, element, request) {
     const text = depth < 6 && typeof node.textContent === "string" ? node.textContent : "";
     consent = names.test(named) || names.test(labelledBy) || (text.length <= 1_500 && /\bcookies?\b/i.test(text));
   }
+  // The part the control sits in takes the click itself only where that part
+  // is the page's menu, header or footer around the control, or a box inside
+  // it (rule.framed): never the page's body or root, nor a box that holds the
+  // page's main part, which a page-wide dim behind an open dialog is drawn on.
+  // Taken for the control's own part, a link under such a dim opened its
+  // address past the dialog (a local test, Nov 22).
   let own = false;
-  for (let node = up(element), depth = 0; node && depth < 512 && !own; node = up(node), depth += 1) own = node === hit;
+  if (!roots.includes(hit) && rule.framed(hit) && !hit.querySelector("main, [role='main']")) {
+    for (let node = up(element), depth = 0; node && depth < 512 && !own; node = up(node), depth += 1) own = node === hit;
+  }
   return { other: false, covered: true, own, consent, cover: nameOf(doc, hit, request.selector) };
 }
 const CLICK_LANDING_IN_PAGE = new Function(
   "...args",
-  `return (${clickLandingInPage})((${partNameInPage}), ...args);`,
+  `return (${clickLandingInPage})((${shownRuleInPage})(), (${partNameInPage}), ...args);`,
 );
 // Runs inside the page, with the shown rule and partNameInPage joined in
 // front (MAIN_PART_IN_PAGE), so it must not use anything from this file's
@@ -2473,7 +2501,19 @@ function mainPartInPage(rule, nameOf, request) {
         : node.childNodes;
     for (const child of children) walk(child, main, depth + 1);
   };
-  const main = doc.querySelector("main, [role='main']");
+  // The page's main landmark: the first one it renders, as a page may keep
+  // others hidden beside it (an ordinary page read as not drawn by the hidden
+  // one ahead of it, a local test, Nov 22), else its first, which then hides
+  // the part.
+  const mains = Array.from(doc.querySelectorAll("main, [role='main']")).slice(0, 16);
+  const rendered = (node) => {
+    try {
+      return rule.hiddenWhy(node) !== "unrendered";
+    } catch (_) {
+      return true;
+    }
+  };
+  const main = mains.find(rendered) || mains[0] || null;
   walk(main || doc.body, Boolean(main), 0);
   const inside = (node, container) => {
     for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
@@ -4782,11 +4822,17 @@ async function failedLoadsOf(page) {
   return [...loads.filter((load) => !blocked(load)), ...loads.filter(blocked)].slice(0, FAILED_LOADS_LISTED);
 }
 
-// The words of a reading that shows only a page's frame (notDrawnOf), as a
-// refused click's are: what covers the page's main part, named as a click's
-// cover is (coverWords), or that it is not drawn; the box that hides it and
-// how; and the scripts and frames of the page that did not load. A reading a
-// click or an open came back to after waiting says how long that was.
+// The words of a reading that shows only a page's frame (notDrawnOf): what
+// covers the page's main part, by its tag and role (partTagWords), or that it
+// is not drawn; the box that hides it and how; and the scripts and frames of
+// the page that did not load. A reading a click or an open came back to after
+// waiting says how long that was. They are the browser's own words, and the
+// runtime reads why a step stopped from them (shared_browser_activity.rs,
+// step_stop): a cover's name is the page's, so it is the reading's record's
+// (coverRecordOf), never these words'. Named in them, a cover called "We
+// couldn't reach that site" made a covered page read as one the browser could
+// not reach, and a key in a cover's name went out unmasked (a local test,
+// Nov 22).
 const HIDDEN_HOW = {
   inert: "turned off",
   "aria-hidden": "marked as hidden",
@@ -4794,21 +4840,44 @@ const HIDDEN_HOW = {
   visibility: "not visible",
   opacity: "transparent",
 };
-async function notDrawnMessage(page, state, notLoaded) {
+const PART_TAG_PATTERN = /^[a-z][a-z0-9-]{0,40}$/;
+const PART_ROLE_PATTERN = /^[a-z]{2,24}$/;
+// A part of the page by its tag and role alone (" (<div role=\"status\">)"),
+// or "" when the page gave no tag a reading names.
+function partTagWords(part) {
+  const tag = typeof part?.tag === "string" && PART_TAG_PATTERN.test(part.tag) ? part.tag : "";
+  if (!tag) return "";
+  const role = typeof part.role === "string" && PART_ROLE_PATTERN.test(part.role) ? part.role : "";
+  return ` (<${tag}${role ? ` role="${role}"` : ""}>)`;
+}
+// What covers a page's main part, for the reading's record (`notDrawn.cover`):
+// its tag, role and name, the name masked as the reading's text is and left
+// out where the page's text may not be named (pageTextMayBeNamed), as a
+// covered click's words leave it out. Null when the page gave no tag.
+async function coverRecordOf(page, cover) {
+  const tag = typeof cover?.tag === "string" && PART_TAG_PATTERN.test(cover.tag) ? cover.tag : "";
+  if (!tag) return null;
+  const role = typeof cover.role === "string" && PART_ROLE_PATTERN.test(cover.role) ? cover.role : "";
+  const raw = typeof cover.name === "string" ? cover.name.replace(/\s+/g, " ").trim() : "";
+  const name = raw && (await pageTextMayBeNamed(page))
+    ? Array.from(strictlyMasked(raw)).slice(0, MAX_LABEL_CHARS).join("")
+    : "";
+  return { tag, ...(role ? { role } : {}), ...(name ? { name } : {}) };
+}
+function notDrawnMessage(state, notLoaded) {
   const { part, onlyMenu } = state;
-  const cover = part.cover ? await coverWords(page, part.cover) : "";
   const what = onlyMenu ? "only its menu" : "none of its controls";
   const said = [];
   if (part.cover) {
-    said.push(`Something else on the page covers its main part${cover}, so ${what} could be read.`);
+    said.push(`Something else on the page covers its main part${partTagWords(part.cover)}, so ${what} could be read.`);
   } else if (onlyMenu) {
     said.push("The page is still busy: only its menu shows so far, and its main part is not drawn.");
   } else {
     said.push("The page is still busy: none of its controls shows yet, though its text names some of them.");
   }
   const hider = part.hider;
-  if (hider && /^[a-z][a-z0-9-]{0,40}$/.test(String(hider.tag || "")) && HIDDEN_HOW[hider.how]) {
-    const role = typeof hider.role === "string" && /^[a-z]{2,24}$/.test(hider.role) ? ` role="${hider.role}"` : "";
+  if (hider && PART_TAG_PATTERN.test(String(hider.tag || "")) && HIDDEN_HOW[hider.how]) {
+    const role = typeof hider.role === "string" && PART_ROLE_PATTERN.test(hider.role) ? ` role="${hider.role}"` : "";
     const fields = Number.isSafeInteger(part.fields) && part.fields > 0 ? part.fields : 0;
     said.push(
       `The page hides ${onlyMenu ? "that part" : "them"} (<${hider.tag}${role}>, ${HIDDEN_HOW[hider.how]})${
@@ -4836,21 +4905,43 @@ async function notDrawnMessage(page, state, notLoaded) {
 // the step waited (notDrawnMessage). A click whose own look already found its
 // page reading as before it (settleAfterAction) waits no more: `looked`.
 // Left to the turn, the second look never came: each turn took the first
-// reading for the page.
+// reading for the page. The wait is the step's own time, never more: it
+// leaves the step room for one more reading and its answer
+// (notDrawnReserveMs), and no reading starts once that room is gone, so the
+// last reading stands. A step that waited past its time lost its own answer
+// to the late one (pageAsItIs): a page that answered after 14 seconds was
+// said not to answer, and its address was refused for 10 minutes (a local
+// test, Nov 22).
 const NOT_DRAWN_LOOK_MS = 6_000;
 const NOT_DRAWN_READS = 3;
+// What a page that drew something takes to settle before it is read.
+const NOT_DRAWN_SETTLE_MS = 1_250;
+// The step's time a reading again needs, with the step's answer after it: at
+// least NOT_DRAWN_READ_RESERVE_MS, and twice what the step's first reading of
+// the page took.
+const NOT_DRAWN_READ_RESERVE_MS = 3_000;
+function notDrawnReserveMs(firstReadMs) {
+  return Math.max(NOT_DRAWN_READ_RESERVE_MS, 2 * Math.max(0, firstReadMs));
+}
 async function readOnceDrawn(page, read, { looked = false } = {}) {
   readingNotDrawn = false;
   // A click that looked has waited already, and its reading says so.
   notDrawnLookMs = looked ? UNCHANGED_LOOK_MS : null;
   try {
+    const firstAt = Date.now();
     let result = await read();
     if (!readingNotDrawn || looked) return result;
+    const reserve = notDrawnReserveMs(Date.now() - firstAt);
+    // Whether the step's time still holds a wait of `ms` and a reading after it.
+    const holds = (ms = 0) => stepClock.timeLeft() - reserve >= ms;
+    if (!holds(UNCHANGED_EVERY_MS)) return result;
     const startedAt = Date.now();
     let seen = await readingOf(page);
     for (let reads = 1; reads <= NOT_DRAWN_READS && readingNotDrawn; reads += 1) {
+      // Past the window, the last reading is the page as it is.
+      if (reads > 1 && Date.now() - startedAt >= NOT_DRAWN_LOOK_MS) break;
       let changed = false;
-      while (!changed && Date.now() - startedAt < NOT_DRAWN_LOOK_MS && !stepClock.isUp()) {
+      while (!changed && Date.now() - startedAt < NOT_DRAWN_LOOK_MS && holds(UNCHANGED_EVERY_MS + NOT_DRAWN_SETTLE_MS)) {
         await page.waitForTimeout(UNCHANGED_EVERY_MS).catch(() => {});
         const now = await readingOf(page);
         changed = now !== seen;
@@ -4861,6 +4952,7 @@ async function readOnceDrawn(page, read, { looked = false } = {}) {
         await page.waitForTimeout(250).catch(() => {});
         await page.evaluate(animationsSettledInPage, { kind: "animations-settled", timeoutMs: 1_000 }).catch(() => {});
       }
+      if (!holds()) break;
       notDrawnLookMs = Date.now() - startedAt;
       readingNotDrawn = false;
       result = await read();
@@ -4978,7 +5070,8 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
   // nothing of what it holds.
   const notDrawn = view.secretScreen ? null : await notDrawnOf(page, interactive, left, visibleText);
   const notLoaded = notDrawn ? await failedLoadsOf(page) : [];
-  const notDrawnWords = notDrawn ? await notDrawnMessage(page, notDrawn, notLoaded) : "";
+  const notDrawnWords = notDrawn ? notDrawnMessage(notDrawn, notLoaded) : "";
+  const notDrawnCover = notDrawn && notDrawn.part.cover ? await coverRecordOf(page, notDrawn.part.cover) : null;
   readingNotDrawn = Boolean(notDrawn);
   const leftOut = leftOutOf(left, view.secretScreen);
   const pageOrigin = pageOriginOf(rawUrl);
@@ -5040,7 +5133,8 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
     ...(leftOut ? { leftOut } : {}),
     // For a reading that shows only the page's frame: why the shown rule left
     // out the controls the page hides, how many of them sit outside its menu,
-    // header and footer, and the scripts and frames that did not load.
+    // header and footer, what covers its main part (its name masked), and the
+    // scripts and frames that did not load.
     ...(notDrawn
       ? {
         notDrawn: {
@@ -5050,6 +5144,7 @@ async function snapshot(page, { withhold = false, decline = false } = {}) {
             outOfReach: left.hidden.filter((entry) => entry.why === "unreachable").length,
           },
           hiddenOutsideMenu: left.hidden.filter((entry) => !entry.framed).length,
+          ...(notDrawnCover ? { cover: notDrawnCover } : {}),
           ...(notLoaded.length ? { notLoaded } : {}),
         },
       }

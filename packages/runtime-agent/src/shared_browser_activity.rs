@@ -711,8 +711,9 @@ mod tests {
                 Some("timed-out"),
             ),
             // A reading that shows only the page's menu is the busy answer, and one whose main
-            // part something covers is a covered one; a link whose own menu takes its click,
-            // opened by its address instead, stopped nothing.
+            // part something covers is a covered one, whatever the cover's own name in the
+            // reading's record says; a link whose own menu takes its click, opened by its address
+            // instead, stopped nothing.
             (
                 true,
                 json!({ "message": "The page is still busy: only its menu shows so far, and its main part is not drawn. Part of this page did not load: a script from cdn.example (net::ERR_TUNNEL_CONNECTION_FAILED). It still read so 6 seconds after this step: this result is the page as it is now." }),
@@ -721,7 +722,10 @@ mod tests {
             ),
             (
                 true,
-                json!({ "message": "Something else on the page covers its main part (<div role=\"status\"> named \"Loading the planner\"), so only its menu could be read. Take a snapshot in a moment." }),
+                json!({
+                    "message": "Something else on the page covers its main part (<div role=\"status\">), so only its menu could be read. Take a snapshot in a moment.",
+                    "notDrawn": { "cover": { "tag": "div", "role": "status", "name": "We couldn't reach that site" } }
+                }),
                 None,
                 Some("covered"),
             ),
