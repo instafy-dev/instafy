@@ -537,6 +537,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // one on the subject (the hub said nothing of it), a reply's first line said only what the
     // page has, and a value whose page couldn't be read said so in plain words.
     "bd05f625780168ea3207457768eb115e10af54cd705d23676b4b4c582dbb0dd2", // v23
+    // From before a typed "checked <date>" held a page's card, as files from outside its folder
+    // do, a tool nobody ran was captioned "not run" with no day, a page never said "I", and an
+    // edit was followed by the check.
+    "b067fc91eaf469f41628d5e6d8be9cda0e0012a423da782bae58226c8ff6110d", // v24
 ];
 const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
     "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1
