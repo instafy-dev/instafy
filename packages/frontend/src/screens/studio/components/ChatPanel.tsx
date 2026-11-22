@@ -226,7 +226,9 @@ import {
   useChatViewTabs,
 } from "./chatBrowserTab";
 import { useChatBrowserView } from "./useChatBrowserView";
-import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
+import { openBrowserPause, useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
+import { useBrowserPauseTab } from "./useBrowserPauseTab";
+import { BrowserPauseRow } from "./BrowserPauseRow";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
@@ -898,6 +900,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runs: runRecords,
     show: showBrowserForHumanInput,
   });
+  // The pause in Instafy's browser that still waits for this person, read
+  // from the chat's latest messages (whichever part of the chat is shown):
+  // after a reload, on another device or with the view closed, the chat
+  // still leads back to that page (useBrowserPauseTab, below).
+  const openPause = useMemo(
+    () => jobThread ? null : openBrowserPause(recentMessages, runRecords, currentUserId),
+    [currentUserId, jobThread, recentMessages, runRecords],
+  );
+  const openPauseRun = openPause ? runRecords.find((run) => run.id === openPause.runId) ?? null : null;
   useEffect(() => {
     if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {
       handleToggleBrowserSession();
@@ -1127,6 +1138,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setSharedBrowserActivated(true);
     setBrowserTransport("shared");
   }, [browserTransportScopeKey]);
+  // While the pause waits, the chat keeps its Browser tab, also where this
+  // device has no view saved. The press under the pause and that tab both
+  // bring Instafy's browser forward, where the pause is, never this device's
+  // own in its place, and send Octo nothing. The chat's own tabs pick through
+  // selectChatView; the conversation's view bar picks Browser through the
+  // chat's views (browserPicked).
+  const {
+    offersTab: pauseOffersBrowserTab,
+    open: openBrowserForPause,
+    select: selectChatView,
+  } = useBrowserPauseTab({
+    pause: openPause,
+    hasView: hasBrowserView,
+    viewStateHydrated: browserSessionStateHydrated,
+    viewClosed: browserViewClosed,
+    browserPicked: conversationWorkspace && !jobThread && surfaces.activeId === "browser" && !browserSessionOpen,
+    revealInstafyBrowser: revealSharedBrowserApproval,
+    selectView: handleBrowserSubtabChange,
+  });
+  const browserTabShown = hasBrowserView || pauseOffersBrowserTab;
   const resumeSharedBrowser = useCallback((runtimeId: string) => {
     revealSharedBrowserApproval();
     resumeBrowserSession(runtimeId);
@@ -1251,7 +1282,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, []);
   const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
   const guardNavigation = useStudioGuardedNavigation();
-  const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
+  const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || pauseOffersBrowserTab || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
   const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
     conversationId: activeConversationId,
     inputValue,
@@ -3431,6 +3462,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (conversationWorkspace) {
       setConversationBrowser(surfaceScope, {
         available: hasBrowserView,
+        // No view yet, but a pause waits in Instafy's browser: selecting the
+        // tab opens that browser (useBrowserPauseTab).
+        offered: pauseOffersBrowserTab,
         attention: browserApprovalAttention,
         pageTitle: browserActivePageTitle,
         agentName: browserAgentActive ? browserAgentName : null,
@@ -3445,6 +3479,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     closeBrowserTab,
     conversationWorkspace,
     hasBrowserView,
+    pauseOffersBrowserTab,
     setConversationBrowser,
     surfaceScope,
   ]);
@@ -6453,7 +6488,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const sitePreviewPanelId = conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`;
   const resourceTabs: ConversationSurface[] = [
-    ...(hasBrowserView ? [{
+    ...(browserTabShown ? [{
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: browserActivePageTitle, agentName: browserAgentActive ? browserAgentName : null }),
       attention: browserApprovalAttention ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
@@ -6756,6 +6791,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 )}
               />
             ) : null}
+            {/* At the chat's own end, never under an earlier part of it shown around a message. */}
+            {openPause && !messageTargetActive ? (
+              <BrowserPauseRow
+                pause={openPause}
+                // Instafy's browser on screen, not this device's own in its place.
+                browserVisible={browserVisible && browserTransport === "shared"}
+                onOpen={openBrowserForPause}
+                // An avatar only when the row above is not the paused run's.
+                avatar={fallbackRowContinuesTail(displayedMessages[displayedMessages.length - 1], openPauseRun)
+                  ? ASSISTANT_AVATAR_GUTTER_PLACEHOLDER
+                  : renderAssistantAvatar(openPauseRun?.metadata ?? null)}
+              />
+            ) : null}
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
             {workspaceStartStall.showNotice ? (
               <WorkspaceStartStalledRow
@@ -6850,6 +6898,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
                     humanInputStoppedRunIds={browserHumanInputStoppedRunIds}
+                    pausedPageId={openPause?.pageId ?? null}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}
@@ -6922,7 +6971,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         chatPanelId={chatPanelId}
         activeId={activeSurfaceId} resourceId={resourceId}
         split={splitSurfaces} wide={wideSurfaces} ratio={surfaces.ratio}
-        onSelect={handleBrowserSubtabChange}
+        onSelect={selectChatView}
         onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
         onRatioChange={ratio => updateSurfaces(surfaceScope, state => ({ ...state, ratio }))}
         onRatioPreview={previewSurfaceRatio}
@@ -6975,7 +7024,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
           presentation="composer" chatPanelId={chatPanelId} resources={resourceTabs}
           activeId={activeSurfaceId} resourceId={resourceId} split={false} wide={false} ratio={surfaces.ratio}
-          onSelect={handleBrowserSubtabChange} onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
+          onSelect={selectChatView} onSplitChange={split => updateSurfaces(surfaceScope, state => ({ ...state, split }))}
         /> : null}
         overlayWidth={splitSurfaces ? `calc((1 - var(--conversation-resource-ratio, ${surfaces.ratio})) * 100%)` : undefined}
         aboveComposer={chatVisible && (hasNewMessages || (messageTargetActive && chatScrollHistoryVisit)) ? (
@@ -7108,6 +7157,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onImportGithubRepo: beginGithubImport,
           onSelectConnector: handleSelectConnector,
           onBrowseConnectors: openConnectBrowse,
+          onConnectAi: user ? openGettingStartedConnectModal : undefined,
           installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
           onQueueMessage: () => {

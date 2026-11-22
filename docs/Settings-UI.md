@@ -814,6 +814,27 @@ web, phones and Desktop on other systems show no such row, and neither does a St
 manifest leaves the module out: the hosted web app, which a packaged Desktop shows, does not list it
 yet (phase 8 of the design adds it).
 
+Once it is on, the row lists the person's **Claude Code logins**
+([Local-engine turns](Local-Engine-Turns.md) 11.19): each a Claude Code folder they signed in to
+themselves with Claude Code's own `/login`, one subscription each. The first login is made by
+**Use Claude Code on this computer**, named "Claude Code" unless the person names it, with the folder
+the login shell's `CLAUDE_CONFIG_DIR` names or Claude Code's usual folder. Each login shows its name,
+its folder on this computer ("Claude Code's usual folder" for the usual one) and what this
+computer's runtime says of it: "Ready.", "Not signed in yet. In a terminal, run claude with
+CLAUDE_CONFIG_DIR set to this folder and sign in with /login." ("run claude and sign in with /login"
+for the usual folder), "Reached its Claude plan's limit. Ready again at {time}.", or the row's own
+sentence for the program. A login the person added on another computer shows "Not set up on this
+computer" with **Set up on this computer**. **Add a login** opens a small form, a name (1-60
+characters, unique among the person's logins) and the folder (Claude Code's usual folder, or **Choose
+a folder…**, Desktop's native picker), and then Desktop's consent dialog for that login, which names
+it, its folder, the program and the login-shell values. Desktop refuses a folder another login on
+this computer already uses. Each login has **Rename**, **Remove from this computer**, which removes
+its consent here and leaves it on other computers, and **Delete**, which removes it everywhere after
+"Agents that use it switch to your first login." A person has at most 10 logins; the row says so
+in place of Add a login once they have them. Removing the last login on this computer turns Claude
+Code off here, as **Turn off** does. The row never shows a login's folder anywhere but on its own
+computer, and never shows another person's logins.
+
 Show supported connection methods directly under **Connect an account**, after saved connections,
 even when the account has no connections yet. The page and existing connection chooser share
 `CredentialsConnectionChoices`, including Desktop's local Codex option. Selecting a row opens
@@ -978,6 +999,25 @@ computer yet. Set it up in Connections, under Claude Code on this computer." Sav
 connection, or no credential for Instafy AI. The agents list names the AI after the agent's name
 ("Reviewer · Claude Code"), and so does the chat's participants drawer, in place of the model and
 reasoning.
+
+With Claude Code chosen and more than one Claude Code login, the editor also shows a **Login**
+choice: the person's logins by name, the oldest marked "(first login)", which an agent that names
+none uses. Saving sends `claudeCodeLoginId`. The agents list then reads "Reviewer · Claude Code
+(Work)".
+
+**Backups** ([Local-engine turns](Local-Engine-Turns.md) 11.20). Under the AI choice, an agent whose
+AI is one of the person's connections or Claude Code shows a Backups list: more of the person's own
+connections and Claude Code logins, in order, up to 8. Once the AI an agent uses reaches its plan's
+limit, its next turns use the first backup with room, and they go back to the first AI once its
+limit resets. **Add a backup** offers the person's connections and logins that are not the agent's
+AI or already listed, each by its label (a connection's as Connections shows it, a login's by its
+name), and each row has Move up, Move down and Remove. The list hides for Instafy AI and for an
+agent left on the person's default, since those have no AI of their own to back up, and switching
+to either clears it. Saving sends `backupAis` with the whole list in order. The agents list adds the
+count after the AI ("Reviewer · ChatGPT · 2 backups"). A turn's reply shows its owner which sign-in
+ran it once they have more than one ("Ran on Work ChatGPT", "Ran on Personal, a backup"), and a
+turn that stopped at a plan's limit says which one the agent's next turns use and offers Try again.
+Nobody else sees which sign-in ran a turn.
 
 Bot pictures use the shared PNG/JPEG/WebP validation and 2 MB limit. Native file selection
 creates a local preview; Save profile uploads and then saves the URL. Cancel discards the
