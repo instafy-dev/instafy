@@ -1564,13 +1564,21 @@ itself, into a booking site's search and a shop's sign-in, where a search first
 would have found them (a local test, Nov 19). A card that continues building is
 not refused for naming none: refused, its whole build ran again from the
 person's request. A turn whose card was refused, with no card left to post,
-runs once more, told to search first, then hand over what it found or answer
-from it, since its words were written for that card: a page it read, another
-card beside it and a skill setup's words don't keep it from running again
-(kept, an answer that had read a text-only results page said "I've opened a
-browser check of the official results", and nothing opened). A turn that
-changed files keeps its answer, which says what it made. A card that retry
-writes is checked the same way and not tried again. An address only Octo read,
+runs once more, since its words were written for that card: a page it read,
+another card beside it and a skill setup's words don't keep it from running
+again (kept, an answer that had read a text-only results page said "I've opened
+a browser check of the official results", and nothing opened). The retry is
+told which rules its card broke (a card that names no page and holds an e-mail
+address broke both) and what to name instead, the site's home page for an
+address it would only guess. It runs on the first attempt's own thread, which
+holds what that attempt searched and read. After an attempt that searched or
+read, it fixes only the card, with no web search, no shell and no owner-local
+browser, so it adds no search and no read: told to search first, two lookups
+ran their whole turn again (a local test, Nov 20). After an attempt that
+answered at once, it keeps them and is told to find the page first. The line
+under the turn names the same rules. A turn that changed files keeps
+its answer, which says what it made. A card that retry writes is checked the
+same way and not tried again. An address only Octo read,
 a search result's among them, still leaves the card a button until the person
 opens it ("How Studio opens it"). A card the routing step posts carries the
 person's own words, whatever they name.
@@ -3514,9 +3522,19 @@ unless the policy is `"covered"`.
   replies show (the runtime reads the chat's history and each text's hosts as
   Studio does, a page's file name and a query's value included, and in a
   shared chat counts only the turn's own message of the person's), keeps the
-  turn's reply above it. A reply that does show beside a card never says a page
-  opened before a browser tool saw it, or what the browser will submit, send or
-  buy. A refused card's words leave the reply being written as its retry begins,
+  turn's reply above it. So does a card that opens a page the turn's own reader
+  (`instafy web read`) didn't read: one it marked stopped (a robots.txt
+  refusal, a sign-in, an HTTP 403…), where it redirected, every page of a read
+  that read nothing but one that needs a browser, and, where the turn's events
+  kept only the end of a read of several pages, each page that end doesn't show
+  read. The card carries
+  `waitsForThePerson: true`, and Studio never opens it by itself, also for an
+  address the person wrote: the research skill ends such a page in its link and
+  one card, and opened by itself the browser would read with no press a page
+  robots.txt refused the reader. A reply that does show beside a card never says a page
+  opened before a browser tool saw it, what the browser will submit, send or
+  buy, or that pages are handed to the browser: the card says what happens
+  next. A refused card's words leave the reply being written as its retry begins,
   and the retry is told that if its own card is refused too, only its words
   show, so they stand alone. A card shows only while it needs the person. While Studio opens it by
   itself, the turn's one line **Opening Instafy's browser…** takes its place,

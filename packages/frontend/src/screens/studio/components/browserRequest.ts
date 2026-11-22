@@ -19,6 +19,13 @@ export type BrowserRequest = {
    * continuation fold into the browser turn (routedBrowserFold.ts).
    */
   routed?: true;
+  /**
+   * The card opens a page Octo's own reader couldn't read in that turn (a
+   * robots.txt refusal or a sign-in among the reasons): it waits for the
+   * person's press, also for an address they wrote, and Studio never opens it
+   * by itself.
+   */
+  waitsForThePerson?: true;
 };
 
 /**
@@ -101,6 +108,7 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
     location: value.location,
     ...(value.continueBuilding === true ? { continueBuilding: true } : {}),
     ...(value.routed === true ? { routed: true as const } : {}),
+    ...(value.waitsForThePerson === true ? { waitsForThePerson: true as const } : {}),
   };
 }
 

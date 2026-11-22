@@ -116,6 +116,17 @@ describe("browserRequestUnavailableReason", () => {
         .toEqual({ task: "Open x", location: "auto" });
     }
   });
+
+  // The card opens a page Octo's own reader couldn't read, and waits for the
+  // person's press.
+  it("reads a card that waits for the person, and only a plain true", () => {
+    expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", waitsForThePerson: true })))
+      .toEqual({ task: "Open x", location: "auto", waitsForThePerson: true });
+    for (const waitsForThePerson of [false, "true", 1, null]) {
+      expect(browserRequestFromMessage(card({ task: "Open x", location: "auto", waitsForThePerson })))
+        .toEqual({ task: "Open x", location: "auto" });
+    }
+  });
 });
 
 describe("browserRequestTransport on Desktop with Instafy AI", () => {

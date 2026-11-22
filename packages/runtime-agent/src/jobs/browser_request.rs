@@ -42,13 +42,14 @@ pub(super) struct BrowserRequest {
     /// the card's task is their own words, and Studio folds the card into its
     /// browser turn when it opens it by itself.
     routed: bool,
+    /// The card opens a site whose page the turn's own reader didn't read
+    /// ([`BrowserRequest::wait_for_a_press_where_it_opens`]): Studio leaves it for the person to
+    /// press, also where they gave every address it opens (`waitsForThePerson`).
+    waits_for_a_press: bool,
 }
 
-/// Why each `request_browser` card of a reply is dropped as the reply is read
-/// ([`BrowserRequest::parse`]), one reason per card. Nothing of such a card reaches the person,
-/// while the reply beside it may still send them to the browser, so the runtime logs each one
-/// with the turn's job.
-pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
+/// The `request_browser` actions of a reply.
+fn browser_actions(reply: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
     reply
         .get("actions")
         .and_then(Value::as_array)
@@ -63,8 +64,167 @@ pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
                     kind.trim().to_ascii_lowercase().replace('-', "_") == "request_browser"
                 })
         })
+}
+
+/// Why each `request_browser` card of a reply is dropped as the reply is read
+/// ([`BrowserRequest::parse`]), one reason per card. Nothing of such a card reaches the person,
+/// while the reply beside it may still send them to the browser, so the runtime logs each one
+/// with the turn's job.
+pub(super) fn dropped_requests(reply: &Value) -> Vec<&'static str> {
+    browser_actions(reply)
         .filter_map(|action| BrowserRequest::parse(action).err())
         .collect()
+}
+
+/// Each rule of [`REFUSED_FOR_ITS_TASK`] a reply's refused cards broke, every one of a card's:
+/// [`BrowserRequest::parse`] gives only the first it meets, so a card that named no page and held
+/// an e-mail address ("Check the shop's return policy for order 123-4567 associated with
+/// ana@example.com.") read as one that named no page, and its retry was told nothing of the
+/// address.
+pub(super) fn rules_refused_cards_broke(reply: &Value) -> Vec<&'static str> {
+    let mut broken = Vec::new();
+    for action in browser_actions(reply) {
+        let Err(rule) = BrowserRequest::parse(action) else {
+            continue;
+        };
+        if !REFUSED_FOR_ITS_TASK.contains(&rule) {
+            continue;
+        }
+        broken.push(rule);
+        let task = action
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if rule == NAMES_NO_PAGE && crate::search_query::holds_an_email_address(task) {
+            broken.push(HOLDS_AN_EMAIL_ADDRESS);
+        }
+    }
+    broken
+}
+
+/// The sites of the pages a turn's own reader (`instafy web read`) didn't read, from the turn's
+/// events, as Studio reads a card's hosts: each page its output marks `stopped` (a robots.txt
+/// refusal, a sign-in, a refusal such as HTTP 403…) and where that page redirected; every address
+/// of a read that read nothing, but one it found to need a browser; and, where the room kept only
+/// the end of a read's output ([`crate::codex::COMMAND_OUTPUT_KEPT_TAIL`]), every address it
+/// asked for that the output it kept doesn't show read. A card that opens one of them waits for
+/// the person's press ([`BrowserRequest::wait_for_a_press_where_it_opens`]).
+pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<String> {
+    let mut sites = BTreeSet::new();
+    for event in events.iter().copied().flatten() {
+        let item = &event["item"];
+        if event["type"] != "item.completed" || item["type"] != "command_execution" {
+            continue;
+        }
+        let command = item["command"].as_str().unwrap_or_default();
+        let reads_pages =
+            super::activity_labels::command_activity(item.get("command_argv"), command)
+                .is_some_and(|activity| activity["key"] == "instafy/web-read");
+        if !reads_pages {
+            continue;
+        }
+        let output = item["aggregated_output"].as_str().unwrap_or_default();
+        let shown = read_outcomes(output);
+        let asked = addresses_in(command);
+        // A read that read nothing exits with an error, and one of a page that needs a browser
+        // does too: that page is the browser's to read, so it is no page the reader was refused.
+        let unsure = item["exit_code"] != json!(0)
+            || (output.starts_with(crate::codex::COMMAND_OUTPUT_KEPT_TAIL) && asked.len() > 1);
+        let mut not_read = shown.stopped;
+        if unsure {
+            not_read.extend(
+                asked
+                    .into_iter()
+                    .filter(|address| !shown.read.iter().any(|read| same_page(address, read))),
+            );
+        }
+        sites.extend(not_read.into_iter().filter_map(site_of));
+    }
+    sites
+}
+
+/// What a read's output shows of its pages, as its JSON gives them (one key a line: a page's
+/// `requestedUrl`, then its `status`) or its text (`[stopped: robots] <address> -> <where it
+/// went>`): the addresses of the pages it marks `stopped`, where they redirected included, and of
+/// those it read or found to need a browser. What a page wrote, inside its
+/// `<untrusted_page_content>` wrapper, says nothing of what was read.
+struct ReadOutcomes<'a> {
+    stopped: Vec<&'a str>,
+    read: Vec<&'a str>,
+}
+
+fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
+    let mut shown = ReadOutcomes {
+        stopped: Vec::new(),
+        read: Vec::new(),
+    };
+    let mut asked: Option<&str> = None;
+    let mut in_a_stop = false;
+    // Where the room kept only the end of the output, the end may start inside a page's text.
+    let mut in_page_text = match (
+        output.find("<untrusted_page_content"),
+        output.find("</untrusted_page_content>"),
+    ) {
+        (open, Some(close)) => open.is_none_or(|open| close < open),
+        _ => false,
+    };
+    for line in output.lines() {
+        if in_page_text {
+            in_page_text = !line.contains("</untrusted_page_content>");
+            continue;
+        }
+        if line.contains("<untrusted_page_content") {
+            in_page_text = !line.contains("</untrusted_page_content>");
+            continue;
+        }
+        let line = line.trim();
+        if let Some((status, addresses)) =
+            line.strip_prefix('[').and_then(|rest| rest.split_once(']'))
+        {
+            match status.split(':').next().unwrap_or_default().trim() {
+                "stopped" => shown.stopped.extend(addresses_in(addresses)),
+                "read" | "needs_browser" => shown
+                    .read
+                    .extend(addresses_in(addresses).into_iter().take(1)),
+                _ => {}
+            }
+        } else if line.starts_with("\"requestedUrl\"") {
+            asked = addresses_in(line).into_iter().next();
+        } else if line.starts_with("\"status\"") {
+            in_a_stop = line.contains("\"stopped\"");
+            if in_a_stop {
+                shown.stopped.extend(asked);
+            } else if line.contains("\"read\"") || line.contains("\"needs_browser\"") {
+                shown.read.extend(asked);
+            }
+        } else if in_a_stop && (line.starts_with("\"finalUrl\"") || line.starts_with("\"http")) {
+            // Where a stopped page went: its provenance's `finalUrl`, and its `redirects`.
+            shown.stopped.extend(addresses_in(line));
+        }
+    }
+    shown
+}
+
+/// Whether two addresses are one page, as `instafy web read` writes the one it was asked for: its
+/// host in lower case and its path, without the part after `#`.
+fn same_page(asked: &str, shown: &str) -> bool {
+    let page = |address: &str| {
+        reqwest::Url::parse(address).ok().map(|mut url| {
+            url.set_fragment(None);
+            url
+        })
+    };
+    page(asked).is_some_and(|asked| page(shown) == Some(asked))
+}
+
+/// An address's site as Studio reads a card's hosts ([`hosts_studio_reads`]): its host in lower
+/// case, without a dot at the end or a leading `www.`.
+fn site_of(address: &str) -> Option<String> {
+    let url = reqwest::Url::parse(address).ok()?;
+    let host = url.host_str()?.trim().to_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 impl BrowserRequest {
@@ -107,6 +267,7 @@ impl BrowserRequest {
             location,
             continue_building,
             routed: false,
+            waits_for_a_press: false,
         })
     }
 
@@ -123,7 +284,22 @@ impl BrowserRequest {
             location: "auto",
             continue_building,
             routed: true,
+            waits_for_a_press: false,
         })
+    }
+
+    /// Leaves this card for the person to press when it opens a site whose page the turn's own
+    /// reader didn't read (`sites`, [`sites_its_reader_did_not_read`]): Studio never opens it by
+    /// itself, also where the person gave every address it opens. A page the reader couldn't read
+    /// ends in its link and one card (the research skill's Stops), and Studio opened a card that
+    /// named only addresses the person or an earlier reply gave by itself: on an address the
+    /// person typed, the browser read with no press a page the reader was refused, robots.txt's
+    /// refusal among them. Whether the browser reads such a page once they press it stays as it
+    /// was. A card the routing step posts is the person's own message.
+    pub(super) fn wait_for_a_press_where_it_opens(&mut self, sites: &BTreeSet<String>) {
+        if !self.routed && !hosts_studio_reads(&self.task).is_disjoint(sites) {
+            self.waits_for_a_press = true;
+        }
     }
 
     /// Whether Studio leaves this card a button for the person to open, by what its task names,
@@ -131,9 +307,11 @@ impl BrowserRequest {
     /// (`browserAutoStartAddressesSeen`): an address it can't check ([`studio_cannot_check`]),
     /// or a host that no text of `seen` names ([`hosts_studio_reads`]). `seen` is what the
     /// person could have read before the card: their messages and the chat's earlier replies,
-    /// never the card's own turn. A task that names no host waits for nothing here.
+    /// never the card's own turn. A task that names no host waits for nothing here. A card that
+    /// opens a page the turn's reader didn't read always waits
+    /// ([`Self::wait_for_a_press_where_it_opens`]).
     pub(super) fn waits_for_the_person(&self, seen: &[&str]) -> bool {
-        if studio_cannot_check(&self.task) {
+        if self.waits_for_a_press || studio_cannot_check(&self.task) {
             return true;
         }
         let seen: BTreeSet<String> = seen
@@ -150,6 +328,9 @@ impl BrowserRequest {
         }
         if self.routed {
             request["routed"] = json!(true);
+        }
+        if self.waits_for_a_press {
+            request["waitsForThePerson"] = json!(true);
         }
         JobMessage {
             content: "Continue this task in Instafy's browser.".to_owned(),
@@ -946,6 +1127,174 @@ mod tests {
         )
         .unwrap();
         assert!(!building.waits_for_the_person(&[]));
+    }
+
+    /// The sites of the pages a turn's own reader didn't read come from its output, as
+    /// `instafy web read` writes it: as JSON, a page it marks `stopped` and where that page
+    /// redirected, never one it read; as text, the same; every address of a read that read
+    /// nothing; and, where the turn's events kept only the end of a read of several pages, each
+    /// page that end doesn't show read. A command that isn't the reader names none, whatever its
+    /// output says. A card that opens one of those sites waits for the person's press and says so
+    /// to Studio, also where the person gave its address; a card for a site the reader read, and
+    /// a card the routing step posts, do not.
+    #[test]
+    fn a_card_waits_for_a_press_where_the_turns_reader_did_not_read_its_page() {
+        let completed = |command: &str, exit_code: i64, output: &str| {
+            json!({"type": "item.completed", "item": {
+                "type": "command_execution", "command": command, "exit_code": exit_code,
+                "status": "completed", "aggregated_output": output,
+            }})
+        };
+        let sites = |events: &[Value]| sites_its_reader_did_not_read(&[events]);
+        let set = |hosts: &[&str]| {
+            hosts
+                .iter()
+                .map(|host| host.to_string())
+                .collect::<BTreeSet<String>>()
+        };
+        let both = "instafy web read https://www.museum.example/en/visit https://guide.example/museum --json";
+        let json_output = r#"{
+ "ok": true,
+ "viewer": "server fetch",
+ "pages": [
+  {
+   "requestedUrl": "https://www.museum.example/en/visit",
+   "status": "stopped",
+   "code": "robots",
+   "message": "robots.txt disallows this path",
+   "tell": "This address only (and where it redirected): don't read it another way. Give the person the plain link.",
+   "provenance": {
+    "requestedUrl": "https://www.museum.example/en/visit",
+    "finalUrl": "https://visit.museum.example/hours",
+    "title": "",
+    "readAt": "2026-11-22T10:00:00.000Z",
+    "viewer": "server fetch"
+   },
+   "redirects": [
+    "https://visit.museum.example/hours"
+   ],
+   "fromCache": false
+  },
+  {
+   "requestedUrl": "https://guide.example/museum",
+   "status": "read",
+   "provenance": {
+    "requestedUrl": "https://guide.example/museum",
+    "finalUrl": "https://guide.example/museum",
+    "title": "The museum",
+    "readAt": "2026-11-22T10:00:02.000Z",
+    "viewer": "server fetch"
+   },
+   "redirects": [],
+   "fromCache": false,
+   "text": "<untrusted_page_content>\nOpen daily.\n</untrusted_page_content>"
+  }
+ ]
+}"#;
+        assert_eq!(
+            sites(&[completed(both, 0, json_output)]),
+            set(&["museum.example", "visit.museum.example"])
+        );
+        let text_output = "[stopped: forbidden] https://shop.example/search?q=vacuum\n  the site refused the read (HTTP 403)\n  This address only (and where it redirected): don't read it another way. Give the person the plain link.\n[read] https://other.example/vacuum\n  read 2026-11-22T10:00:00.000Z by server fetch, HTTP 200";
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://shop.example/search?q=vacuum https://other.example/vacuum",
+                0,
+                text_output
+            )]),
+            set(&["shop.example"])
+        );
+        // A read that read nothing: every address it asked for, but a page that needs a browser,
+        // which is the browser's to read.
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://a.example/x https://www.b.example/y --json",
+                2,
+                "{\n \"ok\": true\n}"
+            )]),
+            set(&["a.example", "b.example"])
+        );
+        let needs_browser = "{\n \"ok\": true,\n \"pages\": [\n  {\n   \"requestedUrl\": \"https://planner.example/\",\n   \"status\": \"needs_browser\",\n   \"code\": null\n  },\n  {\n   \"requestedUrl\": \"https://a.example/x\",\n   \"status\": \"failed\"\n  }\n ]\n}";
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://planner.example https://a.example/x --json",
+                2,
+                needs_browser
+            )]),
+            set(&["a.example"])
+        );
+        // Only the end of a read of several pages: each page it doesn't show read. A read of one
+        // page that read something read it, however little of its output is kept.
+        let tail = format!(
+            "{}   \"textChars\": 120\n  }},\n  {{\n   \"requestedUrl\": \"https://b.example/y\",\n   \"status\": \"read\",\n   \"text\": \"<untrusted_page_content>\\nOpen\\n</untrusted_page_content>\"\n  }}\n ]\n}}",
+            crate::codex::COMMAND_OUTPUT_KEPT_TAIL
+        );
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://a.example/x https://b.example/y --json",
+                0,
+                &tail
+            )]),
+            set(&["a.example"])
+        );
+        assert!(
+            sites(&[completed(
+                "instafy web read https://a.example/x --json",
+                0,
+                &tail
+            )])
+            .is_empty()
+        );
+        // What a page wrote never counts, also where the end kept starts inside it.
+        let written = format!(
+            "{}it says:\n[read] https://a.example/x\n</untrusted_page_content>\n[stopped: robots] https://c.example/z\n[read] https://b.example/y\n<untrusted_page_content url=\"https://b.example/y\">\n[stopped: robots] https://d.example/w\n</untrusted_page_content>",
+            crate::codex::COMMAND_OUTPUT_KEPT_TAIL
+        );
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://a.example/x https://b.example/y https://c.example/z",
+                0,
+                &written
+            )]),
+            set(&["a.example", "c.example"])
+        );
+        // Not the reader, and not a finished step.
+        assert!(sites(&[completed("cat notes.txt", 0, text_output)]).is_empty());
+        assert!(
+            sites(&[
+                json!({"type": "item.started", "item": {"type": "command_execution",
+            "command": both, "exit_code": 2, "aggregated_output": json_output}})
+            ])
+            .is_empty()
+        );
+
+        let refused = set(&["museum.example", "visit.museum.example"]);
+        let card = |task: &str| {
+            BrowserRequest::parse(json!({ "task": task }).as_object().unwrap()).unwrap()
+        };
+        let typed = ["What are its Sunday hours? https://www.museum.example/en/visit"];
+        let mut museum =
+            card("Open https://www.museum.example/en/visit and find its Sunday hours.");
+        assert!(!museum.waits_for_the_person(&typed), "the person gave it");
+        museum.wait_for_a_press_where_it_opens(&refused);
+        assert!(museum.waits_for_the_person(&typed));
+        assert_eq!(
+            museum.message().metadata.unwrap()["details"]["browserRequest"]["waitsForThePerson"],
+            json!(true)
+        );
+        let mut guide = card("Open https://guide.example/museum and read its hours.");
+        guide.wait_for_a_press_where_it_opens(&refused);
+        assert!(!guide.waits_for_the_person(&["Read https://guide.example/museum for me."]));
+        let posted = guide.message().metadata.unwrap();
+        let request = &posted["details"]["browserRequest"];
+        assert!(request.get("waitsForThePerson").is_none(), "{request}");
+        let mut routed =
+            BrowserRequest::routed("Open https://www.museum.example/en/visit for me.", false)
+                .unwrap();
+        routed.wait_for_a_press_where_it_opens(&refused);
+        assert!(
+            !routed.waits_for_the_person(&["Open https://www.museum.example/en/visit for me."])
+        );
     }
 
     /// Whether a card waits is read as Studio reads it, name for name: the hosts a text names,

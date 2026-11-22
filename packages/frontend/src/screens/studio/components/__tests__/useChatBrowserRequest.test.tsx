@@ -887,6 +887,23 @@ describe("Studio starting a request_browser card by itself", () => {
     expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: BROWSER_AUTO_START_COPY.unseenAddress });
   });
 
+  // A page the turn's own reader couldn't read ends in its link and one card
+  // that waits: opened by itself for an address the person wrote, the browser
+  // read with no press a page robots.txt refused Octo's reader.
+  it("leaves a card for a page Octo's reader couldn't read to the person, also for an address they wrote", async () => {
+    await render();
+    await advance(5_000);
+    const prompt = sendPrompt();
+    const waiting: ChatMessage = { ...card(), metadata: { messageType: "action_request", jobId: "job-1",
+      details: { browserRequest: { task: TASK, location: "auto", waitsForThePerson: true } } } };
+    value.messages = [...value.messages, prompt, waiting];
+    await render();
+    await advance(10);
+    await settleReading();
+    expect(value.activate).not.toHaveBeenCalled();
+    expect(lastState?.cardStates.get("job:job-1")).toEqual({ kind: "button", reason: null });
+  });
+
   it("leaves a legacy browser session a button in a covered space", async () => {
     // The controller does not record who started a separate session: it may
     // be a teammate's, with their pages and sign-ins.

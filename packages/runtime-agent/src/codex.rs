@@ -122,6 +122,10 @@ const SHARED_BROWSER_CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(
 const SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_EVENT_CHARS: usize = 4096;
 const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
+/// How a command's output in the turn's events starts when the room kept only its end: a reader
+/// of those events, such as which pages a turn's reader didn't read
+/// (`jobs::browser_request::sites_its_reader_did_not_read`), knows the start is gone.
+pub(crate) const COMMAND_OUTPUT_KEPT_TAIL: &str = "[command output truncated; keeping tail]\n";
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use project memory, pinned skills, and loaded learned blocks as the source of task behavior. This prompt only defines run-level invariants.
 - Use the dedicated browser tools configured for this turn when browser execution was requested. Every site and action approval the browser asks for still applies, and ask before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step unless the user's current message named it.
@@ -1144,6 +1148,11 @@ pub struct CodexRunOptions {
     /// never reach the chat as steps, such as the pass that only recovers a turn's missing answer
     /// (`finalization_codex_run_options`), so no search runs that the chat would not show.
     pub disable_native_web_search: bool,
+    /// A run that never reads a page with the owner-local browser (`instafy_local_browser`), on a
+    /// runtime that offers it: the retry that only fixes a refused card after its turn's searches
+    /// and reads (`jobs::refused_card_retry_options`), which has no shell and no web search
+    /// either, so it adds no read.
+    pub disable_local_browser: bool,
     /// An Instafy AI message's allowance of web searches, which its turn's runs and native helpers
     /// share (`managed_web_search`): the search tool keeps to it and counts what its searches
     /// cost, which the job's completion reports. None on any other lane: a person's own ChatGPT
@@ -1967,6 +1976,7 @@ impl CodexClient {
         let local_browser_config = if options.personal_browser
             || options.shared_browser
             || granted_mode
+            || options.disable_local_browser
         {
             None
         } else {
@@ -6686,7 +6696,7 @@ fn append_capped_command_output(buffer: &mut String, chunk: &[u8]) {
 
     let tail = tail_chars(buffer, MAX_COMMAND_OUTPUT_BUFFER_CHARS);
     buffer.clear();
-    buffer.push_str("[command output truncated; keeping tail]\n");
+    buffer.push_str(COMMAND_OUTPUT_KEPT_TAIL);
     buffer.push_str(&tail);
 }
 
@@ -6698,7 +6708,7 @@ fn compact_command_output_for_event(output: &str) -> String {
         return output.to_string();
     }
     format!(
-        "[command output truncated; keeping tail]\n{}",
+        "{COMMAND_OUTPUT_KEPT_TAIL}{}",
         tail_chars(output, MAX_COMMAND_OUTPUT_EVENT_CHARS)
     )
 }
