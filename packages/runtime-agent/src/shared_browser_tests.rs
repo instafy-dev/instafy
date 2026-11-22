@@ -3527,9 +3527,9 @@ async fn no_failed_step_reads_as_undefined() {
     assert!(
         address_not_given("navigate", Some(&asked), stale.structured_content.as_ref()).is_none()
     );
-    // The words are the controller's own refusal's.
+    // The words are the controller's own refusal's, whatever it says of a home page after them.
     assert!(SHARED_BROWSER_SCRIPT.contains(&format!(
-        "so it was not opened and gets no finding line: {ADDRESS_NOT_GIVEN_WORDS}, and "
+        "so it was not opened and gets no finding line: {ADDRESS_NOT_GIVEN_WORDS}${{opens}}. "
     )));
 }
 
@@ -3702,7 +3702,7 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
         ),
         (
             "refuseUngivenAddress",
-            "Octo opens only addresses it was given, and ${home} always opens. ${NEXT_SOURCE}`,",
+            "Octo opens only addresses it was given${opens}. ${NEXT_SOURCE}`,",
         ),
     ] {
         assert_eq!(SHARED_BROWSER_SCRIPT.matches(uses).count(), 1, "{name}");
@@ -3760,8 +3760,10 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
         said.iter()
             .any(|line| line.contains("const HOME_PAGE_OPENS = "))
     );
+    // And by that refusal only where a home page is the way on: never after a search nobody
+    // gave on a site nobody gave (`a_refused_search_nobody_gave_is_told_of_no_home_page`).
     assert!(said.iter().any(|line| {
-        line.contains("Octo opens only addresses it was given, and ${home} always opens.")
+        line.contains("const opens = home ? `, and ${home} always opens` : \"\";")
     }));
     assert!(SHARED_BROWSER_SCRIPT.contains("is link-only: Octo never opens it, in any tab."));
 }
@@ -4214,6 +4216,85 @@ async fn a_refused_address_names_its_sites_root_only_on_a_site_the_chat_was_give
         "https://www.reviews.example/laptops/five",
     ));
     assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
+    end_chat_browser_run(run);
+}
+
+/// The words a search nobody gave is refused with on a site the chat was not given: the same
+/// refusal (`shared_browser::address_not_given` reads it by "Octo opens only addresses it was
+/// given"), and no word of a home page.
+const SEARCH_NOBODY_GAVE: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Go on in this turn as \"Finding a page\" says.";
+
+/// A search nobody gave (an address with a query) on a site nobody gave is refused without the
+/// words that a site's home page always opens. Told so, a fill-in's turn refused a search
+/// engine's results address opened that engine's home page, typed the search into its box and
+/// left the person a prompt for a search nobody had asked for, on an engine nobody had named (a
+/// local test, Nov 20). The home page itself still opens, so a reviewer's own site is still read
+/// from its home page, its links and its own search box; a made-up page with no query still
+/// hears that a home page opens, and a search on a site the chat was given still names that
+/// site's home page.
+#[tokio::test]
+async fn a_refused_search_nobody_gave_is_told_of_no_home_page() {
+    let fixture = EmbeddedControllerFixture::new();
+    let step = |path: &str, url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                path,
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let asked = "Fill in what's still missing. The maker's site is www.maker.example.";
+    let run = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({
+            "prompt_text": asked,
+            "conversation_history": [{ "role": "user", "content": asked }],
+        }),
+    );
+    // A search engine's results address, in the chat's own tab and in a tab of Octo's own: the
+    // refusal, with no home page to go to and no word of the engine.
+    for path in ["/v1/tabs/open", "/v1/navigate"] {
+        let words = failure_of(&step(
+            path,
+            "https://www.search.example/search?q=Laptop+12+review",
+        ));
+        assert!(words.contains(SEARCH_NOBODY_GAVE), "{path}: {words}");
+        assert!(!words.contains("home page"), "{path}: {words}");
+        assert!(!words.contains("search.example"), "{path}: {words}");
+    }
+    // The runtime still reads it as an address nobody gave, never opened.
+    assert_eq!(
+        crate::shared_browser::address_not_given(
+            "navigate",
+            Some(&json!({ "url": "https://www.search.example/search?q=Laptop+12+review" })),
+            Some(&json!({ "error": { "reason": SEARCH_NOBODY_GAVE } })),
+        )
+        .as_deref(),
+        Some("https://www.search.example/search?q=Laptop+12+review")
+    );
+    // A made-up page with no query still hears that a home page opens.
+    let words = failure_of(&step(
+        "/v1/navigate",
+        "https://www.reviews.example/laptop-12-review",
+    ));
+    assert!(words.contains(MADE_UP_ON_A_SITE_NOBODY_GAVE), "{words}");
+    // A search on the site the person named goes back to that site's home page, by its address.
+    let words = failure_of(&step(
+        "/v1/navigate",
+        "https://www.maker.example/search?q=warranty",
+    ));
+    assert!(
+        words.contains(&made_up_address_words("https://www.maker.example")),
+        "{words}"
+    );
+    // And a reviewer's home page nobody gave opens, with no prompt, as any site's does.
+    payload_of(&step("/v1/navigate", "https://www.reviews.example/"));
+    assert!(!fixture.approval_dir.join("request.json").exists());
     end_chat_browser_run(run);
 }
 
@@ -14341,7 +14422,7 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
         ),
         (
             "approval_timeout",
-            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Say in one short sentence what you were waiting for their OK on. They will continue in a new message when they are ready.",
+            "The person has not answered the browser's approval prompt yet, so the step was not performed. End this turn now: do not retry or call another browser tool. Instafy tells them the step wasn't done and that a new message asks again: your reply says neither.",
             false,
         ),
         (
@@ -14409,7 +14490,7 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     *latch.terminal_step.lock().await = Some("search");
     for (text, activity) in [
         (
-            "The person said no, so this step didn't happen. Don't try it another way.",
+            "The person said no, so this step didn't happen. Don't try it another way. Instafy tells them so and asks what to try instead: your reply says neither.",
             Some(json!({ "step": "search" })),
         ),
         (

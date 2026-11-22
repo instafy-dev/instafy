@@ -67,6 +67,13 @@ const OLD_NOT_FOUND_LINE: &str = "A \"not found\" fact means Octo didn't find it
 /// own page of what they asked about gave it; what a route's limits are is
 /// `instafy-getting-around`'s, and the line names no topic.
 const ROUTE_LINE: &str = "\n- Where you use a fact, say with it what its finding says it doesn't confirm: a value Octo chose, not the page, and what it leaves out. Unless the person gave it or a finding says the own page of what they asked about names it, a value filled in on a page's form (an option, a day, a time) is Octo's pick and the fact is only for it: say both where you use it.\n";
+/// What a hand-back reads of a step the browser didn't take because of the person's answer to its
+/// prompt (runtime-agent `jobs/browser_hand_back.rs`, `STEP_NOT_DONE_LINE`): "not checked" for
+/// that step's values, and nothing to say about the step itself.
+const NOT_CHECKED_LINE: &str = "Wherever a value only that step would give goes, write \"not checked\", in place of `notFound`'s words for it.";
+/// The runtime's line for a prompt nobody answered in time (runtime-agent `jobs/mod.rs`,
+/// `terminal_shared_browser_summary`), which ends a browser turn's reply when no build follows.
+const ASK_AGAIN: &str = "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again.";
 /// How a turn that may change files reads a public page (`AGENTS.md`'s "Reading the web", given
 /// with the lane to a turn that runs without that file): a build once read a shop's site with
 /// python's `urllib`.
@@ -114,6 +121,18 @@ fn a_hand_back_that_starts_the_chats_building_thread_builds_the_page_asked_for_v
     run_on_a_large_stack(Case::FirstBuildingTurn)
 }
 
+#[test]
+fn a_hand_back_after_a_prompt_that_ran_out_ends_in_the_runtimes_line_via_proxy() -> Result<()> {
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        return run_isolated_fixture(
+            CHILD,
+            "browser_hand_back::a_hand_back_after_a_prompt_that_ran_out_ends_in_the_runtimes_line_via_proxy",
+            "browser-hand-back-step-not-done",
+        );
+    }
+    run_on_a_large_stack(Case::StepNotDone)
+}
+
 /// Which hand-back a fixture runs.
 #[derive(Clone, Copy)]
 enum Case {
@@ -123,6 +142,8 @@ enum Case {
     /// The routing step sent the person's message straight to the browser, so the hand-back
     /// is the chat's first building turn.
     FirstBuildingTurn,
+    /// As [`Case::FirstBuildingTurn`], after a browser part whose last step's prompt ran out.
+    StepNotDone,
 }
 
 fn run_on_a_large_stack(case: Case) -> Result<()> {
@@ -518,6 +539,7 @@ async fn run_case(case: Case) -> Result<()> {
     match case {
         Case::OnTheCardsThread => on_the_cards_thread(&space).await?,
         Case::FirstBuildingTurn => as_the_chats_first_building_turn(&space).await?,
+        Case::StepNotDone => after_a_step_whose_prompt_ran_out(&space).await?,
     }
 
     drop(settings);
@@ -808,6 +830,52 @@ async fn as_the_chats_first_building_turn(space: &Space<'_>) -> Result<()> {
         "{:?}",
         built.provider_conversation_state
     );
+    Ok(())
+}
+
+/// The browser part of a routed message read the maker's pages, and the prompt of its last step,
+/// a search, ran out. The hand-back builds the page from what was read, told to write "not
+/// checked" where only that step would give a value and nothing about the step itself, and its
+/// reply ends in the runtime's own line for that answer, once: the line a browser turn with no
+/// build after it ends in. Asked to word the step itself, a build wrote that "the browser's form
+/// step wasn't completed because it received no answer", and never that Octo can ask again (a
+/// local test, Nov 20).
+async fn after_a_step_whose_prompt_ran_out(space: &Space<'_>) -> Result<()> {
+    let mut record = hand_back_record();
+    record["request"] = json!(PERSON_REQUEST);
+    record["personRequest"] = json!(PERSON_REQUEST);
+    // As the controller stamps it from the browser part's own record of how its run ended.
+    record["stepNotDone"] = json!({ "answer": "expired", "step": "search" });
+    let built = space
+        .run(
+            "the hand-back",
+            job(
+                space.project_id,
+                Uuid::new_v4(),
+                HAND_BACK_PROMPT,
+                json!({"execution_mode":"apply","browserHandBack":record}),
+            ),
+        )
+        .await?;
+
+    let hand_back = space.hand_back_requests();
+    let prompt = last_user_text(hand_back.first().context("the hand-back's first request")?);
+    assert!(
+        prompt.contains("\"stepNotDone\": \"a search: no answer from you\""),
+        "{prompt}"
+    );
+    assert!(prompt.contains(NOT_CHECKED_LINE), "{prompt}");
+    for asked in ["which step didn't run", "that you can ask again"] {
+        assert!(!prompt.contains(asked), "{asked}: {prompt}");
+    }
+    // It built the page as any hand-back does, and its words come first, then the line.
+    assert_eq!(
+        hand_back.len(),
+        3,
+        "the starter, the preview, and the reply"
+    );
+    assert!(space.workspace.join("sites/laptops/index.html").is_file());
+    assert_eq!(built.summary, format!("{BUILT}\n\n{ASK_AGAIN}"));
     Ok(())
 }
 

@@ -214,7 +214,8 @@ const MISSING_LINE: &str = "After your finding lines, one line `{\"missing\": [\
 /// beside the same values in its missing line, so its pass tried a search engine's results page
 /// twice and was refused, and another pass read review indexes for a review it never found (a
 /// local test, Nov 9). A page with neither is a value the turn didn't find: its missing line names
-/// it. What that means for a topic (a review no page links to) is its skill's
+/// it, and the runtime holds each entry to that before a pass starts ([`take_pages_to_read`]).
+/// What that means for a topic (a review no page links to) is its skill's
 /// (`instafy-comparing`).
 const UNREAD_LINE: &str = "Then one last line `{\"unread\": [\"<a page this request needs that you didn't open>\"]}`, or `{\"unread\": []}` when you opened every one; a page's own tab or link for a value you didn't find there is one until you open it. \
 Each entry needs its own address, or a tab or link on a page you read, named with that page (\"<page>'s <link> link\"), never by that page's address; \
@@ -1123,7 +1124,8 @@ fn answers_end_a_step(job: &LeaseJob) -> bool {
 /// answer to that step's prompt (they said no, didn't answer in time, or the page changed after
 /// their yes: `shared_browser_activity::ANSWER_CODES`), under a controller that hands such a
 /// turn back ([`AFTER_A_PROMPT_KEY`]). The turn then ends as any finished turn does: its build
-/// makes the change from what it read and says which step didn't run. Held back as a pause, a
+/// makes the change from what it read, and its reply ends in the runtime's line for that step
+/// ([`step_not_done_code`]). Held back as a pause, a
 /// page message whose part had read the hours it needed got no build and no page, for one
 /// planner step whose prompt ran out (a local test, Nov 19). Every other end holds the build
 /// back as it always did: a pause the person continues in the browser, a safety stop and a
@@ -1305,6 +1307,381 @@ pub(super) fn take_unread_pages(summary: &mut String) -> Vec<String> {
         .join("\n");
     *summary = kept.trim_end().to_string();
     pages
+}
+
+/// The pages of a browser turn's unread line that its second pass reads
+/// (`jobs::read_the_unread_pages`): [`take_unread_pages`], without each entry that is no page a
+/// pass can open ([`is_a_page_to_open`]). Such an entry is a value the turn didn't find, as its
+/// line says ([`UNREAD_LINE`]): it starts no pass, and the answer's missing line names it
+/// ([`name_missing`]). A second pass's own missing line replaces that line, as it replaces every
+/// name of the first's ([`add_the_second_pass`]): it runs on the turn's thread, its first answer
+/// in view. Every entry once went to the pass as a page to "read only": a fill-in whose only gap
+/// was reviews had its search address refused, ended as told, and named three wishes unread
+/// ("independent reviews of <model>"); its pass then opened a search engine nobody named by its
+/// home page, typed the search and left the person a prompt for it, which ran out (a local
+/// test, Nov 20).
+pub(super) fn take_pages_to_read(summary: &mut String) -> Vec<String> {
+    put_on_own_lines(summary);
+    let listed = summary.lines().any(|line| finding_line(line).is_some());
+    let read: Vec<PageRead> = summary
+        .lines()
+        .filter(|line| finding_line(line) == Some(true))
+        .filter_map(json_object_line)
+        .map(|object| PageRead::of(&object))
+        .collect();
+    let (pages, values): (Vec<String>, Vec<String>) = take_unread_pages(summary)
+        .into_iter()
+        .partition(|entry| is_a_page_to_open(entry, listed.then_some(read.as_slice())));
+    name_missing(summary, &values);
+    pages
+}
+
+/// What an unread entry names when it is a page a pass can open ([`is_a_page_to_open`]): a page,
+/// a tab, a link, a site or a section of one.
+const PAGE_WORDS: [&str; 14] = [
+    "page", "pages", "homepage", "tab", "tabs", "link", "links", "linked", "site", "sites",
+    "website", "websites", "section", "sections",
+];
+
+/// Whether an unread entry is a page a second pass can open, as the unread line asks of each
+/// ([`UNREAD_LINE`]): it carries its own address ([`carries_an_address`]), or it names a page, a
+/// tab or a link ([`PAGE_WORDS`]) with the name of the page or site it is on
+/// ([`names_of_its_page`]: "<page>'s <link> link", "… linked from <page>"), and a page the
+/// turn's finding lines list as read goes by that name ([`PageRead::goes_by`]). An entry that
+/// gives its page no name is a wish ("independent reviews of <model>", "review links for
+/// <model>"), and so is one that names no page the turn read, such as a page that stopped it.
+/// With no page in its finding lines at all (`read` None: its only line was an address the
+/// browser refused it), nothing holds a name to a page, and an entry that gives one goes to the
+/// pass as the turn named it, as any did before: the pages such a turn names are the ones it was
+/// kept from. The words are all the runtime has of an entry, so this reads the shape the line
+/// asks for and nothing of a topic. Passes told every entry went to the pages turns named this
+/// way: a site's news releases as "<site>'s individual news release pages for …", the specs of a
+/// model whose page they read as "<model>'s linked Technical Specifications tab", and the other
+/// models a page listed as "<maker>'s <model> camera product pages for the other two" (a local
+/// test, Nov 20).
+fn is_a_page_to_open(entry: &str, read: Option<&[PageRead]>) -> bool {
+    if carries_an_address(entry) {
+        return true;
+    }
+    let words = words_in(entry);
+    words.iter().any(Word::is_a_page_word)
+        && names_of_its_page(&words)
+            .into_iter()
+            .any(|name| read.is_none_or(|read| read.iter().any(|page| page.goes_by(name))))
+}
+
+/// Whether an unread entry carries an address: one of its words is an `http(s)` address, or a
+/// site's name with a dot and a top-level name of letters ("reviews.example",
+/// "reviews.example/laptops"), as a turn names a site's home page. A version or a number with a
+/// dot ("12.5-inch", "v1.2") is none.
+fn carries_an_address(entry: &str) -> bool {
+    entry.split_whitespace().any(|word| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/');
+        let word = word
+            .strip_suffix("'s")
+            .or_else(|| word.strip_suffix("\u{2019}s"))
+            .unwrap_or(word);
+        if word.starts_with("http://") || word.starts_with("https://") {
+            return site_of(word).is_some();
+        }
+        let host = word.split(['/', '?', '#', ':']).next().unwrap_or_default();
+        let labels: Vec<&str> = host.split('.').collect();
+        labels.len() > 1
+            && !word.contains('@')
+            && labels.iter().all(|label| {
+                !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-')
+            })
+            && labels
+                .last()
+                .is_some_and(|top| top.len() > 1 && top.chars().all(char::is_alphabetic))
+    })
+}
+
+/// A word of an unread entry, or of a page's title or facts, as [`is_a_page_to_open`] reads it.
+#[derive(Clone, Debug, PartialEq)]
+enum Word {
+    /// A run of letters and digits in lower case, and whether it is a name's: a capital or a digit
+    /// as the turn wrote it ("HERO", "Laptop", "12"), never "the", "page" or "reviews".
+    Text(String, bool),
+    /// The "'s" after a name ("Laptop 12's").
+    Of,
+    /// Punctuation that ends a phrase: a comma, a colon, a bracket, a quote, or a dash or a bar
+    /// on its own.
+    End,
+}
+
+impl Word {
+    fn is_a_name(&self) -> bool {
+        matches!(self, Word::Text(_, true))
+    }
+
+    fn is_a_page_word(&self) -> bool {
+        matches!(self, Word::Text(text, _) if PAGE_WORDS.contains(&text.as_str()))
+    }
+
+    /// The word as names are compared: its text in lower case, or "'s".
+    fn key(&self) -> &str {
+        match self {
+            Word::Text(text, _) => text,
+            Word::Of => "'s",
+            Word::End => "",
+        }
+    }
+}
+
+/// The words of `text`, in order ([`Word`]).
+fn words_in(text: &str) -> Vec<Word> {
+    let ends_a_phrase = |c: char| {
+        matches!(
+            c,
+            ',' | ';'
+                | ':'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '"'
+                | '\''
+                | '|'
+                | '-'
+                | '\u{00B7}'
+                | '\u{2013}'
+                | '\u{2014}'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '\u{201C}'
+                | '\u{201D}'
+        )
+    };
+    let mut words = Vec::new();
+    for raw in text.split_whitespace() {
+        let Some(start) = raw.find(char::is_alphanumeric) else {
+            if raw.chars().any(ends_a_phrase) {
+                words.push(Word::End);
+            }
+            continue;
+        };
+        let end = raw
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_alphanumeric())
+            .map_or(raw.len(), |(at, c)| at + c.len_utf8());
+        let core = &raw[start..end];
+        let name = ["'s", "'S", "\u{2019}s", "\u{2019}S"]
+            .iter()
+            .find_map(|mark| core.strip_suffix(*mark));
+        if raw[..start].chars().any(ends_a_phrase) {
+            words.push(Word::End);
+        }
+        for run in name.unwrap_or(core).split(|c: char| !c.is_alphanumeric()) {
+            if !run.is_empty() {
+                let is_a_name = run.chars().any(|c| c.is_uppercase() || c.is_numeric());
+                words.push(Word::Text(run.to_lowercase(), is_a_name));
+            }
+        }
+        if name.is_some() {
+            words.push(Word::Of);
+        }
+        if raw[end..].chars().any(ends_a_phrase) {
+            words.push(Word::End);
+        }
+    }
+    words
+}
+
+/// The words of `words` without "'s" and punctuation.
+fn texts_of(words: &[Word]) -> Vec<String> {
+    words
+        .iter()
+        .filter_map(|word| match word {
+            Word::Text(text, _) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The names an unread entry gives the page or site it is on, as the unread line asks
+/// ([`UNREAD_LINE`]: "<page>'s <link> link"): the name before each "'s" ("Laptop 12's Specs
+/// tab", "the Laptops page's Laptop 12 link"), the name after "from" ("… linked from <page>"),
+/// and the name after "on" with a page word after it ("… on the News page"), past one word
+/// after "from" or "on" that is no name ("the"). A name is a run of names' words
+/// ([`Word::is_a_name`]), a name's "'s" inside it included ("Ann's Guide's site"); a page word at
+/// its end is none of it ("the Laptops page's"), and a name of single letters is none. "of" and
+/// "for" never name the page an entry is on: "independent reviews of <model>" is a wish.
+fn names_of_its_page(words: &[Word]) -> Vec<&[Word]> {
+    let mut names: Vec<&[Word]> = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        match word {
+            Word::Of => {
+                let mut end = at;
+                while end > 0 && words[end - 1].is_a_page_word() {
+                    end -= 1;
+                }
+                let mut start = end;
+                while start > 0
+                    && (words[start - 1].is_a_name()
+                        || (words[start - 1] == Word::Of
+                            && start > 1
+                            && words[start - 2].is_a_name()))
+                {
+                    start -= 1;
+                }
+                names.push(&words[start..end]);
+            }
+            Word::Text(text, false) if text == "from" || text == "on" => {
+                let mut start = at + 1;
+                if words.get(start).is_some_and(|next| {
+                    matches!(next, Word::Text(_, false)) && !next.is_a_page_word()
+                }) {
+                    start += 1;
+                }
+                let mut end = start;
+                while words
+                    .get(end)
+                    .is_some_and(|next| next.is_a_name() || *next == Word::Of)
+                {
+                    end += 1;
+                }
+                let then = words.get(end);
+                while end > start && words[end - 1] == Word::Of {
+                    end -= 1;
+                }
+                if text == "from" || then.is_some_and(Word::is_a_page_word) {
+                    names.push(&words[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    names.retain(|name| {
+        name.iter()
+            .any(|word| matches!(word, Word::Text(text, _) if text.chars().count() > 1))
+    });
+    names
+}
+
+/// A page a finding line lists as read, by what an unread entry may call it
+/// ([`PageRead::goes_by`]): the words of its title, or of the last part of its address when the
+/// line gives no title, in order; its site's own name; and the words of each of its facts.
+struct PageRead {
+    title: Vec<String>,
+    site: Vec<String>,
+    facts: Vec<Vec<String>>,
+}
+
+impl PageRead {
+    fn of(object: &serde_json::Map<String, JsonValue>) -> Self {
+        let text = |key: &str| object.get(key).and_then(JsonValue::as_str).unwrap_or("");
+        let url = reqwest::Url::parse(text("url").trim()).ok();
+        let last_part = url
+            .as_ref()
+            .and_then(|url| url.path_segments()?.rfind(|part| !part.is_empty()))
+            .unwrap_or_default();
+        let title = text("title").trim();
+        let title = words_in(if title.is_empty() { last_part } else { title })
+            .iter()
+            .filter(|word| **word != Word::End)
+            .map(|word| word.key().to_string())
+            .collect();
+        // The site's own name: its host's parts but the last, without `www` or a hyphen.
+        let host = url
+            .as_ref()
+            .and_then(|url| url.host_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut site: Vec<String> = host.split('.').map(|part| part.replace('-', "")).collect();
+        site.pop();
+        site.retain(|part| part.chars().count() > 2 && part != "www");
+        let facts = object
+            .get("facts")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .map(|fact| texts_of(&words_in(fact)))
+            .collect();
+        Self { title, site, facts }
+    }
+
+    /// Whether the page goes by `name`, a name an unread entry gives the page it is on
+    /// ([`names_of_its_page`]): its words are in a row in the page's title, one word or a model's
+    /// one digit included ("Kit" in "Maker Kit (our smallest camera)", "Phone 9" in "Maker Phone
+    /// 9 - Maker Store"), make up its site's name or start with it ("The Reviewer" for
+    /// thereviewer.example, "Maker Kit" for maker.example), or, two words or more, are all in
+    /// one of its facts, as a page it lists ("Laptop 16" in "Lists the Laptop 12, 13 and 16.").
+    fn goes_by(&self, name: &[Word]) -> bool {
+        let keys: Vec<&str> = name.iter().map(Word::key).collect();
+        let texts = texts_of(name);
+        (!keys.is_empty()
+            && self
+                .title
+                .windows(keys.len())
+                .any(|window| window.iter().map(String::as_str).eq(keys.iter().copied())))
+            || texts.first().is_some_and(|first| {
+                self.site
+                    .iter()
+                    .any(|site| *site == texts.concat() || site == first)
+            })
+            || (texts.len() > 1
+                && self
+                    .facts
+                    .iter()
+                    .any(|fact| texts.iter().all(|text| fact.contains(text))))
+    }
+}
+
+/// Adds `values`, unread entries that are no page a pass can open, to the names an answer's
+/// missing line gives ([`missing_names_in`]), in one missing line where its first stood, or
+/// after its last line when it wrote none. Bounded like any name of that line
+/// ([`missing_names`]), each cut after a whole word ([`cut_after_a_word`]): an entry runs to
+/// [`UNREAD_PAGE_MAX_CHARS`], and cut in a word, "I didn't find …" would end in half of it.
+fn name_missing(summary: &mut String, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    let mut names = missing_names_in(summary);
+    let values: Vec<String> = values
+        .iter()
+        .map(|value| cut_after_a_word(value, MISSING_NAME_MAX_CHARS))
+        .collect();
+    for name in missing_names(&json!(values)) {
+        if names.len() < MISSING_MAX && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let line = json!({ "missing": names }).to_string();
+    let mut lines: Vec<&str> = Vec::new();
+    let mut written = false;
+    for kept in summary.lines() {
+        if missing_line(kept).is_none() {
+            lines.push(kept);
+        } else if !written {
+            lines.push(&line);
+            written = true;
+        }
+    }
+    if !written {
+        lines.push(&line);
+    }
+    *summary = lines.join("\n");
+}
+
+/// `text` on one line within `max` characters: whole when it fits, else up to its last whole
+/// word that fits, without the comma or colon after it; a word longer than `max` is cut.
+fn cut_after_a_word(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let head: String = text.chars().take(max + 1).collect();
+    let cut = match head.rfind(' ') {
+        Some(at) => &head[..at],
+        None => head
+            .char_indices()
+            .nth(max)
+            .map_or(head.as_str(), |(at, _)| &head[..at]),
+    };
+    cut.trim_end_matches([',', ';', ':', ' ']).to_string()
 }
 
 /// The most values a missing line names that reach the build, and the longest name of one: the
@@ -1975,10 +2352,9 @@ pub(super) fn hands_its_message_to_its_build(metadata: Option<&JsonValue>, summa
 
 /// Whether a build answers after a browser turn whose run a person's answer to a step's prompt
 /// ended ([`ends_only_its_step`]): its findings go back to the building turn ([`hands_back`]) and
-/// name a page it read, so the hand-back follows, and that build says which step didn't run and
-/// that it can ask again (`STEP_NOT_DONE_LINE`). Its own words then go without the runtime's line
-/// for that step: under them, "Tell Octo what to try instead." came right before the build's
-/// answer.
+/// name a page it read, so the hand-back follows, and that build's reply ends in the runtime's
+/// line for the step ([`step_not_done_code`]). Its own words then go without that line: under
+/// them, "Tell Octo what to try instead." came right before the build's answer.
 pub(super) fn its_build_answers(metadata: Option<&JsonValue>, summary: &str) -> bool {
     metadata.is_some_and(hands_back) && pages_read(summary) > 0
 }
@@ -2401,16 +2777,39 @@ const STEP_NOT_DONE_RECORD_KEY: &str = "stepNotDone";
 
 /// How a building turn reads a step the browser didn't take because of its prompt
 /// (`stepNotDone`, [`step_not_done_words`]). Such a prompt ends the browser part, not the
-/// message: the build makes the change from what was read, and says the step didn't run. Ended
+/// message: the build makes the change from what was read. Ended
 /// with the browser part, a page message whose part had read the hours it needed made no page,
 /// for one planner step whose prompt ran out (a local test, Nov 19). A value only that step
 /// would give is in the part's missing line too, and "not checked" takes the place of
 /// [`NOT_FOUND_LINE`]'s words for it: told both, and to use those unless a page it read gives the
-/// value, a build could get it another way.
+/// value, a build could get it another way. That the step didn't run, and what the person does
+/// next, is the runtime's one line under the build's reply ([`step_not_done_code`]), the same
+/// after every such step, and the build is told so, as the browser turn is by the step's own
+/// answer (`shared_browser::terminal_consent_call_result`): one voice says it. Asked to say it
+/// in a line of its own, a build wrote that "the browser's form step wasn't completed because it
+/// received no answer" and left out that Octo can ask again (a local test, Nov 20).
 pub(super) const STEP_NOT_DONE_LINE: &str = "`stepNotDone` is a step the browser didn't take, and why: the person said no to its prompt, \
 didn't answer it in time, or the page changed after their yes. Wherever a value only that step would give goes, write \"not checked\", \
-in place of `notFound`'s words for it. Say in one line which step didn't run and why, in those words, and that you can ask again. \
+in place of `notFound`'s words for it. Instafy tells the person under your reply that the step wasn't done and what they can do: your reply says neither. \
 Don't try it again, or get its values another way (another page, a search or a tool), in this turn.";
+
+/// The code of the person's answer that ended a step of the browser part before this build
+/// (`shared_browser_activity::ANSWER_CODES`), as its hand-back's record names that answer
+/// (`stepNotDone`, which the controller stamps from the part's own artifact); None for any other
+/// turn, and for an answer that is not one of the person's. The runtime's line for that code
+/// ends the build's reply (`jobs::end_with_the_step_not_done`), as it ends the reply of a browser
+/// turn no build follows: one ending for a step that didn't run, in one voice.
+pub(super) fn step_not_done_code(metadata: Option<&JsonValue>) -> Option<&'static str> {
+    let step = verified_hand_back(metadata)?.get(STEP_NOT_DONE_RECORD_KEY)?;
+    // As the controller names each answer from its code (runtime-controller
+    // `browser_hand_back::step_not_done`).
+    match step.get("answer")?.as_str()? {
+        "denied" => Some("approval_denied"),
+        "expired" => Some("approval_timeout"),
+        "stale" => Some("approval_stale"),
+        _ => None,
+    }
+}
 
 /// A record's `stepNotDone` in the runtime's words: the step as the turn's line names the
 /// person's answer to it ("a search on <site>"), then why it didn't run: "a search on <site>: no
@@ -4925,36 +5324,44 @@ mod tests {
 
     /// A step a prompt ended reaches the build as the runtime says it (`stepNotDone`): which
     /// step, on which site, and why it didn't run, in the person's terms, with what to do: write
-    /// "not checked" where only it would give a value, say in one line which step didn't run and
-    /// offer to ask again, and never try it again or another way. A record with no such step, or
-    /// one whose answer is none of the person's, reads none.
+    /// "not checked" where only it would give a value, and never try it again or another way.
+    /// The build is not asked to say which step didn't run or to offer to ask again: the
+    /// runtime's own line for the person's answer ends its reply ([`step_not_done_code`]), the
+    /// same after every such step. Asked for a line of its own, a build wrote "the browser's
+    /// form step wasn't completed because it received no answer" and left the offer out (a
+    /// local test, Nov 20). A record with no such step, or one whose answer is none of the
+    /// person's, reads none and gets no line.
     #[test]
     fn a_step_a_prompt_ended_reads_as_the_persons_step() {
         let mut record = fixtures()["stampedRecord"].clone();
-        for (answer, step, host, words) in [
+        for (answer, step, host, words, code) in [
             (
                 "expired",
                 "search",
                 Some("transit.example"),
                 "a search on transit.example: no answer from you",
+                "approval_timeout",
             ),
             (
                 "denied",
                 "navigate",
                 Some("planner.example"),
                 "opening planner.example: you said no",
+                "approval_denied",
             ),
             (
                 "stale",
                 "click",
                 None,
                 "a click: the page changed after you said yes",
+                "approval_stale",
             ),
             (
                 "denied",
                 "drag",
                 Some("www.planner.example"),
                 "a step: you said no",
+                "approval_denied",
             ),
         ] {
             let mut step_not_done = json!({ "answer": answer, "step": step });
@@ -4962,10 +5369,8 @@ mod tests {
                 step_not_done["host"] = json!(host);
             }
             record[STEP_NOT_DONE_RECORD_KEY] = step_not_done;
-            let section = format_browser_hand_back_section(Some(
-                &json!({ "browserHandBack": record.clone() }),
-            ))
-            .expect("section");
+            let metadata = json!({ "browserHandBack": record.clone() });
+            let section = format_browser_hand_back_section(Some(&metadata)).expect("section");
             assert_eq!(
                 fenced_data(&section)[STEP_NOT_DONE_RECORD_KEY],
                 json!(words)
@@ -4978,6 +5383,27 @@ mod tests {
             assert!(section.contains(
                 "Don't try it again, or get its values another way (another page, a search or a tool), in this turn."
             ));
+            // The step is said once, by the runtime: the build is asked for no line about it, and
+            // told, as the browser turn is by the step's own answer, that its reply says neither
+            // that the step wasn't done nor what the person can do.
+            for asked in ["Say in one line", "ask again", "which step didn't run"] {
+                assert!(!section.contains(asked), "{asked}: {section}");
+            }
+            assert!(
+                section.contains(
+                    "Instafy tells the person under your reply that the step wasn't done and what they can do: your reply says neither."
+                ),
+                "{section}"
+            );
+            assert_eq!(step_not_done_code(Some(&metadata)), Some(code), "{answer}");
+            assert!(crate::shared_browser_activity::ANSWER_CODES.contains(&code));
+            // Only on a record the controller checked.
+            let mut unchecked = record.clone();
+            unchecked["verified"] = json!(false);
+            assert_eq!(
+                step_not_done_code(Some(&json!({ "browserHandBack": unchecked }))),
+                None
+            );
         }
         for other in [
             json!({ "answer": "allowed" }),
@@ -4985,6 +5411,11 @@ mod tests {
             JsonValue::Null,
         ] {
             record[STEP_NOT_DONE_RECORD_KEY] = other.clone();
+            assert_eq!(
+                step_not_done_code(Some(&json!({ "browserHandBack": record.clone() }))),
+                None,
+                "{other}"
+            );
             let section = format_browser_hand_back_section(Some(
                 &json!({ "browserHandBack": record.clone() }),
             ))
@@ -5953,6 +6384,251 @@ mod tests {
         assert!(comparing.contains(
             "- A review you have no address or link for is a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
         ));
+    }
+
+    /// The runtime holds each unread entry to what its line asks before a second pass starts
+    /// ([`take_pages_to_read`]): an entry with no address that names its page, tab or link with
+    /// no page the turn read is a value it didn't find, so no pass is told to read it, and the
+    /// answer's missing line names it. A fill-in whose only gap was reviews read the maker's page,
+    /// had a search address refused and ended as told, with three wishes in its unread line; told
+    /// to "read only those now", its pass opened a search engine nobody named by its home page,
+    /// typed the search and left the person a prompt for it (a local test, Nov 20). An entry with
+    /// its own address, a site's name included, and one named with a page or site the turn read,
+    /// in the shapes turns write, still go to the pass, as the warranty behind a product page's
+    /// own link did (a local test, Nov 8): a site's news releases by the site's name, a tab by a
+    /// model's one word or one digit, the other models' pages a page read lists, and a reviewer's
+    /// site read, which passes told every entry went to (a local test, Nov 20).
+    #[test]
+    fn an_unread_entry_that_is_no_page_starts_no_pass_and_is_named_missing() {
+        let read = r#"{"url": "https://maker.example/products/laptop-12", "title": "Laptop 12 | Maker", "facts": ["Weight: 1.3 kg"]}"#;
+        let wishes = [
+            "independent reviews of Laptop 12",
+            "independent reviews of Laptop 13",
+            "independent reviews of Laptop 16",
+        ];
+        // The fill-in: every entry is a wish, so no pass starts, and its missing line names
+        // them after the value it named itself.
+        let mut summary = format!(
+            "Read 1 page.\n{read}\n{{\"missing\": [\"reviews\"]}}\n{}",
+            json!({ "unread": wishes })
+        );
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        assert_eq!(
+            summary,
+            format!(
+                "Read 1 page.\n{read}\n{}",
+                json!({ "missing": ["reviews", wishes[0], wishes[1], wishes[2]] })
+            )
+        );
+        assert_eq!(
+            not_found_of(&summary),
+            [
+                "I didn't find reviews",
+                "I didn't find independent reviews of Laptop 12",
+                "I didn't find independent reviews of Laptop 13",
+                "I didn't find independent reviews of Laptop 16",
+            ]
+        );
+        // An answer with no missing line gets one, after its lines; a name it gave already is
+        // there once.
+        let mut summary = format!("{read}\n{}", json!({ "unread": [wishes[0]] }));
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        assert_eq!(
+            summary,
+            format!("{read}\n{}", json!({ "missing": [wishes[0]] }))
+        );
+        let mut summary = format!(
+            "{read}\n{}\n{}",
+            json!({ "missing": [wishes[0]] }),
+            json!({ "unread": [wishes[0]] })
+        );
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        assert_eq!(
+            summary,
+            format!("{read}\n{}", json!({ "missing": [wishes[0]] }))
+        );
+
+        // What a pass can open goes to it, as the turn wrote it and in its order: a page, tab or
+        // link named with the page it read, by that page's title, by words of it or by its
+        // site's name, after "'s", "from" or "on … page", and an entry with an address of its
+        // own, a reviewer's home page by its site's name included. The wishes beside them still
+        // go to the missing line.
+        let pages = [
+            "Laptop 12's Specs tab",
+            "the Laptop 12 page's Warranty link",
+            "Maker's Support link",
+            "Maker's individual news release pages for the March 3 headline",
+            "the Laptop 16 page linked from the Laptop 12 page",
+            "the Warranty link on the Laptop 12 page",
+            "https://reviews.example/laptop-12",
+            "reviews.example",
+            "reviews.example's Laptops link on its home page",
+        ];
+        let named: Vec<&str> = pages
+            .iter()
+            .copied()
+            .chain([wishes[0], "a second reviewer's own page"])
+            .collect();
+        let mut summary = format!("{read}\n{}", json!({ "unread": named }));
+        assert_eq!(take_pages_to_read(&mut summary), pages);
+        assert_eq!(
+            summary,
+            format!(
+                "{read}\n{}",
+                json!({ "missing": [wishes[0], "a second reviewer's own page"] })
+            )
+        );
+        let prompt = unread_pages_prompt(&pages.map(str::to_string));
+        assert!(!prompt.contains("independent reviews"), "{prompt}");
+        // The shapes turns write for a page or site they read, each with that page: a one-word
+        // name inside a longer title, a model's one digit, a site's own name with "pages" and no
+        // tab or link, the other models' pages a read page lists, and a reviewer's site, by its
+        // title or, with none, by its address, its "'s" inside the name included.
+        for (page_read, entry) in [
+            (
+                r#"{"url": "https://maker.example/cameras/kit", "title": "Maker KIT (our smallest camera)"}"#,
+                "KIT\u{2019}s linked Technical Specifications tab",
+            ),
+            (
+                r#"{"url": "https://store.maker.example/phone-9", "title": "Maker Phone 9 - Maker Store"}"#,
+                "Phone 9's Specs tab",
+            ),
+            (
+                r#"{"url": "https://www.maker.example/news", "title": "News & Insights - Maker"}"#,
+                "Maker's individual news release pages for the March 3 headline, the May 5 headline and the June 16 headline",
+            ),
+            (
+                r#"{"url": "https://www.maker.example/news", "title": "News & Insights - Maker"}"#,
+                "the 'New charger' release link on the News & Insights page",
+            ),
+            (
+                r#"{"url": "https://maker.example/cameras", "title": "Cameras | Maker"}"#,
+                "Maker\u{2019}s KIT camera product pages for the other two models",
+            ),
+            (
+                r#"{"url": "https://maker.example/", "title": "Laptops", "facts": ["Lists the Laptop 12, 13 and 16."]}"#,
+                "Laptop 16's own page",
+            ),
+            (
+                r#"{"url": "https://www.thereviewer.example/", "title": "The Reviewer"}"#,
+                "The Reviewer\u{2019}s Laptop 12 review page",
+            ),
+            (
+                r#"{"url": "https://www.thereviewer.example/reviews", "facts": ["Lists 20 reviews."]}"#,
+                "The Reviewer\u{2019}s Laptop 12 review page",
+            ),
+            (
+                r#"{"url": "https://www.annsguide.example/", "title": "Ann's Guide | Tech Reviews"}"#,
+                "Laptop 12 reviews from Ann\u{2019}s Guide\u{2019}s site search results",
+            ),
+        ] {
+            let mut summary = format!("{page_read}\n{}", json!({ "unread": [entry, wishes[0]] }));
+            assert_eq!(take_pages_to_read(&mut summary), [entry], "{page_read}");
+            assert_eq!(
+                not_found_of(&summary),
+                [format!("I didn't find {}", wishes[0])]
+            );
+        }
+
+        // A name is one of a page the turn read: none at all, the name of a page that stopped
+        // the turn or of a site it never opened, and a page named by a number with a dot in it,
+        // which is no address, are wishes. So is a page named only after "of", "for" or "on",
+        // which name what an entry is about ("review links for Laptop 12"), and a value no page
+        // word names ("Laptop 12's battery life").
+        let stopped = r#"{"url": "https://shop.example/laptop-14", "title": "Laptop 14", "stopped": "paywall"}"#;
+        for wish in [
+            "a link to an independent review",
+            "a review linked from another site",
+            "a search engine's Reviews tab",
+            "Laptop 14's Specs tab",
+            "the 13.5-inch model's own page",
+            "a link to an independent review of Laptop 12",
+            "review links for Laptop 12",
+            "independent Laptop 12 review links",
+            "independent review pages for Laptop 12",
+            "independent review pages on Laptop 12",
+            "two independent reviews for each of Laptop 12 and Laptop 16",
+            "a second independent review page for each laptop",
+            "Laptop 12's battery life",
+        ] {
+            let mut summary = format!("{read}\n{stopped}\n{}", json!({ "unread": [wish] }));
+            assert!(take_pages_to_read(&mut summary).is_empty(), "{wish}");
+            assert_eq!(not_found_of(&summary), [format!("I didn't find {wish}")]);
+        }
+        // A name is read by its words in a row in a title, a word of one letter among them:
+        // "Plan a Trip's Fares tab" names the planner's page, and "a trip review's link" none.
+        let trip = r#"{"url": "https://transit.example/plan", "title": "Plan a Trip | Transit", "facts": ["Fares are listed."]}"#;
+        let mut summary = format!(
+            "{trip}\n{}",
+            json!({ "unread": ["Plan a Trip's Fares tab", "a trip review's link"] })
+        );
+        assert_eq!(
+            take_pages_to_read(&mut summary),
+            ["Plan a Trip's Fares tab"]
+        );
+        assert_eq!(
+            not_found_of(&summary),
+            ["I didn't find a trip review's link"]
+        );
+        // With only a page that stopped the turn in its lines, only an address is a page to
+        // open: a stopped page is never tried another way.
+        let mut summary = format!(
+            "{stopped}\n{}",
+            json!({ "unread": ["Laptop 14's Specs tab", "https://reviews.example/laptop-14"] })
+        );
+        assert_eq!(
+            take_pages_to_read(&mut summary),
+            ["https://reviews.example/laptop-14"]
+        );
+        // With no page in its lines at all (its one line was an address the browser refused
+        // it), nothing holds a name to a page: an entry that names its page goes to the pass as
+        // the turn wrote it, and a wish still doesn't.
+        let mut summary = format!(
+            "Looked for the Laptop 12's review.\n{}",
+            json!({ "unread": [
+                "Laptop 12's own page",
+                "independent reviews of Laptop 12",
+                "https://reviews.example/laptop-12",
+            ] })
+        );
+        assert_eq!(
+            take_pages_to_read(&mut summary),
+            ["Laptop 12's own page", "https://reviews.example/laptop-12"]
+        );
+        assert_eq!(
+            not_found_of(&summary),
+            [format!("I didn't find {}", wishes[0])]
+        );
+        // No unread line, or an empty one: nothing to read and nothing named missing.
+        for unread in ["", "\n{\"unread\": []}"] {
+            let mut summary = format!("{read}{unread}");
+            assert!(take_pages_to_read(&mut summary).is_empty());
+            assert_eq!(summary, read);
+        }
+        // The names a missing line gives stay bounded, however many wishes join it, and a long
+        // one is cut after a whole word: "I didn't find …" never ends in half of one.
+        let many: Vec<String> = (0..40).map(|index| format!("wish {index}")).collect();
+        let mut summary = format!("{read}\n{}", json!({ "unread": many }));
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        assert_eq!(missing_names_in(&summary).len(), MISSING_MAX);
+        // Before a comma too, and a single word longer than the bound is cut at it.
+        let long = "independent review pages for the Laptop 12, the Laptop 13 and the Laptop 16, each from a reviewer who has tested the battery, the screen and the keyboard";
+        let at_a_comma = "independent review pages for the Laptop 12 from a reviewer who has tested the battery, the screen and the keyboard, every one";
+        let one_word = "x".repeat(200);
+        let mut summary = format!(
+            "{read}\n{}",
+            json!({ "unread": [long, at_a_comma, one_word] })
+        );
+        assert!(take_pages_to_read(&mut summary).is_empty());
+        let word_cut = "x".repeat(MISSING_NAME_MAX_CHARS);
+        assert_eq!(
+            missing_names_in(&summary),
+            [
+                "independent review pages for the Laptop 12, the Laptop 13 and the Laptop 16, each from a reviewer who has tested the",
+                "independent review pages for the Laptop 12 from a reviewer who has tested the battery, the screen and the keyboard",
+                word_cut.as_str(),
+            ]
+        );
     }
 
     /// What every browser turn and its build read of findings is generic: how to compare items,

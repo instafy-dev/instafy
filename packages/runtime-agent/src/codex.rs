@@ -147,7 +147,7 @@ macro_rules! shared_browser_developer_instructions {
             r#"- Snapshots, status, results and errors mask values that look like keys, tokens or codes as `[redacted secret]` or `REDACTED`. Never try to recover a masked value. When a snapshot has `secretScreen: true`, the page text is withheld until a new page loads: stop, do not click anything on that page to reveal or copy the value, and tell the user in words which control on that page shows it, using the control names the snapshot still lists.
 - An error ending in `[step_refused_secret]`, `[step_refused_sign_in]` or `[step_refused_upload]` is final in every approval mode: do not retry it or look for another control that does the same. Revealing or copying a credential, signing in and choosing files are the user's steps: tell the user which step is theirs, and for a sign-in use `request_human_input` on its fields.
 - Downloads are blocked in this browser. Do not try to download or export files through it.
-- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
+- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.
 - A page the network did not deliver fails with a plain reason, such as "Instafy's browser couldn't reach that site", and the browser's code, which is for diagnosis, only in `error.details`. It ends that page, not the task: go on to the next source in this turn, as "Finding a page" says.
 - Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#
         )
@@ -8801,9 +8801,18 @@ mod tests {
             SHARED_BROWSER_ROUTINE_START_DEVELOPER_INSTRUCTIONS,
         ] {
             assert!(policy.contains(
-                "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; say in plain words which step did not go through and wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.\n"
+                "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.\n"
             ));
             assert!(!policy.contains("A denial, timeout,"));
+            // The step that did not go through is said once, by the runtime's own line under
+            // the reply (`jobs::terminal_shared_browser_summary`): told to say it too, a turn
+            // ended a denied submit with its own account and next step ("submit the order on
+            // the page yourself") right above that line and its "Tell Octo what to try
+            // instead." (a local test, Nov 20).
+            assert!(
+                !policy.contains("say in plain words which step"),
+                "{policy}"
+            );
         }
     }
 
@@ -14108,6 +14117,8 @@ required = true
     fn the_adapter_keeps_the_addresses_the_browser_refused_as_not_given_unprojected() {
         let mut adapter = CodexEventStreamAdapter::default();
         const REFUSED: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and a site's home page always opens. Go on in this turn as \"Finding a page\" says.";
+        // A search nobody gave on a site nobody gave is refused without the home page's words.
+        const REFUSED_SEARCH: &str = "No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given. Go on in this turn as \"Finding a page\" says.";
         const DOWN: &str =
             "The site did not answer in time, so nothing was opened and the page is still blank.";
         let end = |call: usize, tool: &str, url: &str, reason: &str| {
@@ -14142,9 +14153,9 @@ required = true
         };
         let search = "https://www.tomshardware.com/search?searchTerm=Framework%20Laptop%2012";
         for event in [
-            end(1, "navigate", search, REFUSED),
+            end(1, "navigate", search, REFUSED_SEARCH),
             end(2, "open_tab", "https://reviews.example/laptop-12", REFUSED),
-            end(3, "navigate", search, REFUSED),
+            end(3, "navigate", search, REFUSED_SEARCH),
             end(4, "navigate", "https://down.example/page", DOWN),
             end(5, "click", "https://reviews.example/laptop-16", REFUSED),
         ] {
