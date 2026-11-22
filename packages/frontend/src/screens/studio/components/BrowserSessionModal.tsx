@@ -3960,7 +3960,7 @@ export function BrowserSessionModal({
             >
               <Text variant="body" tone="muted" className="max-w-sm">
                 {pausedPageClosed
-                  ? "The page Octo paused on closed when Instafy's browser stopped. Send your request again to start over."
+                  ? "The page Octo paused on is no longer open in Instafy's browser. Send your request again to start over."
                   : "No page open"}
               </Text>
             </div>

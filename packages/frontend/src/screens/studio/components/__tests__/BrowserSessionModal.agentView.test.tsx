@@ -368,7 +368,7 @@ describe("Shared Browser view while Octo drives", () => {
   // Dogfood, Nov 22: the morning after Octo paused on a sign-in, the space's
   // machine had stopped overnight, and its browser came back with one blank
   // tab. The view said only "No page open".
-  it("says the paused page closed with the browser, and how to start over", async () => {
+  it("says the paused page is no longer open, and how to start over", async () => {
     const blank = () => document.querySelector('[data-testid="browser-session-blank-page"]')?.textContent ?? null;
     await act(async () => root.render(<Host agentHolds={false} pageUrl="about:blank" pausedPageId="PAGE-BEFORE-THE-STOP" />));
     await advance(1_000);
@@ -376,7 +376,7 @@ describe("Shared Browser view while Octo drives", () => {
     await act(async () => { driving.listeners.connect?.(); driving.frame(); });
     await advance(100);
     expect(blank()).toBe(
-      "The page Octo paused on closed when Instafy's browser stopped. Send your request again to start over.",
+      "The page Octo paused on is no longer open in Instafy's browser. Send your request again to start over.",
     );
     expect(blank()).not.toContain("\u2014");
     // The paused tab is still open (blank only for now): nothing is said of it.
