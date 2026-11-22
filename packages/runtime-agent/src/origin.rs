@@ -235,6 +235,23 @@ impl OriginService {
             hosted_checkout: matches!(settings.mode.as_str(), "efs" | "hosted"),
         };
 
+        // A Desktop folder seeded before this space had a git remote holds only the bundled
+        // Instafy files, and the checkout refuses any folder with files in it: clear it first, so
+        // this runtime can register (see `clear_scaffold_only_folder`).
+        if server_config.git_remote_url.is_some() && !server_config.hosted_checkout {
+            match crate::jobs::clear_scaffold_only_folder(&server_config.workspace_root) {
+                Ok(true) => info!(
+                    folder = %server_config.workspace_root.display(),
+                    "cleared the bundled Instafy files this space's folder held from before it had a git remote, so the space can be checked out there"
+                ),
+                Ok(false) => {}
+                Err(error) => warn!(
+                    %error,
+                    "could not check whether this space's folder holds only the bundled Instafy files"
+                ),
+            }
+        }
+
         let register_token_source = server_config.controller_token_source.clone();
         let mut server = OriginHttpServer::new(server_config)?;
         // The process's lazy browser host, which outlives this origin across

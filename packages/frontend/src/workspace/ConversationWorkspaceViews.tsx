@@ -16,7 +16,7 @@ import { closeConversationFile, closeConversationPreview, conversationFileLabel,
 /** One view bar for the selected task, including routes rendered outside ChatPanel. */
 export function ConversationWorkspaceViews({ placement = "header" }: { placement?: "header" | "composer" }) {
   const { conversationWorkspace, conversationWorkspaceScope: scope, conversationSurfaces,
-    conversationBrowser, activeTab, tabs, openConversationTab, focusTab, closeTab, requestUrlPush } = useWorkspaceTabs();
+    conversationBrowser, setConversationBrowser, activeTab, tabs, openConversationTab, focusTab, closeTab, requestUrlPush } = useWorkspaceTabs();
   const { workspace } = useCode();
   const { conversations } = useConversations();
   const { isLargeScreen } = useStudioNavigationPosture();
@@ -48,11 +48,18 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   const surfaces = conversationSurfaces.read(scope);
   const ownedViews = tabs.filter(tab => tab.workspaceOwner?.conversationId === conversationId);
   const hasBrowser = conversationBrowser.available;
+  const closeBrowser = conversationBrowser.close;
   const dirty = new Set(workspace.files.filter(file => file.modified !== file.generated).map(file => file.path));
   const resources: ConversationSurface[] = [
     ...(hasBrowser ? [{ id: "browser", label: "Browser", panelId: "conversation-workspace-browser", icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: conversationBrowser.pageTitle ?? null, agentName: conversationBrowser.agentName ?? null }),
-      attention: conversationBrowser.attention ? <span className="text-amber-600">Approve</span> : undefined }] : []),
+      attention: conversationBrowser.attention ? <span className="text-amber-600">Approve</span> : undefined,
+      // Only the view closes (ChatPanel's closeBrowserTab). The tab goes at
+      // once, also while one of the chat's own tabs is in front of its panel.
+      onClose: closeBrowser ? () => {
+        closeBrowser();
+        setConversationBrowser(scope, { ...conversationBrowser, available: false });
+      } : undefined }] : []),
     ...surfaces.files.map(file => ({ id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
       panelId: "conversation-workspace-file", icon: <Page className="h-3.5 w-3.5" />, dirty: dirty.has(file.path),
       onClose: () => conversationSurfaces.update(scope, state => closeConversationFile(state, file.id, hasBrowser)),

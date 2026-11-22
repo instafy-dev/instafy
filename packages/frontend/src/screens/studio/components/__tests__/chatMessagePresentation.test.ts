@@ -358,6 +358,56 @@ describe("chatMessagePresentation", () => {
     ).toEqual(["progress", "error"]);
   });
 
+  // Local trial, Nov 20: a turn of @cctrial, an agent of the person's own,
+  // failed, and its row read as Octo's: the row named no agent, though each
+  // of its messages did.
+  it("speaks as the agent its turn's messages are stamped with", () => {
+    const cctrial = { id: "agent-cctrial", handle: "cctrial", displayName: "CC Trial", avatarSeed: "hatchling:5" };
+    const messages: ChatMessage[] = [
+      createMessage({ id: "prompt", role: "user", authorId: "user-1", content: "@cctrial Hi", timestamp: 100 }),
+      createMessage({
+        id: "step",
+        content: "ls",
+        timestamp: 200,
+        messageType: "command_execution",
+        metadata: { jobId: "job-1", runId: "run-1", source: "agent", messageType: "command_execution", agent: cctrial },
+      }),
+      createMessage({
+        id: "failure",
+        content: "Instafy couldn't check this space's folder.",
+        timestamp: 300,
+        messageType: "error",
+        metadata: { jobId: "job-1", runId: "run-1", source: "agent", outcome: "failed", messageType: "error", agent: cctrial },
+      }),
+    ];
+
+    const collapsedAll = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(
+      collapsedAll,
+      collapsedAll.filter((message) => shouldDisplayChatMessage(message)),
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", "agent-job-thread:job-1"]);
+    expect((rows[1]?.metadata as Record<string, unknown>).agent).toEqual(cctrial);
+  });
+
+  it("names no agent for a turn none of whose messages names one", () => {
+    const messages: ChatMessage[] = [
+      createMessage({
+        id: "error",
+        content: "Something went wrong.",
+        timestamp: 100,
+        messageType: "error",
+        metadata: { jobId: "job-1", messageType: "error", outcome: "failed", agent: { handle: " " } },
+      }),
+    ];
+
+    const [row] = synthesizeAgentJobThreadMessages(messages, messages);
+
+    expect(row?.messageType).toBe("agent_job_thread");
+    expect(row?.metadata).not.toHaveProperty("agent");
+  });
+
   it("does not synthesize standalone run previews for failed multi-agent workers", () => {
     const messages: ChatMessage[] = [
       createMessage({

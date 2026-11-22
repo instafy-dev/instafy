@@ -695,6 +695,10 @@ export function synthesizeAgentJobThreadMessages(
     // The row follows the newest of its turns: its live words, its run and
     // its Stop are that turn's.
     const newestJobId = turnJobIds.at(-1) ?? jobId;
+    // It speaks as the agent that took that turn, as each of its messages
+    // does: the chat names and draws the row by it, so a turn of any agent
+    // reads as that agent's, not Octo's (turnRowAgent).
+    const rowAgent = turnRowAgent(threadMessages, turnJobIds);
     const retryPendingJobId = turnJobIds.find((turnJobId) => pendingJobIds.has(turnJobId));
     const pendingHandBack = pendingHandBackByRowJobId.get(jobId);
     const endedHandBackRunId = endedHandBackRunByRowJobId.get(jobId);
@@ -707,6 +711,7 @@ export function synthesizeAgentJobThreadMessages(
       metadata: {
         messageType: "agent_job_thread",
         jobId: newestJobId,
+        ...(rowAgent ? { agent: rowAgent } : {}),
         threadMessages,
         ...(turnJobIds.length > 1 ? { [TURN_JOB_IDS_METADATA_KEY]: turnJobIds } : {}),
         ...(earlierAttempts.length > 0 ? { earlierAttempts } : {}),
@@ -845,6 +850,33 @@ export function newestTurnMessages<T extends ChatMessage>(threadMessages: T[], t
     const runId = extractRunId(candidate);
     return runId !== null && newestRunIds.has(runId);
   });
+}
+
+/**
+ * The agent a turn's row speaks as (`metadata.agent` of the row): the one
+ * stamped on its newest turn's messages, else on any of its messages, or null
+ * when none names one. The controller stamps every message of a turn with the
+ * agent its job was dispatched to, whichever agent it is and whatever AI it
+ * runs on (docs/Local-Engine-Turns.md 5.7, 11.5), and the chat names and draws
+ * a row by the agent on it (ConversationMessageRows): without one, a row read
+ * as Octo's, whosever turn it was.
+ */
+function turnRowAgent(threadMessages: ChatMessage[], turnJobIds: readonly string[]): Record<string, unknown> | null {
+  for (const messages of [newestTurnMessages(threadMessages, turnJobIds), threadMessages]) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const agent = stampedAgent(messages[index]!);
+      if (agent) return agent;
+    }
+  }
+  return null;
+}
+
+/** The agent an AI's message is stamped with, when it names one by its handle. */
+function stampedAgent(message: ChatMessage): Record<string, unknown> | null {
+  const metadata = message.role === "assistant" && isRecord(message.metadata) ? message.metadata : null;
+  const agent = metadata && isRecord(metadata.agent) ? metadata.agent : null;
+  const handle = typeof agent?.handle === "string" ? agent.handle.trim().replace(/^@/, "").trim() : "";
+  return agent && handle ? agent : null;
 }
 
 /**

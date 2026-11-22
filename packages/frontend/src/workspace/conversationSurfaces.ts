@@ -153,6 +153,19 @@ export function closeConversationPreview(state: ConversationSurfaces, id: string
 }
 
 /**
+ * The person closed the Browser view (its browser goes on; the chat keeps the
+ * view closed until the browser opens again). Chat comes forward when Browser
+ * was in front, and the first file, then the first preview, takes its place
+ * beside Chat. With neither, the choice stays Browser for its next open.
+ */
+export function closeConversationBrowser(state: ConversationSurfaces): ConversationSurfaces {
+  const activeId = state.activeId === "browser" ? "chat" : state.activeId;
+  const resourceId = state.resourceId === "browser"
+    ? state.files[0]?.id ?? state.previews[0]?.id ?? "browser" : state.resourceId;
+  return activeId === state.activeId && resourceId === state.resourceId ? state : { ...state, activeId, resourceId };
+}
+
+/**
  * The view shown beside Chat. A stored Browser choice with no browser open
  * falls back to the first file, then the first preview.
  */
