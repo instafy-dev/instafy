@@ -4606,6 +4606,9 @@ const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
 /// browser", while the card waited for a press): the card says what happens
 /// next. It says what was found and what wasn't, as the research skill ends a
 /// page its reader couldn't read: in a few plain words, with the page's link.
+/// Such a card waits for the person's press, also for an address they gave
+/// (`browser_request::BrowserRequest::wait_for_a_press_where_it_opens`), so its
+/// words show.
 ///
 /// A sign-in the person asked for, or one a step they asked for needs, is
 /// opened and paused on (`request_human_input`), so the task can go on after
@@ -4630,7 +4633,7 @@ const BROWSER_CHOICE_CONTRACT: &str = "\nInstafy's browser:\n\
 - With browser tools on this turn, use them. Without them, emit one `request_browser` action: { type: 'request_browser', task: string, optional browserLocation: 'auto' | 'device' | 'workspace', optional continueBuilding: boolean }. Write `task` as the person's request: what to do on each page it opens, named by its address, from a skill, this chat (the person's message, a page you read or a search result) or the official site of something the person named. A card naming none is refused: search first, then hand over what it found. Never put the person's details, such as an order number or an e-mail address, in it.\n\
 - `continueBuilding: true` only when you build from what it finds (a page, a map); `task` is then only what to find or check. For a question, its reply is the answer.\n\
 - It changes no approval: the browser's own site and action prompts still apply, as does asking before a purchase, transfer, record-changing submit, message, permission or credential change, private-data download or destructive step.\n\
-- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, what the browser will submit, send or buy, or that you hand pages to the browser: the card says what happens next.\n\
+- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself, but not on a page `instafy web read` couldn't read. `summary` never says a page opened, or what it shows, before a browser tool saw it, what the browser will submit, send or buy, or that you hand pages to the browser: the card says what happens next.\n\
 - Skip it when a tool or API is more reliable. Do not reopen it for a task after the person took it over, stopped it or pressed Deny there.\n\
 - Never tell the person to enable, turn on or allow it or its tools: emit `request_browser`.\n\
 - The person does their own sign-ins, codes and consent screens; for one they need, a browser turn opens its sign-in page and pauses there. Never type or ask for a credential. Never open, or ask them to open, a screen there that shows a secret value: stop on the list and have them open it in their own browser tab.\n";
@@ -30820,10 +30823,11 @@ mod tests {
         // opens by its address, never the person's details, and that one
         // naming none is refused. Since Nov 20 a lone card's turn shows its
         // reply unless the card opens by itself. Since Nov 22 its reply never
-        // says pages are handed to the browser: the card says what happens next.
+        // says pages are handed to the browser: the card says what happens next,
+        // and a card for a page the reader couldn't read never opens by itself.
         let browser_choice = estimate_prompt_token_count(BROWSER_CHOICE_CONTRACT);
         assert!(
-            browser_choice <= 630,
+            browser_choice <= 645,
             "browser rule grew to {browser_choice} tokens"
         );
         assert_eq!(prompt_text.matches(BROWSER_CHOICE_CONTRACT).count(), 1);
@@ -32253,7 +32257,7 @@ mod tests {
     #[test]
     fn a_reply_beside_a_card_never_promises_and_a_lone_card_may_show_none() {
         assert!(BROWSER_CHOICE_CONTRACT.contains(
-            "- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself. `summary` never says a page opened, or what it shows, before a browser tool saw it, what the browser will submit, send or buy, or that you hand pages to the browser: the card says what happens next.\n"
+            "- With only this card, `summary` shows unless the person or your earlier replies gave every address it opens: such a card opens by itself, but not on a page `instafy web read` couldn't read. `summary` never says a page opened, or what it shows, before a browser tool saw it, what the browser will submit, send or buy, or that you hand pages to the browser: the card says what happens next.\n"
         ));
         let research = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
