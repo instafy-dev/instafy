@@ -3,7 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "../useShowBrowserOnRequest";
+import { openBrowserPause, useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "../useShowBrowserOnRequest";
+import { BROWSER_HUMAN_INPUT_CONTINUE_PROMPT, LET_OCTO_CONTINUE } from "../useBrowserHumanInput";
 import type { ChatMessage } from "../../types";
 import type { RunRecord } from "../../../../types";
 
@@ -120,5 +121,118 @@ describe("useShowBrowserOnHumanInput", () => {
     await render("user-1", [pause("theirs", now, "job-theirs"), pause("mine", now, "job-new")],
       [...runs, run("run-new", "job-new", "user-1")]);
     expect(show).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Dogfood, Nov 22: Octo paused on a sign-in in Instafy's browser. After a
+// reload the next day its reply had no button and no Browser tab, as both
+// came only from the browser's own record of the pause, which runs out
+// after 10 minutes and lives on the space's machine. The chat's own record
+// of it says whether it still waits.
+describe("openBrowserPause", () => {
+  const HOUR_AGO = Date.now() - 60 * 60_000;
+  const run = (
+    id: string,
+    jobId: string,
+    initiatingUserId: string,
+    metadata: Record<string, unknown> = {},
+  ): RunRecord => ({
+    id, projectId: "project-1", sessionId: null, conversationId: "chat-1", promptId: null, runType: "prompt",
+    status: "success", progress: 1, progressStage: null, previewUrl: null, lastMessage: null,
+    createdAt: null, updatedAt: null,
+    metadata: {
+      jobId, initiatingUserId, browserTransport: "shared", browserRuntimeId: "runtime-1", browserPageId: "PAGE1",
+      ...metadata,
+    },
+  });
+  const prompt = (id: string, timestamp: number, metadata: Record<string, unknown> = {}): ChatMessage => ({
+    id, role: "user", content: "Sign in to my accounting site and list last month's invoices", timestamp, metadata,
+  });
+  const step = (id: string, timestamp: number, details: Record<string, unknown>, jobId = "job-mine"): ChatMessage => ({
+    id, role: "assistant", content: "Tool call completed", timestamp,
+    metadata: { messageType: "mcp_tool_call", jobId, details: { server: "instafy_shared_browser", ...details } },
+  });
+  const signInPause = (id: string, timestamp: number, jobId = "job-mine") => step(id, timestamp, {
+    tool: "request_human_input", status: "completed",
+    terminalConsent: { state: "blocked", terminal: true, retryable: false, code: "human_input_required" },
+  }, jobId);
+  const reply = (id: string, timestamp: number, jobId = "job-mine"): ChatMessage => ({
+    id, role: "assistant", timestamp, metadata: { jobId },
+    content: "Sign in or fill in the highlighted fields on the page in Instafy's browser, then choose Let Octo continue.",
+  });
+  const runs = [run("run-mine", "job-mine", "user-1"), run("run-theirs", "job-theirs", "user-2")];
+  const pausedChat = [prompt("p1", HOUR_AGO - 5_000), signInPause("pause", HOUR_AGO), reply("r1", HOUR_AGO + 1_000)];
+
+  it("finds a pause from before the chat was opened while it is still the chat's last word", () => {
+    expect(openBrowserPause(pausedChat, runs, "user-1")).toEqual({
+      messageId: "pause", runId: "run-mine", runtimeId: "runtime-1", pageId: "PAGE1",
+    });
+    // The run's own id finds it too, when the message names one.
+    const byRunId = { ...pausedChat[1], metadata: { ...pausedChat[1].metadata, jobId: undefined, runId: "run-mine" } };
+    expect(openBrowserPause([pausedChat[0], byRunId, pausedChat[2]], runs, "user-1")?.runId).toBe("run-mine");
+  });
+
+  it("closes once the person writes again, Let Octo continue's press too", () => {
+    const later = HOUR_AGO + 60_000;
+    expect(openBrowserPause([...pausedChat, prompt("p2", later)], runs, "user-1")).toBeNull();
+    const press = prompt("press", later, { dispatchContent: BROWSER_HUMAN_INPUT_CONTINUE_PROMPT });
+    expect(openBrowserPause([...pausedChat, { ...press, content: LET_OCTO_CONTINUE }], runs, "user-1")).toBeNull();
+    // A teammate's message is a person writing too: the chat has moved on.
+    expect(openBrowserPause([...pausedChat, { ...prompt("p3", later), authorId: "user-2" }], runs, "user-1")).toBeNull();
+    // The press's own turn pausing again waits again.
+    const again = [...pausedChat, press, signInPause("pause-2", later + 5_000, "job-again")];
+    expect(openBrowserPause(again, [...runs, run("run-again", "job-again", "user-1")], "user-1")?.messageId).toBe("pause-2");
+  });
+
+  it("is none of another member's business, nor of a viewer not signed in", () => {
+    const theirs = [prompt("p1", HOUR_AGO - 5_000), signInPause("pause", HOUR_AGO, "job-theirs"), reply("r1", HOUR_AGO + 1_000, "job-theirs")];
+    expect(openBrowserPause(theirs, runs, "user-1")).toBeNull();
+    expect(openBrowserPause(theirs, runs, "user-2")?.runId).toBe("run-theirs");
+    expect(openBrowserPause(pausedChat, runs, null)).toBeNull();
+  });
+
+  it("ends with a Stop of its turn", () => {
+    const stop: ChatMessage = {
+      id: "stop", role: "assistant", content: "Stopped this run.", timestamp: HOUR_AGO + 2_000,
+      metadata: { source: "controller", kind: "run_cancellation",
+        details: { stopRequested: true, actorUserId: "user-1", runIds: ["run-mine"], jobIds: ["job-mine"] } },
+    };
+    expect(openBrowserPause([...pausedChat, stop], runs, "user-1")).toBeNull();
+    // A take-over's notice records no Stop: the pause goes on.
+    const takeOver = { ...stop, metadata: { ...stop.metadata, details: { stopRequested: false, runIds: ["run-mine"] } } };
+    expect(openBrowserPause([...pausedChat, takeOver], runs, "user-1")?.messageId).toBe("pause");
+  });
+
+  it("is only Instafy's browser's: a pause in this device's own browser has its own way back", () => {
+    const personal = [run("run-mine", "job-mine", "user-1", { browserTransport: "desktop-personal" })];
+    expect(openBrowserPause(pausedChat, personal, "user-1")).toBeNull();
+    const unknown = [run("run-mine", "job-mine", "user-1", { browserTransport: undefined })];
+    expect(openBrowserPause(pausedChat, unknown, "user-1")).toBeNull();
+  });
+
+  it("counts a pause on a cookie notice or on a step only the person takes", () => {
+    for (const code of ["cookie_notice_required", "human_step_required"]) {
+      const pause = step("pause", HOUR_AGO, { tool: "click", status: "completed",
+        terminalConsent: { state: "blocked", terminal: true, retryable: false, code } });
+      expect(openBrowserPause([pausedChat[0], pause, pausedChat[2]], runs, "user-1")?.messageId).toBe("pause");
+    }
+    // A step the person said no to is an answer, not a pause.
+    const denied = step("denied", HOUR_AGO, { tool: "click", status: "failed",
+      terminalConsent: { state: "blocked", terminal: true, retryable: false, code: "approval_denied" } });
+    expect(openBrowserPause([pausedChat[0], denied, pausedChat[2]], runs, "user-1")).toBeNull();
+    // A pause still being written is not one yet.
+    const starting = step("starting", HOUR_AGO, { tool: "request_human_input", status: "in_progress", terminalConsent: null });
+    expect(openBrowserPause([pausedChat[0], starting], runs, "user-1")).toBeNull();
+  });
+
+  it("waits for its run: a pause in a turn not known yet leads nowhere", () => {
+    expect(openBrowserPause(pausedChat, [run("run-other", "job-other", "user-1")], "user-1")).toBeNull();
+    expect(openBrowserPause(pausedChat, [], "user-1")).toBeNull();
+  });
+
+  it("reads only the newest pause: an older one before the person's next message is over", () => {
+    const later = HOUR_AGO + 60_000;
+    const chat = [...pausedChat, prompt("p2", later), reply("r2", later + 1_000, "job-next")];
+    expect(openBrowserPause(chat, [...runs, run("run-next", "job-next", "user-1")], "user-1")).toBeNull();
   });
 });
