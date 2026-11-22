@@ -17,6 +17,17 @@ function resolveCredentialSource(credential: Pick<ControllerCredentialListItem, 
   return typeof source === "string" ? source.trim().toLowerCase() : "";
 }
 
+/**
+ * A ChatGPT sign-in made in the browser with a device code, which can be made
+ * again the same way. An uploaded or imported auth.json is a login session
+ * instead (`codex_cli`), even when it holds the same ChatGPT login.
+ */
+export function isChatGptDeviceSignIn(
+  credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
+): boolean {
+  return credential.kind === "codex_auth_json" && resolveCredentialSource(credential) === "device_code";
+}
+
 export function formatCredentialKind(
   credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
 ): string {

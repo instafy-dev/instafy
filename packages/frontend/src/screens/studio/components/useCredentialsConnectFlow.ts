@@ -22,8 +22,12 @@ import {
   CHATGPT_CONNECTION_DEFAULT_WARNING,
   CHATGPT_CONNECTION_RESOLUTION_WARNING,
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
+  CHATGPT_SIGN_IN_ADDED_BESIDE,
+  CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT,
+  CHATGPT_SIGNED_IN_AGAIN,
 } from "./device-auth/deviceAuthCompletion";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
+import { checkCredentialLabel, savableCredentialLabel } from "../../../utils/credentialLabelRules";
 
 const {
   createCodex: createCodexCredential,
@@ -31,6 +35,27 @@ const {
   setDefault: setDefaultCredential,
   test: testMyCredential,
 } = controllerClient.credentials;
+
+/** A connection that a new one replaces. */
+export type CredentialReplaceTarget = {
+  id: string;
+  /** How messages name it. */
+  label: string;
+  /**
+   * The name it was saved with, or null when it has none. An API key that
+   * replaces it, given no name of its own, takes this one.
+   */
+  savedLabel?: string | null;
+};
+
+/**
+ * The replaced connection's own name, when it has one the controller would
+ * save again; otherwise the path's own name applies, so an older name that
+ * breaks the rules never stops the replacement.
+ */
+function savedLabelOf(target: CredentialReplaceTarget | null): string | null {
+  return savableCredentialLabel(target?.savedLabel);
+}
 
 async function readJsonFile(file: File): Promise<unknown> {
   const contents = await file.text();
@@ -74,9 +99,14 @@ type UseCredentialsConnectFlowResult = {
     step: CredentialsConnectModalStep,
     options?: { returnOnBack?: boolean },
   ) => void;
-  /** Opens the modal to replace an existing credential rather than add one. */
+  /**
+   * Opens the modal to replace an existing credential rather than add one: an
+   * API key at its provider's step, or a ChatGPT sign-in at the ChatGPT step
+   * (Sign in again), which then offers only the device sign-in, since the
+   * controller replaces a sign-in when that sign-in finishes.
+   */
   openConnectModalToReplace: (
-    credential: { id: string; label: string },
+    credential: CredentialReplaceTarget,
     step: CredentialsConnectModalStep,
   ) => void;
   connectModalProps: CredentialsConnectModalProps;
@@ -100,6 +130,25 @@ export function useCredentialsConnectFlow({
     const makeDefault = newConnectionDefaultRef.current?.();
     return typeof makeDefault === "boolean" ? { makeDefault } : {};
   }, []);
+  /**
+   * The name the person typed, trimmed, or "" when they typed none. A name
+   * the controller would refuse is never sent: its sentence shows instead and
+   * this gives false. Desktop's import in particular would only say it failed.
+   */
+  const typedLabelOrRefusal = useCallback(
+    (draft: string): string | false => {
+      if (!draft.trim()) {
+        return "";
+      }
+      const check = checkCredentialLabel(draft);
+      if (check.ok) {
+        return check.label;
+      }
+      showStatus(check.message, "error", 5000);
+      return false;
+    },
+    [showStatus],
+  );
   const [connectPending, setConnectPending] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -111,7 +160,10 @@ export function useCredentialsConnectFlow({
   // and a state value read inside it would be captured stale — the replace
   // would silently degrade into a plain add, leaving two live credentials with
   // the dead one still default.
-  const replaceTargetRef = useRef<{ id: string; label: string } | null>(null);
+  const replaceTargetRef = useRef<CredentialReplaceTarget | null>(null);
+  // The name of the ChatGPT sign-in Sign in again replaces, which the
+  // ChatGPT step shows while it offers only the device sign-in.
+  const [signInAgainOf, setSignInAgainOf] = useState<string | null>(null);
   const [apiKeyPendingProvider, setApiKeyPendingProvider] = useState<CredentialsConnectApiKeyProvider | null>(null);
   const [openaiApiKeyDraft, setOpenaiApiKeyDraft] = useState("");
   const [openaiLabelDraft, setOpenaiLabelDraft] = useState("");
@@ -121,17 +173,51 @@ export function useCredentialsConnectFlow({
   const [zaiLabelDraft, setZaiLabelDraft] = useState("");
   const [geminiApiKeyDraft, setGeminiApiKeyDraft] = useState("");
   const [geminiLabelDraft, setGeminiLabelDraft] = useState("");
+  // The sign-in the device sign-in under way was started to replace, if any,
+  // and whether a finished one took its place, so the success line says so.
+  const deviceSignInReplacesRef = useRef<string | null>(null);
+  const signedInAgainRef = useRef(false);
   const handleDeviceAuthCompleted = useCallback(
     async ({
       credentialId,
+      replaced,
+      notReplacedReason,
     }: {
       credentialId?: string | null;
+      replaced?: boolean | null;
+      notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
     }): Promise<{ success: true; warning?: string }> => {
       if (!credentialId) {
         return {
           success: true,
           warning: CHATGPT_CONNECTION_RESOLUTION_WARNING,
         };
+      }
+
+      // Sign in again is the controller's to settle: a sign-in of the same
+      // account took the old one's place, name, default and agents when it
+      // was saved. Whatever the outcome, Studio promotes and retires nothing
+      // here, and the test only reports: a second session for the same row
+      // finds the old one gone and must not take the default from the first.
+      if (deviceSignInReplacesRef.current !== null) {
+        const testResult = await testMyCredential(credentialId).catch(() => null);
+        if (replaced === true) {
+          signedInAgainRef.current = true;
+        } else if (notReplacedReason !== "gone") {
+          // Another account, one that could not be read, or a controller
+          // that does not replace sign-ins and so says nothing: the old one
+          // is still there.
+          return {
+            success: true,
+            warning:
+              notReplacedReason === "different_account"
+                ? CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT
+                : CHATGPT_SIGN_IN_ADDED_BESIDE,
+          };
+        }
+        return testResult?.success && testResult.ok
+          ? { success: true }
+          : { success: true, warning: CHATGPT_CONNECTION_VERIFICATION_WARNING };
       }
 
       const testResult = await testMyCredential(credentialId).catch(() => null);
@@ -193,6 +279,7 @@ export function useCredentialsConnectFlow({
 
   const closeConnectModal = useCallback(() => {
     replaceTargetRef.current = null;
+    setSignInAgainOf(null);
     if (connectInteractionBusy) {
       return;
     }
@@ -227,6 +314,7 @@ export function useCredentialsConnectFlow({
     (step: CredentialsConnectModalStep, options?: { returnOnBack?: boolean }) => {
       returnOnBackRef.current = options?.returnOnBack === true;
       replaceTargetRef.current = null;
+      setSignInAgainOf(null);
       setConnectModalOpen(true);
       setConnectModalStep(step);
       setShowAdvanced(false);
@@ -237,9 +325,12 @@ export function useCredentialsConnectFlow({
   );
 
   const openConnectModalToReplace = useCallback(
-    (credential: { id: string; label: string }, step: CredentialsConnectModalStep) => {
+    (credential: CredentialReplaceTarget, step: CredentialsConnectModalStep) => {
       openConnectModalAtStep(step);
       replaceTargetRef.current = credential;
+      if (step === "codex") {
+        setSignInAgainOf(credential.label);
+      }
     },
     [openConnectModalAtStep],
   );
@@ -249,6 +340,7 @@ export function useCredentialsConnectFlow({
   // retire a healthy credential of the first provider.
   const handleConnectModalStepChange = useCallback((step: CredentialsConnectModalStep) => {
     replaceTargetRef.current = null;
+    setSignInAgainOf(null);
     setConnectModalStep(step);
   }, []);
 
@@ -291,8 +383,12 @@ export function useCredentialsConnectFlow({
       completedDeviceAuthSessionRef.current = null;
 
       try {
+        // Sign in again names the sign-in it replaces; the controller then
+        // replaces that one when this one finishes, even if Studio is gone.
+        deviceSignInReplacesRef.current = replaceTargetRef.current?.id ?? null;
         await beginDeviceAuthFlow({
           provider,
+          replacesCredentialId: deviceSignInReplacesRef.current,
         });
       } finally {
         setConnectPending(false);
@@ -328,6 +424,8 @@ export function useCredentialsConnectFlow({
     }
     completedDeviceAuthSessionRef.current = deviceAuthSession.sessionId;
 
+    const signedInAgain = signedInAgainRef.current;
+    signedInAgainRef.current = false;
     void (async () => {
       await loadCredentials({ silent: true });
       notifyAiConfigChanged("codex_oauth_connected");
@@ -344,7 +442,11 @@ export function useCredentialsConnectFlow({
             : undefined,
         );
       } else {
-        showStatus("ChatGPT credentials connected.", "success", 3500);
+        showStatus(
+          signedInAgain ? CHATGPT_SIGNED_IN_AGAIN : "ChatGPT credentials connected.",
+          "success",
+          3500,
+        );
       }
       closeConnectModal();
     })();
@@ -373,10 +475,14 @@ export function useCredentialsConnectFlow({
     }
 
     if (canUseDesktopConnect) {
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
       setConnectPending(true);
       try {
         const result = await connectDesktopCodexAuthJson({
-          label: labelDraft.trim() ? labelDraft.trim() : "Codex on this computer",
+          label: typedLabel || "Codex on this computer",
           ...newConnectionDefaultOption(),
         });
         if (!result.success) {
@@ -407,6 +513,7 @@ export function useCredentialsConnectFlow({
     newConnectionDefaultOption,
     notifyAiConfigChanged,
     showStatus,
+    typedLabelOrRefusal,
     userPresent,
   ]);
 
@@ -467,12 +574,17 @@ export function useCredentialsConnectFlow({
         return;
       }
 
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
+
       setConnectPending(true);
       try {
         const authJson = await readJsonFile(file);
         const result = await createCodexCredential({
           authJson,
-          label: labelDraft.trim() ? labelDraft.trim() : "Browser upload",
+          label: typedLabel || "Browser upload",
           ...newConnectionDefaultOption(),
         });
         if (!result.success) {
@@ -497,6 +609,7 @@ export function useCredentialsConnectFlow({
       newConnectionDefaultOption,
       notifyAiConfigChanged,
       showStatus,
+      typedLabelOrRefusal,
       userPresent,
     ],
   );
@@ -623,15 +736,22 @@ export function useCredentialsConnectFlow({
             : provider === "zai"
               ? zaiLabelDraft
               : geminiLabelDraft;
-      const label = draftLabel.trim()
-        ? draftLabel.trim()
-        : provider === "openai"
+      const typedLabel = typedLabelOrRefusal(draftLabel);
+      if (typedLabel === false) {
+        return false;
+      }
+      // A replacement keeps the replaced connection's name unless the person
+      // typed another.
+      const label =
+        typedLabel ||
+        savedLabelOf(replaceTargetRef.current) ||
+        (provider === "openai"
           ? "OpenAI"
           : provider === "deepseek"
             ? "DeepSeek"
             : provider === "zai"
               ? "z.ai"
-              : "Gemini";
+              : "Gemini");
 
       setApiKeyPendingProvider(provider);
       let createdCredentialId: string | null = null;
@@ -722,6 +842,7 @@ export function useCredentialsConnectFlow({
       finalizeCredentialReplacement,
       reportUnverifiedCredential,
       showStatus,
+      typedLabelOrRefusal,
       userPresent,
       zaiApiKeyDraft,
       zaiLabelDraft,
@@ -739,6 +860,7 @@ export function useCredentialsConnectFlow({
       desktopCodexAuthJsonStatus,
       connectModalOpen,
       connectModalStep,
+      signInAgainOf,
       connectPending,
       apiKeyPendingProvider,
       showAdvanced,

@@ -1,4 +1,5 @@
 import {
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
@@ -70,6 +71,16 @@ export interface RevokeCredentialResult {
   error?: string;
 }
 
+export interface RenameCredentialResult {
+  success: boolean;
+  /** The renamed connection, as the list shows it. */
+  credential?: ControllerCredentialListItem;
+  error?: string;
+  /** The controller's reason for a refusal, such as `credential_label_has_email`. */
+  code?: string | null;
+  status?: number;
+}
+
 export type DeviceAuthProvider = "codex" | "github";
 
 export interface StartDeviceAuthResult {
@@ -89,6 +100,17 @@ export interface DeviceAuthStatusResult {
   provider?: string;
   status?: "pending" | "completed" | "failed" | "cancelled";
   credentialId?: string | null;
+  /**
+   * For a finished ChatGPT sign-in started with `replacesCredentialId`:
+   * whether it took that sign-in's place (same account, still live). Null
+   * when it replaced nothing, or from an older controller.
+   */
+  replaced?: boolean | null;
+  /**
+   * Why it did not: another ChatGPT account, an account that could not be
+   * read, or the old one was gone.
+   */
+  notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
   error?: string | null;
 }
 
@@ -279,6 +301,30 @@ export function parseSubscriptionUsage(raw: unknown): SubscriptionUsage | null {
   };
 }
 
+/** One connection as GET /me/credentials lists it, or null when it names none. */
+function parseCredentialListItem(entry: unknown): ControllerCredentialListItem | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const record = entry as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id : "";
+  if (!id) {
+    return null;
+  }
+  return {
+    id,
+    kind: typeof record.kind === "string" ? record.kind : "unknown",
+    label: typeof record.label === "string" ? record.label : null,
+    isDefault: Boolean(record.isDefault),
+    metadata: record.metadata ?? null,
+    subscriptionUsage: parseSubscriptionUsage(record.subscriptionUsage),
+    lastUsedAt: typeof record.lastUsedAt === "string" ? record.lastUsedAt : null,
+    revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : null,
+    createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+  };
+}
+
 export async function listMyCredentials(params?: {
   accessToken?: string | null;
 }): Promise<ListMyCredentialsResult> {
@@ -326,26 +372,10 @@ export async function listMyCredentials(params?: {
     }
 
     const credentials = payload.reduce<ControllerCredentialListItem[]>((result, entry: unknown) => {
-        if (!entry || typeof entry !== "object") {
-          return result;
+        const credential = parseCredentialListItem(entry);
+        if (credential) {
+          result.push(credential);
         }
-        const record = entry as Record<string, unknown>;
-        const id = typeof record.id === "string" ? record.id : "";
-        if (!id) {
-          return result;
-        }
-        result.push({
-          id,
-          kind: typeof record.kind === "string" ? record.kind : "unknown",
-          label: typeof record.label === "string" ? record.label : null,
-          isDefault: Boolean(record.isDefault),
-          metadata: record.metadata ?? null,
-          subscriptionUsage: parseSubscriptionUsage(record.subscriptionUsage),
-          lastUsedAt: typeof record.lastUsedAt === "string" ? record.lastUsedAt : null,
-          revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : null,
-          createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
-          updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
-        });
         return result;
       }, []);
 
@@ -469,6 +499,12 @@ export async function startDeviceAuth(
   provider: DeviceAuthProvider,
   params?: {
     accessToken?: string | null;
+    /**
+     * The ChatGPT sign-in this one replaces. When it finishes and is of the
+     * same account, the controller gives it that sign-in's place (name,
+     * default and agents) and retires that one.
+     */
+    replacesCredentialId?: string | null;
   },
 ): Promise<StartDeviceAuthResult> {
   if (!runtimeControllerEnabled) {
@@ -483,13 +519,17 @@ export async function startDeviceAuth(
 
   try {
     const startUrl = `${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(provider)}/start`;
+    const replacesCredentialId = params?.replacesCredentialId?.trim() ?? "";
 
+    // Without a replacement the start sends no body, as before.
     const response = await fetch(startUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
         accept: "application/json",
+        ...(replacesCredentialId ? { "content-type": "application/json" } : {}),
       },
+      ...(replacesCredentialId ? { body: JSON.stringify({ replacesCredentialId }) } : {}),
     });
 
     if (!response.ok) {
@@ -567,6 +607,13 @@ export async function getDeviceAuthStatus(
       provider: typeof payload.provider === "string" ? payload.provider : undefined,
       status: normalizedStatus,
       credentialId: typeof payload.credentialId === "string" ? payload.credentialId : null,
+      replaced: typeof payload.replaced === "boolean" ? payload.replaced : null,
+      notReplacedReason:
+        payload.reason === "different_account" ||
+        payload.reason === "account_unknown" ||
+        payload.reason === "gone"
+          ? payload.reason
+          : null,
       error: typeof payload.error === "string" ? payload.error : null,
     };
   } catch (error) {
@@ -672,6 +719,70 @@ export async function revokeMyCredential(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: `Unable to revoke credential: ${message}` };
+  }
+}
+
+/**
+ * Renames one of the person's own connections. Their agents still named after
+ * it take the new name; handles stay. A refusal keeps the controller's code,
+ * such as `credential_label_has_email`, and its plain message.
+ */
+export async function renameMyCredential(
+  credentialId: string,
+  label: string,
+  params?: { accessToken?: string | null },
+): Promise<RenameCredentialResult> {
+  if (!runtimeControllerEnabled) {
+    return { success: false, error: "Runtime controller is not configured." };
+  }
+
+  const normalizedId = credentialId.trim();
+  if (!normalizedId) {
+    return { success: false, error: "Missing credential id." };
+  }
+
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
+  if (!resolvedAccessToken) {
+    return { success: false, error: "Missing controller session token." };
+  }
+
+  try {
+    const response = await fetch(
+      `${requestContext.baseUrl}/me/credentials/${encodeURIComponent(normalizedId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${resolvedAccessToken}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify({ label }),
+      },
+    );
+
+    if (!response.ok) {
+      const refusal = await readControllerApiError(
+        response,
+        "Unable to rename connection",
+        requestContext,
+      );
+      return {
+        success: false,
+        error: refusal.message,
+        code: refusal.code,
+        status: refusal.status,
+      };
+    }
+
+    const credential = parseCredentialListItem(await response.json());
+    if (!credential) {
+      return { success: false, error: "Controller response missing the renamed connection." };
+    }
+    return { success: true, credential };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: `Unable to rename connection: ${message}` };
   }
 }
 

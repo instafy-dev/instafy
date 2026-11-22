@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ChangeEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { useCredentialsConnectFlow } from "../useCredentialsConnectFlow";
@@ -17,7 +17,11 @@ const deviceAuthMocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   reset: vi.fn(),
   onCompleted: null as
-    | ((input: { credentialId?: string | null }) => Promise<{ success: true; warning?: string }>)
+    | ((input: {
+        credentialId?: string | null;
+        replaced?: boolean | null;
+        notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
+      }) => Promise<{ success: true; warning?: string }>)
     | null,
 }));
 
@@ -546,5 +550,308 @@ describe("useCredentialsConnectFlow default choice", () => {
     expect(controllerMocks.createCodex.mock.calls[0]?.[0]).not.toHaveProperty("makeDefault");
     await completeChatGptLogin();
     expect(controllerMocks.setDefault).toHaveBeenCalledWith("chatgpt-credential");
+  });
+});
+
+describe("useCredentialsConnectFlow Sign in again", () => {
+  // Sign in again on a ChatGPT sign-in's row opens the ChatGPT step to replace
+  // it (openConnectModalToReplace(target, "codex"), exactly as the row calls
+  // it). The controller makes the replacement when the device sign-in
+  // finishes, so Studio retires nothing and only words what happened.
+  let container: HTMLDivElement;
+  let root: Root;
+  let showStatus: Mock;
+  let calls: string[];
+  const signIn = { id: "old-chatgpt", label: "ChatGPT", savedLabel: "ChatGPT" };
+
+  beforeEach(async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    calls = [];
+    desktopMocks.available = false;
+    showStatus = vi.fn();
+    controllerMocks.createCodex.mockImplementation(async () => {
+      calls.push("create");
+      return { success: true, credentialId: "new-credential" };
+    });
+    controllerMocks.test.mockImplementation(async () => {
+      calls.push("test");
+      return { success: true, ok: true };
+    });
+    controllerMocks.setDefault.mockImplementation(async (id: string) => {
+      calls.push(`setDefault ${id}`);
+      return { success: true };
+    });
+    controllerMocks.revoke.mockImplementation(async (id: string) => {
+      calls.push(`revoke ${id}`);
+      return { success: true };
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <Harness
+          options={{
+            userPresent: true,
+            loadCredentials: vi.fn().mockResolvedValue(undefined),
+            notifyAiConfigChanged: vi.fn(),
+            showStatus,
+            formatCredentialTestFailureMessage: (raw) => raw ?? null,
+            isCredentialDefault: () => true,
+            newConnectionDefault: () => undefined,
+          }}
+        />,
+      );
+    });
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    captured = null;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  // Opens the ChatGPT step to replace the row and starts its device sign-in.
+  async function signInAgain() {
+    await act(async () => captured?.openConnectModalToReplace(signIn, "codex"));
+    await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
+  }
+
+  async function complete(status: {
+    replaced?: boolean | null;
+    notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
+  }) {
+    let result: { success: true; warning?: string } | undefined;
+    await act(async () => {
+      result = await deviceAuthMocks.onCompleted?.({ credentialId: "new-chatgpt", ...status });
+    });
+    return result;
+  }
+
+  it("starts the device sign-in naming the one it replaces, on a step that offers only that", async () => {
+    await signInAgain();
+    expect(captured?.connectModalProps.connectModalStep).toBe("codex");
+    expect(captured?.connectModalProps.signInAgainOf).toBe("ChatGPT");
+    expect(deviceAuthMocks.begin).toHaveBeenLastCalledWith({
+      provider: "codex",
+      replacesCredentialId: "old-chatgpt",
+    });
+
+    // A plain ChatGPT connect replaces nothing and offers every way in.
+    await act(async () => captured?.openConnectModalAtStep("codex"));
+    expect(captured?.connectModalProps.signInAgainOf).toBeNull();
+    await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
+    expect(deviceAuthMocks.begin).toHaveBeenLastCalledWith({ provider: "codex", replacesCredentialId: null });
+  });
+
+  it("retires nothing and keeps the default when the controller replaced the sign-in", async () => {
+    await signInAgain();
+    expect(await complete({ replaced: true })).toEqual({ success: true });
+    // The test only reports; the controller moved the default and retired the old one.
+    expect(calls).toEqual(["test"]);
+  });
+
+  it("reports a failed test without removing anything", async () => {
+    controllerMocks.test.mockImplementation(async () => {
+      calls.push("test");
+      return { success: true, ok: false, output: "bad login" };
+    });
+    await signInAgain();
+    const result = await complete({ replaced: true });
+    expect(result?.warning).toContain("couldn't be verified");
+    expect(calls).toEqual(["test"]);
+  });
+
+  it("says another account was added, and leaves the old one and the default alone", async () => {
+    await signInAgain();
+    expect(await complete({ replaced: false, notReplacedReason: "different_account" })).toEqual({
+      success: true,
+      warning:
+        "That signed in to a different ChatGPT account, so it was added as a new connection. The old one is still here.",
+    });
+    expect(calls).toEqual(["test"]);
+  });
+
+  it("takes no default for a sign-in whose old one was gone", async () => {
+    // A second Sign in again of the same row finds it retired by the first,
+    // whose replacement already has the default.
+    await signInAgain();
+    expect(await complete({ replaced: false, notReplacedReason: "gone" })).toEqual({ success: true });
+    expect(calls).toEqual(["test"]);
+  });
+
+  it.each([
+    ["an account that could not be read", { replaced: false, notReplacedReason: "account_unknown" as const }],
+    ["a controller that does not replace sign-ins", {}],
+  ])("says the old one is still there after %s, and takes no default", async (_case, status) => {
+    await signInAgain();
+    expect(await complete(status)).toEqual({
+      success: true,
+      warning: "That sign-in was added as a new connection. The old one is still here.",
+    });
+    expect(calls).toEqual(["test"]);
+  });
+
+  it("closing the dialog forgets the replacement", async () => {
+    await signInAgain();
+    await act(async () => captured?.connectModalProps.onClose());
+    expect(captured?.connectModalProps.signInAgainOf).toBeNull();
+    await act(async () => captured?.openConnectModalAtStep("codex"));
+    await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
+    expect(deviceAuthMocks.begin).toHaveBeenLastCalledWith({ provider: "codex", replacesCredentialId: null });
+    // A plain connect finishes as one: the new sign-in may become the default.
+    expect(await complete({})).toEqual({ success: true });
+    expect(calls).toEqual(["test", "setDefault new-chatgpt"]);
+  });
+});
+
+describe("useCredentialsConnectFlow names", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let showStatus: Mock;
+
+  beforeEach(async () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    desktopMocks.available = false;
+    showStatus = vi.fn();
+    controllerMocks.createCodex.mockResolvedValue({ success: true, credentialId: "new-credential" });
+    controllerMocks.test.mockResolvedValue({ success: true, ok: true });
+    controllerMocks.revoke.mockResolvedValue({ success: true });
+    desktopMocks.connect.mockResolvedValue({ success: true, credentialId: "desktop-credential" });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <Harness
+          options={{
+            userPresent: true,
+            loadCredentials: vi.fn().mockResolvedValue(undefined),
+            notifyAiConfigChanged: vi.fn(),
+            showStatus,
+            formatCredentialTestFailureMessage: (raw) => raw ?? null,
+            isCredentialDefault: () => false,
+          }}
+        />,
+      );
+    });
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    captured = null;
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  async function replaceDeepseekKey(savedLabel: string | null, typedLabel = "") {
+    await act(async () => {
+      captured?.openConnectModalToReplace(
+        { id: "old-credential", label: savedLabel ?? "Credential old-cred", savedLabel },
+        "deepseek",
+      );
+      captured?.connectModalProps.onDeepseekApiKeyDraftChange("sk-new-key");
+      captured?.connectModalProps.onDeepseekLabelDraftChange(typedLabel);
+    });
+    await act(async () => {
+      await captured?.connectModalProps.onConnectApiKey("deepseek");
+    });
+    return controllerMocks.createCodex.mock.lastCall?.[0] as { label?: string } | undefined;
+  }
+
+  it("names an API-key replacement after the replaced connection unless the person types a name", async () => {
+    expect((await replaceDeepseekKey("Team key"))?.label).toBe("Team key");
+    expect(controllerMocks.revoke).toHaveBeenLastCalledWith("old-credential");
+    expect((await replaceDeepseekKey("Team key", "  Night key "))?.label).toBe("Night key");
+    // A connection saved without a name has none to keep.
+    expect((await replaceDeepseekKey(null))?.label).toBe("DeepSeek");
+    // Nor does one whose name, saved before the rules, they now refuse.
+    expect((await replaceDeepseekKey("ann@example.com"))?.label).toBe("DeepSeek");
+    expect((await replaceDeepseekKey("x".repeat(61)))?.label).toBe("DeepSeek");
+  });
+
+  it("shows the rule instead of sending a typed name the controller would refuse", async () => {
+    desktopMocks.available = true;
+    await act(async () => root.render(
+      <Harness
+        options={{
+          userPresent: true,
+          loadCredentials: vi.fn().mockResolvedValue(undefined),
+          notifyAiConfigChanged: vi.fn(),
+          showStatus,
+          formatCredentialTestFailureMessage: (raw) => raw ?? null,
+        }}
+      />,
+    ));
+    await act(async () => {
+      captured?.openConnectModalAtStep("codex");
+      captured?.connectModalProps.onLabelDraftChange("Codex for ann@example.com");
+    });
+    await act(async () => {
+      await captured?.connectModalProps.onConnectCodex();
+    });
+    // Desktop's import accepts 120 characters and answers any refusal with
+    // a bare failure, so the name is checked before it is asked.
+    expect(desktopMocks.connect).not.toHaveBeenCalled();
+    expect(showStatus).toHaveBeenLastCalledWith(
+      "Leave the email address out of the name. Teammates see it on this connection's agent.",
+      "error",
+      5000,
+    );
+
+    await act(async () => captured?.connectModalProps.onLabelDraftChange("x".repeat(61)));
+    await act(async () => {
+      await captured?.connectModalProps.onConnectCodex();
+    });
+    expect(desktopMocks.connect).not.toHaveBeenCalled();
+    expect(showStatus).toHaveBeenLastCalledWith("Use a name of 1 to 60 characters on one line.", "error", 5000);
+
+    await act(async () => captured?.connectModalProps.onLabelDraftChange("  Work laptop "));
+    await act(async () => {
+      await captured?.connectModalProps.onConnectCodex();
+    });
+    expect(desktopMocks.connect).toHaveBeenLastCalledWith({ label: "Work laptop" });
+
+    await act(async () => {
+      captured?.openConnectModalAtStep("deepseek");
+      captured?.connectModalProps.onDeepseekApiKeyDraftChange("sk-new-key");
+      captured?.connectModalProps.onDeepseekLabelDraftChange("ann@example.com");
+    });
+    let connected = true;
+    await act(async () => {
+      connected = (await captured?.connectModalProps.onConnectApiKey("deepseek")) ?? true;
+    });
+    expect(connected).toBe(false);
+    expect(controllerMocks.createCodex).not.toHaveBeenCalled();
+  });
+
+  it("checks a typed name before an auth.json upload too", async () => {
+    const file = {
+      text: vi.fn().mockResolvedValue(JSON.stringify({ tokens: { access_token: "inert-access" } })),
+    } as unknown as File;
+    const upload = async () => {
+      await act(async () => {
+        captured?.connectModalProps.onUploadFile({
+          target: { files: [file], value: "auth.json" },
+        } as unknown as ChangeEvent<HTMLInputElement>);
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    };
+    await act(async () => {
+      captured?.openConnectModalAtStep("codex");
+      captured?.connectModalProps.onLabelDraftChange("ann@example.com");
+    });
+    await upload();
+    expect(controllerMocks.createCodex).not.toHaveBeenCalled();
+    await act(async () => captured?.connectModalProps.onLabelDraftChange(""));
+    await upload();
+    expect(controllerMocks.createCodex.mock.lastCall?.[0]).toMatchObject({ label: "Browser upload" });
   });
 });

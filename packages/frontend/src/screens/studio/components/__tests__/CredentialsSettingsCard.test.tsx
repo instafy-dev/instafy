@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   getCredentialRequirements: vi.fn(),
   listAgents: vi.fn(),
   listCredentials: vi.fn(),
+  renameCredential: vi.fn(),
   revokeCredential: vi.fn(),
   setDefaultCredential: vi.fn(),
   showStatus: vi.fn(),
@@ -72,6 +73,7 @@ vi.mock("../../../../sdk/instafy", () => ({
       createCodex: mocks.createCodexCredential,
       getRequirements: mocks.getCredentialRequirements,
       list: mocks.listCredentials,
+      rename: mocks.renameCredential,
       revoke: mocks.revokeCredential,
       setDefault: mocks.setDefaultCredential,
       test: mocks.testCredential,
@@ -165,6 +167,7 @@ describe("CredentialsSettingsCard", () => {
     mocks.getCredentialRequirements.mockReset();
     mocks.listAgents.mockReset();
     mocks.listCredentials.mockReset();
+    mocks.renameCredential.mockReset();
     mocks.revokeCredential.mockReset();
     mocks.setDefaultCredential.mockReset();
     mocks.showStatus.mockReset();
@@ -849,11 +852,14 @@ describe("CredentialsSettingsCard", () => {
     await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!;
     await act(async () => { trigger.focus(); trigger.click(); });
-    expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent)).toEqual(["Test", "Replace…", "Remove…"]);
+    expect(Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent)).toEqual(["Test", "Rename…", "Replace…", "Remove…"]);
     const replace = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent === "Replace…")!;
     expect(replace).toBeDefined();
     await act(async () => replace.click());
-    expect(mocks.openConnectModalToReplace).toHaveBeenCalledExactlyOnceWith({ id: "cred-old", label: "Review API key" }, provider);
+    expect(mocks.openConnectModalToReplace).toHaveBeenCalledExactlyOnceWith(
+      { id: "cred-old", label: "Review API key", savedLabel: "Review API key" },
+      provider,
+    );
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
@@ -868,12 +874,12 @@ describe("CredentialsSettingsCard", () => {
     await act(async () => { trigger.focus(); trigger.click(); });
     const menuItem = (name: string) => Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent === name)!;
     const actionLabels = () => Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent);
-    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    expect(actionLabels()).toEqual(["Make default", "Test", "Rename…", "Replace…", "Remove…"]);
     await act(async () => { menuItem("Test").focus(); menuItem("Test").click(); });
     expect(document.querySelector('[role="menu"]')).toBeNull();
     expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"] [role="status"]')?.textContent).toBe("Testing…");
     await act(async () => trigger.click());
-    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    expect(actionLabels()).toEqual(["Make default", "Test", "Rename…", "Replace…", "Remove…"]);
     expect(menuItem("Test").getAttribute("aria-disabled")).toBe("true");
     expect(menuItem("Replace…").getAttribute("aria-disabled")).toBe("true");
     await act(async () => { menuItem("Test").click(); menuItem("Replace…").click(); });
@@ -882,7 +888,7 @@ describe("CredentialsSettingsCard", () => {
     const guidance = "This key could not be verified. Check the account and enter a replacement key before retrying.";
     await act(async () => { finishTest({ success: false, error: guidance }); await flush(); });
     expect(container.querySelector('[data-testid="credentials-connection-row-cred-old"] [role="status"]')?.textContent).toContain(guidance);
-    expect(actionLabels()).toEqual(["Make default", "Test", "Replace…", "Remove…"]);
+    expect(actionLabels()).toEqual(["Make default", "Test", "Rename…", "Replace…", "Remove…"]);
     expect(document.querySelector('[role="menu"]')?.textContent).not.toContain(guidance);
     expect(menuItem("Test").hasAttribute("aria-disabled")).toBe(false);
     expect(menuItem("Replace…").hasAttribute("aria-disabled")).toBe(false);
@@ -894,7 +900,253 @@ describe("CredentialsSettingsCard", () => {
     await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!.click());
     const labels = Array.from(document.querySelectorAll('[role="menuitem"]')).map(item => item.textContent);
-    expect(labels).toEqual(["Test", "Reconnect auth.json…", "Remove…"]);
+    expect(labels).toEqual(["Test", "Rename…", "Reconnect auth.json…", "Remove…"]);
+  });
+
+  describe("Rename", () => {
+    const field = () =>
+      container.querySelector<HTMLInputElement>('[data-testid="credentials-connection-name-field-cred-old-input"]');
+    const row = () => container.querySelector('[data-testid="credentials-connection-row-cred-old"]');
+    const renameButton = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-rename-cred-old"]');
+
+    /** Past the field's focus, which waits a frame, and every answer already given. */
+    const settle = () =>
+      new Promise<void>((resolve) => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+
+    async function typeName(value: string) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field(), value);
+        field()?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+
+    async function press(key: string) {
+      await act(async () => {
+        field()?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        await settle();
+      });
+    }
+
+    async function clickInField(control: "save" | "cancel") {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid="credentials-connection-name-field-cred-old-${control}"]`)!
+          .click();
+        await settle();
+      });
+    }
+
+    async function startRename() {
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      await act(async () => { renameButton()!.click(); await settle(); });
+    }
+
+    it("turns the name into a labelled field that saves on Enter and reloads the list", async () => {
+      await startRename();
+      const input = field()!;
+      expect(input.value).toBe("Browser upload");
+      expect(input.getAttribute("aria-label")).toBe("New name for Browser upload");
+      expect(document.activeElement).toBe(input);
+      // The row's other actions wait until the name is saved or the edit is cancelled.
+      expect(container.querySelector('[data-testid="credentials-connection-test-cred-old"]')).toBeNull();
+
+      const renamed = { ...oldCredential, label: "Work plan" };
+      mocks.renameCredential.mockResolvedValue({ success: true, credential: renamed });
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [renamed] });
+      const listsBefore = mocks.listCredentials.mock.calls.length;
+      await typeName("  Work plan ");
+      await press("Enter");
+
+      expect(mocks.renameCredential).toHaveBeenCalledExactlyOnceWith("cred-old", "Work plan");
+      expect(field()).toBeNull();
+      expect(row()?.textContent).toContain("Work plan");
+      expect(mocks.listCredentials.mock.calls.length).toBe(listsBefore + 1);
+      expect(document.activeElement).toBe(renameButton());
+    });
+
+    it("shows a refusal under the field in plain words and keeps the draft", async () => {
+      await startRename();
+      const refusal = "Leave the email address out of the name. Teammates see it on this connection's agent.";
+      mocks.renameCredential.mockResolvedValue({
+        success: false,
+        error: refusal,
+        code: "credential_label_has_email",
+        status: 400,
+      });
+      await typeName("ann@example.com");
+      await clickInField("save");
+
+      const alert = row()?.querySelector('[role="alert"]');
+      expect(alert?.textContent).toBe(refusal);
+      expect(field()?.value).toBe("ann@example.com");
+      expect(field()?.getAttribute("aria-invalid")).toBe("true");
+      expect(field()?.getAttribute("aria-describedby")).toBe(alert?.id);
+      // Editing the name clears what was refused.
+      await typeName("Work plan");
+      expect(row()?.querySelector('[role="alert"]')).toBeNull();
+
+      // A refusal the controller does not word for people reads simply.
+      mocks.renameCredential.mockResolvedValue({ success: false, error: "credential not found", status: 404 });
+      await press("Enter");
+      expect(row()?.querySelector('[role="alert"]')?.textContent).toBe(
+        "This connection was removed, so it can't be renamed.",
+      );
+    });
+
+    it("cancels on Escape, and saves nothing for a name that reads as before", async () => {
+      await startRename();
+      await typeName("Something else");
+      await press("Escape");
+      expect(field()).toBeNull();
+      expect(row()?.textContent).toContain("Browser upload");
+      expect(document.activeElement).toBe(renameButton());
+
+      await act(async () => { renameButton()!.click(); await settle(); });
+      await typeName(" Browser upload ");
+      await press("Enter");
+      expect(field()).toBeNull();
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+    });
+
+    it("opens from the narrow-screen menu and gives focus back to it", async () => {
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-old"]')!;
+      await act(async () => { trigger.focus(); trigger.click(); });
+      const rename = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+        (item) => item.textContent === "Rename…",
+      )!;
+      await act(async () => { rename.click(); await settle(); });
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      expect(field()?.value).toBe("Browser upload");
+      expect(document.activeElement).toBe(field());
+      await clickInField("cancel");
+      expect(field()).toBeNull();
+      expect(document.activeElement).toBe(
+        container.querySelector('[data-testid="credentials-connection-menu-cred-old"]'),
+      );
+    });
+
+    it("is not offered on Instafy AI's row", async () => {
+      mocks.getCredentialRequirements.mockResolvedValue({ ...managedRequirements, hasDefaultCredential: true });
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      const managed = container.querySelector('[data-testid="credentials-connection-row-managed-ai"]');
+      expect(managed).not.toBeNull();
+      expect(managed?.querySelector('[aria-label^="Rename"]')).toBeNull();
+      expect(renameButton()).not.toBeNull();
+    });
+
+    it("does not send a name the controller would refuse", async () => {
+      await startRename();
+      await typeName("ann@example.com");
+      await press("Enter");
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+      expect(row()?.querySelector('[role="alert"]')?.textContent).toBe(
+        "Leave the email address out of the name. Teammates see it on this connection's agent.",
+      );
+      await typeName("Chat\u200BGPT");
+      await press("Enter");
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+      expect(row()?.querySelector('[role="alert"]')?.textContent).toBe(
+        "Use a name of 1 to 60 characters on one line.",
+      );
+    });
+
+    it("keeps the field to 60 characters counted as code points, so 60 emoji fit", async () => {
+      await startRename();
+      await typeName("😀".repeat(61));
+      expect(field()?.value).toBe("😀".repeat(60));
+      expect(field()?.hasAttribute("maxlength")).toBe(false);
+    });
+
+    it("leaves Enter and Escape to an input method that is composing", async () => {
+      await startRename();
+      await typeName("Work plan");
+      for (const key of ["Enter", "Escape"]) {
+        await act(async () => {
+          const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+          Object.defineProperty(event, "isComposing", { value: true });
+          field()?.dispatchEvent(event);
+          await settle();
+        });
+        expect(field()?.value).toBe("Work plan");
+      }
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+    });
+
+    it("a save that ends late leaves another row's field open", async () => {
+      const second = { ...oldCredential, id: "cred-second", label: "Second", isDefault: false };
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [oldCredential, second] });
+      let finishSave!: (result: unknown) => void;
+      mocks.renameCredential.mockReturnValue(new Promise((resolve) => { finishSave = resolve; }));
+      await startRename();
+      await typeName("Work plan");
+      await press("Enter");
+      expect(mocks.renameCredential).toHaveBeenCalledOnce();
+
+      // The first save is still on its way when the person renames the second row.
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-rename-cred-second"]')!.click();
+        await settle();
+      });
+      const secondField = () =>
+        container.querySelector<HTMLInputElement>('[data-testid="credentials-connection-name-field-cred-second-input"]');
+      expect(secondField()?.value).toBe("Second");
+
+      const renamed = { ...oldCredential, label: "Work plan" };
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [renamed, second] });
+      await act(async () => {
+        finishSave({ success: true, credential: renamed });
+        await settle();
+      });
+      expect(row()?.textContent).toContain("Work plan");
+      expect(secondField()?.value).toBe("Second");
+    });
+  });
+
+  describe("Sign in again", () => {
+    const deviceSignIn = {
+      ...oldCredential,
+      id: "cred-chatgpt",
+      label: "ChatGPT",
+      metadata: { source: "device_code", account_id: "acct_9876543210" },
+    };
+
+    it("replaces a ChatGPT device sign-in from the ChatGPT step, keeping it as the target", async () => {
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [deviceSignIn] });
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="credentials-connection-sign-in-again-cred-chatgpt"]',
+      )!;
+      expect(button.textContent).toBe("Sign in again");
+      // The auth.json reconnect stays beside it.
+      expect(container.querySelector('[data-testid="credentials-connection-reconnect-cred-chatgpt"]')).not.toBeNull();
+      await act(async () => button.click());
+      expect(mocks.openConnectModalToReplace).toHaveBeenCalledExactlyOnceWith(
+        { id: "cred-chatgpt", label: "ChatGPT", savedLabel: "ChatGPT" },
+        "codex",
+      );
+
+      const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-chatgpt"]')!;
+      await act(async () => { trigger.focus(); trigger.click(); });
+      const labels = Array.from(document.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent);
+      expect(labels).toEqual(["Test", "Rename…", "Sign in again…", "Reconnect auth.json…", "Remove…"]);
+      const item = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+        (entry) => entry.textContent === "Sign in again…",
+      )!;
+      await act(async () => item.click());
+      expect(mocks.openConnectModalToReplace).toHaveBeenCalledTimes(2);
+      expect(mocks.openConnectModalToReplace).toHaveBeenLastCalledWith(
+        { id: "cred-chatgpt", label: "ChatGPT", savedLabel: "ChatGPT" },
+        "codex",
+      );
+    });
+
+    it("is not offered on an uploaded auth.json, which reconnects in place", async () => {
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      expect(container.querySelector('[data-testid="credentials-connection-sign-in-again-cred-old"]')).toBeNull();
+      expect(container.querySelector('[data-testid="credentials-connection-reconnect-cred-old"]')).not.toBeNull();
+    });
   });
 
   it("shows needs-reconnect feedback for structured expired ChatGPT credentials", async () => {
@@ -973,5 +1225,29 @@ describe("CredentialsSettingsCard", () => {
     });
     expect(mocks.revokeCredential).toHaveBeenCalledWith("cred-old");
     expect(mocks.showStatus).toHaveBeenCalledWith("Credential reconnected.", "success", 3000);
+  });
+
+  it.each([
+    ["Work plan", "Work plan"],
+    // Saved before the rules: reconnecting must not be refused for its name.
+    ["ann@example.com", "Browser upload"],
+    [null, "Browser upload"],
+  ])("reconnects auth.json named %j as %j", async (saved, sent) => {
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [{ ...oldCredential, label: saved }] });
+    mocks.createCodexCredential.mockResolvedValue({ success: true, credentialId: "cred-new" });
+    mocks.revokeCredential.mockResolvedValue({ success: true });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-reconnect-cred-old"]')!.click();
+      await flush();
+    });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="credentials-reconnect-auth-json-input"]')!;
+    const file = { text: vi.fn().mockResolvedValue(JSON.stringify({ tokens: { access_token: "new-token" } })) };
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await flush();
+    });
+    expect(mocks.createCodexCredential.mock.lastCall?.[0]).toMatchObject({ label: sent });
   });
 });

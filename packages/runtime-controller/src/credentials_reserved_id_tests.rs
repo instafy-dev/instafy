@@ -402,6 +402,11 @@ async fn credential_routes_answer_the_reserved_id_as_unknown() -> anyhow::Result
             ("POST", format!("/me/credentials/{reserved}/test"), None),
             ("DELETE", format!("/me/credentials/{reserved}"), None),
             (
+                "PATCH",
+                format!("/me/credentials/{reserved}"),
+                Some(json!({ "label": "Reserved" })),
+            ),
+            (
                 "POST",
                 "/me/agents".to_string(),
                 Some(json!({ "credentialId": reserved })),

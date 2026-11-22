@@ -117,7 +117,7 @@ async fn device_login_providers_stay_codex_and_github() -> anyhow::Result<()> {
 }
 
 /// An issuer that authorizes at once and hands back `tokens`.
-async fn authorizing_issuer(tokens: Value) -> MockServer {
+pub(super) async fn authorizing_issuer(tokens: Value) -> MockServer {
     let issuer = MockServer::start_async().await;
     issuer
         .mock_async(|when, then| {
@@ -137,10 +137,13 @@ async fn authorizing_issuer(tokens: Value) -> MockServer {
     issuer
 }
 
-async fn complete_codex_device_login(
+/// Runs a Codex device login for `user_id` against `issuer` to its end, as a
+/// start with `replacesCredentialId` set to `replaces_credential_id` would.
+pub(super) async fn complete_codex_device_login(
     state: &crate::AppState,
     user_id: Uuid,
     issuer: &MockServer,
+    replaces_credential_id: Option<Uuid>,
 ) -> anyhow::Result<DeviceAuthStatus> {
     let session_id = Uuid::new_v4();
     state
@@ -159,6 +162,7 @@ async fn complete_codex_device_login(
                 issuer: issuer.base_url(),
                 client_id: "inert-client".to_string(),
                 device_auth_id: "inert-device-auth".to_string(),
+                replaces_credential_id,
             },
         })
         .await;
@@ -204,7 +208,7 @@ async fn a_device_login_that_returns_claude_tokens_stores_nothing() -> anyhow::R
             "refresh_token": OAUTH_REFRESH,
         }))
         .await;
-        match complete_codex_device_login(&state, user_id, &claude).await? {
+        match complete_codex_device_login(&state, user_id, &claude, None).await? {
             DeviceAuthStatus::Failed { error } => {
                 assert_eq!(error, CLAUDE_CREDENTIAL_REFUSED_MESSAGE)
             }
@@ -221,9 +225,10 @@ async fn a_device_login_that_returns_claude_tokens_stores_nothing() -> anyhow::R
             "refresh_token": "inert-codex-refresh",
         }))
         .await;
-        match complete_codex_device_login(&state, user_id, &codex).await? {
+        match complete_codex_device_login(&state, user_id, &codex, None).await? {
             DeviceAuthStatus::Completed {
                 credential_id: Some(_),
+                ..
             } => {}
             other => anyhow::bail!("a device login with Codex tokens ended as {other:?}"),
         }

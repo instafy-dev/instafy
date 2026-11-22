@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode as HttpStatusCode};
 use axum::routing::{delete, get, post};
@@ -15,16 +16,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tokio_postgres::{error::SqlState, GenericClient, Row};
+use tokio_postgres::{error::SqlState, GenericClient, Row, Transaction};
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session};
 use crate::config::PgPool;
 use crate::credential_keys::CredentialKeyRing;
+use crate::credential_labels::{self, CredentialLabel};
 use crate::credentials;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
 
 const DEFAULT_CODEX_ISSUER: &str = "https://auth.openai.com";
+/// The object of OpenAI's ID token that holds its ChatGPT claims.
+const OPENAI_AUTH_CLAIMS: &str = "https://api.openai.com/auth";
 const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_DEVICE_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -168,8 +172,15 @@ pub(crate) struct DeviceAuthSession {
 #[derive(Clone, Debug)]
 pub(crate) enum DeviceAuthStatus {
     Pending,
-    Completed { credential_id: Option<Uuid> },
-    Failed { error: String },
+    Completed {
+        credential_id: Option<Uuid>,
+        /// What became of the sign-in a ChatGPT sign-in was started to
+        /// replace, if any.
+        replacement: Option<SignInReplacement>,
+    },
+    Failed {
+        error: String,
+    },
     Cancelled,
 }
 
@@ -179,6 +190,10 @@ pub(crate) enum DeviceAuthProviderState {
         issuer: String,
         client_id: String,
         device_auth_id: String,
+        /// The person's live ChatGPT sign-in this one was started to replace
+        /// (`replacesCredentialId`), whose place it takes when it is saved if
+        /// that one is still live and of the same account (`chatgpt_sign_in`).
+        replaces_credential_id: Option<Uuid>,
     },
     Github {
         client_id: String,
@@ -247,6 +262,251 @@ struct DeviceAuthStartResponse {
     poll_interval_seconds: u64,
 }
 
+/// The optional body of `POST /me/auth/device/:provider/start`. A start with
+/// no body, or with `null`, replaces nothing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAuthStartBody {
+    /// The connection the sign-in replaces: for `codex`, one of the person's
+    /// live ChatGPT sign-ins. GitHub's sign-in replaces no connection.
+    #[serde(default)]
+    replaces_credential_id: Option<String>,
+}
+
+/// The 422 for a `replacesCredentialId` that names no connection the sign-in
+/// can replace.
+const CREDENTIAL_REPLACE_UNKNOWN_CODE: &str = "credential_replace_unknown";
+const CREDENTIAL_REPLACE_UNKNOWN_MESSAGE: &str =
+    "The connection this sign-in would replace isn't one of your ChatGPT sign-ins.";
+
+fn credential_replace_unknown() -> (HttpStatusCode, Json<ApiError>) {
+    (
+        HttpStatusCode::UNPROCESSABLE_ENTITY,
+        Json(ApiError {
+            message: CREDENTIAL_REPLACE_UNKNOWN_MESSAGE.to_string(),
+            code: Some(CREDENTIAL_REPLACE_UNKNOWN_CODE.to_string()),
+            details: None,
+        }),
+    )
+}
+
+fn parse_device_auth_start_body(
+    body: &[u8],
+) -> Result<DeviceAuthStartBody, (HttpStatusCode, Json<ApiError>)> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(DeviceAuthStartBody::default());
+    }
+    serde_json::from_slice::<Option<DeviceAuthStartBody>>(body)
+        .map(Option::unwrap_or_default)
+        .map_err(|error| bad_request(format!("invalid device login request: {error}")))
+}
+
+/// The person's own live ChatGPT sign-in that `raw` names, which a Codex
+/// device sign-in may replace, or the 422 that refuses it. The reserved
+/// managed id is never one (`credentials::load_owned_live_credential`).
+async fn replaced_chatgpt_sign_in(
+    state: &AppState,
+    user_id: &Uuid,
+    raw: &str,
+) -> Result<Uuid, (HttpStatusCode, Json<ApiError>)> {
+    let credential_id = Uuid::parse_str(raw.trim()).map_err(|_| credential_replace_unknown())?;
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    match credentials::load_owned_live_credential(&*connection, user_id, &credential_id).await? {
+        Some(credential) if credential.kind == credentials::CREDENTIAL_KIND_CODEX_AUTH_JSON => {
+            Ok(credential_id)
+        }
+        _ => Err(credential_replace_unknown()),
+    }
+}
+
+/// What saving a finished ChatGPT sign-in did with the sign-in it was started
+/// to replace (`replacesCredentialId`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignInReplacement {
+    /// It took that sign-in's place, which was still one of the person's live
+    /// ChatGPT sign-ins and of the same ChatGPT account: its name, its
+    /// default and its agents, and that one was retired in the same
+    /// transaction.
+    Replaced { id: Uuid, was_default: bool },
+    /// That sign-in is of another ChatGPT account, so this one was saved as a
+    /// new connection beside it, which stays.
+    DifferentAccount,
+    /// Which ChatGPT account one of the two is of could not be read, so they
+    /// are not taken for one: this one was saved as a new connection beside
+    /// that one, which stays.
+    AccountUnknown,
+    /// That sign-in was removed meanwhile, so this one was saved as a new one.
+    Gone,
+}
+
+/// The name a finished ChatGPT sign-in is saved with, and what became of the
+/// sign-in it was started to replace, if any.
+pub(crate) struct ChatGptSignIn {
+    pub(crate) label: CredentialLabel,
+    pub(crate) replacement: Option<SignInReplacement>,
+}
+
+/// Whether two ChatGPT sign-ins are of one ChatGPT account, decided only on
+/// account ids both of them name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountMatch {
+    Same,
+    Different,
+    Unknown,
+}
+
+fn chatgpt_account_match(replaced: Option<&str>, new: Option<&str>) -> AccountMatch {
+    match (known_account_id(replaced), known_account_id(new)) {
+        (Some(replaced), Some(new)) if replaced == new => AccountMatch::Same,
+        (Some(_), Some(_)) => AccountMatch::Different,
+        _ => AccountMatch::Unknown,
+    }
+}
+
+fn known_account_id(id: Option<&str>) -> Option<&str> {
+    id.map(str::trim).filter(|id| !id.is_empty())
+}
+
+/// The ChatGPT account a saved sign-in is of: its metadata's `account_id`,
+/// or, for one saved before device sign-ins stored it, the account its own
+/// sealed auth.json names (`tokens.account_id`, else its ID token's claim).
+/// The auth.json is opened as a lease opens it, read for that one id and
+/// dropped; none of it is kept. None when neither says.
+fn saved_chatgpt_account_id(
+    keys: &CredentialKeyRing,
+    metadata_account_id: Option<&str>,
+    nonce_b64: &str,
+    ciphertext_b64: &str,
+) -> Option<String> {
+    if let Some(account_id) = known_account_id(metadata_account_id) {
+        return Some(account_id.to_string());
+    }
+    let auth_json =
+        credentials::decode_authoritative_credential_payload(keys, nonce_b64, ciphertext_b64)
+            .ok()?;
+    let tokens = auth_json.get("tokens")?;
+    known_account_id(tokens.get("account_id").and_then(JsonValue::as_str))
+        .map(str::to_string)
+        .or_else(|| {
+            tokens
+                .get("id_token")
+                .and_then(JsonValue::as_str)
+                .and_then(extract_chatgpt_account_id)
+        })
+}
+
+/// Decides, in the transaction that saves a finished ChatGPT device sign-in
+/// (`credentials::insert_user_credential`), what it is called and whether it
+/// takes the place of the sign-in it was started to replace.
+///
+/// It does when that sign-in is still one of the person's live ChatGPT
+/// sign-ins and both name the same ChatGPT account: `account_id`, the new
+/// sign-in's from its tokens, and the old one's (`saved_chatgpt_account_id`).
+/// The new one then takes its name, and the saving transaction gives it the
+/// old one's default and agents and retires the old one, so nothing is left
+/// for Studio to finish. The old row is locked here, before any agent row, as
+/// a revoke locks them, and without blocking the key-share locks agent writes
+/// take on it. Otherwise, the old one gone, revoked, of another account or of
+/// an account that cannot be read, the new one is a sign-in like any other,
+/// with the numbered default name (`credential_labels::chatgpt_sign_in_label`). A number is
+/// free when no live connection of the person's and none of their agents that
+/// are not deleted goes by it: an agent outlives a removed connection with the
+/// connection's name, so a later sign-in must not give a second agent that
+/// name. The lock on the person's connection names makes two sign-ins that
+/// finish together take different numbers.
+pub(crate) async fn chatgpt_sign_in(
+    transaction: &Transaction<'_>,
+    keys: &CredentialKeyRing,
+    user_id: Uuid,
+    replaces: Option<Uuid>,
+    account_id: Option<&str>,
+) -> Result<ChatGptSignIn, (HttpStatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&format!("credential-labels:{user_id}")],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock connection names: {error}")))?;
+    let reserved = crate::config::managed_ai_credential_id();
+    let replaced = match replaces {
+        Some(replaced_id) => transaction
+            .query_opt(
+                "select label, is_default, metadata->>'account_id' as account_id,
+                        nonce_b64, ciphertext_b64
+                 from user_credentials
+                 where id = $1 and user_id = $2 and id <> $3
+                   and kind = 'codex_auth_json' and revoked_at is null
+                 for no key update",
+                &[&replaced_id, &user_id, &reserved],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to load the replaced credential: {error}"))
+            })?
+            .map(|row| (replaced_id, row)),
+        None => None,
+    };
+    let (replacement, replaced_label) = match (replaces, replaced) {
+        (None, _) => (None, None),
+        (Some(_), None) => (Some(SignInReplacement::Gone), None),
+        (Some(_), Some((id, row))) => {
+            let replaced_account = saved_chatgpt_account_id(
+                keys,
+                row.get("account_id"),
+                row.get("nonce_b64"),
+                row.get("ciphertext_b64"),
+            );
+            match chatgpt_account_match(replaced_account.as_deref(), account_id) {
+                AccountMatch::Same => {
+                    let replacement = SignInReplacement::Replaced {
+                        id,
+                        was_default: row.get("is_default"),
+                    };
+                    (Some(replacement), row.get::<_, Option<String>>("label"))
+                }
+                AccountMatch::Different => (Some(SignInReplacement::DifferentAccount), None),
+                AccountMatch::Unknown => (Some(SignInReplacement::AccountUnknown), None),
+            }
+        }
+    };
+
+    let mut taken: Vec<String> = transaction
+        .query(
+            "select label from user_credentials
+             where user_id = $1 and revoked_at is null and id <> $2 and label is not null",
+            &[&user_id, &reserved],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load connection names: {error}")))?
+        .iter()
+        .map(|row| row.get("label"))
+        .collect();
+    taken.extend(
+        transaction
+            .query(
+                "select display_name from user_agents
+                 where user_id = $1 and deleted_at is null and display_name is not null",
+                &[&user_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load agent names: {error}")))?
+            .iter()
+            .map(|row| row.get::<_, String>("display_name")),
+    );
+    Ok(ChatGptSignIn {
+        label: credential_labels::chatgpt_sign_in_label(
+            replaced_label.as_deref(),
+            taken.iter().map(String::as_str),
+        ),
+        replacement,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceAuthStatusResponse {
@@ -263,6 +523,13 @@ struct DeviceAuthStatusResponse {
     poll_interval_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_id: Option<String>,
+    /// For a finished ChatGPT sign-in started with `replacesCredentialId`:
+    /// whether it took that sign-in's place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced: Option<bool>,
+    /// Why it did not: `different_account`, `account_unknown` or `gone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1230,6 +1497,8 @@ fn github_device_auth_status_response(
         expires_at: include_codes.then(|| record.device_expires_at.to_rfc3339()),
         poll_interval_seconds: include_codes.then_some(record.poll_interval_seconds),
         credential_id: None,
+        replaced: None,
+        reason: None,
         error,
     })
 }
@@ -1238,15 +1507,23 @@ async fn start_device_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(provider): AxumPath<String>,
+    body: Bytes,
 ) -> Result<Json<DeviceAuthStartResponse>, (HttpStatusCode, Json<ApiError>)> {
     let provider = provider.trim().to_ascii_lowercase();
 
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
+    let start = parse_device_auth_start_body(&body)?;
     let now = Utc::now();
     let session_id = Uuid::new_v4();
     match provider.as_str() {
         "codex" => {
+            // Checked before OpenAI issues a code, so a refused start leaves
+            // nothing behind.
+            let replaces_credential_id = match start.replaces_credential_id.as_deref() {
+                Some(raw) => Some(replaced_chatgpt_sign_in(&state, &user_id, raw).await?),
+                None => None,
+            };
             let issuer = read_env_trimmed("CODEX_DEVICE_AUTH_ISSUER")
                 .unwrap_or_else(|| DEFAULT_CODEX_ISSUER.to_string());
             let client_id = read_env_trimmed("CODEX_DEVICE_AUTH_CLIENT_ID")
@@ -1270,6 +1547,7 @@ async fn start_device_auth(
                     issuer: issuer.clone(),
                     client_id: client_id.clone(),
                     device_auth_id: challenge.device_auth_id.clone(),
+                    replaces_credential_id,
                 },
             };
 
@@ -1286,6 +1564,9 @@ async fn start_device_auth(
             }))
         }
         "github" => {
+            if start.replaces_credential_id.is_some() {
+                return Err(credential_replace_unknown());
+            }
             if state.config.credential_keys.is_none() {
                 return Err(github_device_auth_service_unavailable(
                     GITHUB_DEVICE_AUTH_STORAGE_UNAVAILABLE_MESSAGE,
@@ -1450,16 +1731,30 @@ async fn get_device_auth_status(
 }
 
 fn local_device_auth_status_response(session: DeviceAuthSession) -> DeviceAuthStatusResponse {
+    let mut replacement = None;
     let (status, credential_id, error, include_codes) = match session.status {
         DeviceAuthStatus::Pending => ("pending".to_string(), None, None, true),
         DeviceAuthStatus::Cancelled => ("cancelled".to_string(), None, None, false),
-        DeviceAuthStatus::Completed { credential_id } => (
-            "completed".to_string(),
-            credential_id.map(|value| value.to_string()),
-            None,
-            false,
-        ),
+        DeviceAuthStatus::Completed {
+            credential_id,
+            replacement: outcome,
+        } => {
+            replacement = outcome;
+            (
+                "completed".to_string(),
+                credential_id.map(|value| value.to_string()),
+                None,
+                false,
+            )
+        }
         DeviceAuthStatus::Failed { error } => ("failed".to_string(), None, Some(error), false),
+    };
+    let (replaced, reason) = match replacement {
+        None => (None, None),
+        Some(SignInReplacement::Replaced { .. }) => (Some(true), None),
+        Some(SignInReplacement::DifferentAccount) => (Some(false), Some("different_account")),
+        Some(SignInReplacement::AccountUnknown) => (Some(false), Some("account_unknown")),
+        Some(SignInReplacement::Gone) => (Some(false), Some("gone")),
     };
 
     DeviceAuthStatusResponse {
@@ -1471,6 +1766,8 @@ fn local_device_auth_status_response(session: DeviceAuthSession) -> DeviceAuthSt
         expires_at: include_codes.then(|| session.expires_at.to_rfc3339()),
         poll_interval_seconds: include_codes.then(|| session.poll_interval_seconds),
         credential_id,
+        replaced,
+        reason,
         error,
     }
 }
@@ -1616,14 +1913,16 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
         return;
     };
 
-    let (issuer, client_id, device_auth_id) = match session.provider_state.clone() {
-        DeviceAuthProviderState::Codex {
-            issuer,
-            client_id,
-            device_auth_id,
-        } => (issuer, client_id, device_auth_id),
-        _ => return,
-    };
+    let (issuer, client_id, device_auth_id, replaces_credential_id) =
+        match session.provider_state.clone() {
+            DeviceAuthProviderState::Codex {
+                issuer,
+                client_id,
+                device_auth_id,
+                replaces_credential_id,
+            } => (issuer, client_id, device_auth_id, replaces_credential_id),
+            _ => return,
+        };
 
     let mut interval = Duration::from_secs(session.poll_interval_seconds.max(1));
     let deadline = session.expires_at;
@@ -1661,10 +1960,12 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                         let result = credentials::insert_user_credential(
                             &state,
                             session.user_id,
-                            "codex_auth_json".to_string(),
+                            credentials::CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
                             metadata,
                             auth_json,
-                            Some("ChatGPT".to_string()),
+                            credentials::NewCredentialLabel::ChatGptSignIn {
+                                replaces: replaces_credential_id,
+                            },
                             None,
                         )
                         .await;
@@ -1677,6 +1978,7 @@ async fn poll_codex_device_auth(state: AppState, session_id: Uuid) {
                                         &session_id,
                                         DeviceAuthStatus::Completed {
                                             credential_id: Some(created.credential_id),
+                                            replacement: created.replacement,
                                         },
                                     )
                                     .await;
@@ -2153,6 +2455,7 @@ async fn poll_github_device_auth(state: AppState, session_id: Uuid) {
                     if let Some(entry) = guard.get_mut(&session_id) {
                         entry.status = DeviceAuthStatus::Completed {
                             credential_id: None,
+                            replacement: None,
                         };
                         entry.completed_at = Some(completed_at);
                         if let DeviceAuthProviderState::Github {
@@ -2621,14 +2924,21 @@ async fn exchange_codex_code_for_tokens(
         .map_err(|error| format!("token exchange response invalid: {error}"))
 }
 
+/// The ChatGPT account an OpenAI ID token is for. OpenAI puts the claim in
+/// the token's `https://api.openai.com/auth` object, where Codex reads it; a
+/// top-level `chatgpt_account_id` is read only when that one is missing.
 fn extract_chatgpt_account_id(id_token: &str) -> Option<String> {
     let payload_b64 = id_token.split('.').nth(1)?;
     let decoded = BASE64URL.decode(payload_b64.as_bytes()).ok()?;
     let json: JsonValue = serde_json::from_slice(&decoded).ok()?;
-    json.get("chatgpt_account_id")
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let claim = |claims: Option<&JsonValue>| {
+        claims
+            .and_then(|claims| claims.get("chatgpt_account_id"))
+            .and_then(JsonValue::as_str)
+            .and_then(|value| known_account_id(Some(value)))
+            .map(str::to_string)
+    };
+    claim(json.get(OPENAI_AUTH_CLAIMS)).or_else(|| claim(Some(&json)))
 }
 
 fn build_codex_auth_json(tokens: CodexOauthTokenResp, account_id: Option<&str>) -> JsonValue {
@@ -2711,6 +3021,7 @@ mod device_auth_session_tests {
                 issuer: "https://auth.openai.com".to_string(),
                 client_id: "test-client".to_string(),
                 device_auth_id: "test-device-auth".to_string(),
+                replaces_credential_id: None,
             },
         }
     }
@@ -3015,6 +3326,7 @@ mod device_auth_session_tests {
                 Utc::now() + ChronoDuration::minutes(10),
                 DeviceAuthStatus::Completed {
                     credential_id: None,
+                    replacement: None,
                 },
                 Some(completed_at),
             ))
@@ -3226,3 +3538,7 @@ mod device_auth_session_tests {
 #[cfg(test)]
 #[path = "device_auth_claude_material_tests.rs"]
 mod claude_material_tests;
+
+#[cfg(test)]
+#[path = "device_auth_sign_in_name_tests.rs"]
+mod sign_in_name_tests;

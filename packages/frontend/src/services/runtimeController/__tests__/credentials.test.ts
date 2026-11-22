@@ -1,5 +1,46 @@
-import { describe, expect, it } from "vitest";
-import { parseManagedAiAccess, parseSubscriptionUsage } from "../credentials";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../core", () => ({
+  readControllerError: vi.fn(async (_response: unknown, fallback: string) => fallback),
+  readControllerApiError: vi.fn(async (response: Response, fallback: string) => {
+    const body = JSON.parse(await response.text()) as { message?: string; code?: string };
+    return {
+      status: response.status,
+      message: body.message ?? fallback,
+      code: body.code ?? null,
+      details: null,
+    };
+  }),
+  resolveControllerRequestContext: async () => ({
+    baseUrl: "http://controller.test",
+    accessToken: "token-123",
+    credentialSource: "ambient",
+    generation: 1,
+  }),
+  runtimeControllerEnabled: true,
+}));
+
+import {
+  getDeviceAuthStatus,
+  parseManagedAiAccess,
+  parseSubscriptionUsage,
+  renameMyCredential,
+  startDeviceAuth,
+} from "../credentials";
+
+function answer(status: number, value: unknown) {
+  return () => Promise.resolve(new Response(JSON.stringify(value), { status }));
+}
+
+function sent(fetchMock: ReturnType<typeof vi.fn>, call = 0) {
+  const [url, init] = fetchMock.mock.calls[call] as [string, RequestInit];
+  return {
+    url,
+    method: init.method,
+    headers: init.headers as Record<string, string>,
+    body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+  };
+}
 
 describe("parseSubscriptionUsage (controller contract boundary)", () => {
   it("keeps a window that has no reset time (proxy omits resetAt)", () => {
@@ -75,5 +116,123 @@ describe("parseManagedAiAccess (controller contract boundary)", () => {
     expect(parseManagedAiAccess(undefined)).toBeNull();
     expect(parseManagedAiAccess(null)).toBeNull();
     expect(parseManagedAiAccess("managed")).toBeNull();
+  });
+});
+
+describe("renameMyCredential", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const listed = {
+    id: "cred-1",
+    kind: "codex_auth_json",
+    label: "Work plan",
+    isDefault: false,
+    metadata: { account_id: "acct_123456" },
+    defaultModel: "gpt-5.5",
+    subscriptionUsage: null,
+    lastUsedAt: null,
+    revokedAt: null,
+    createdAt: "2026-11-01T00:00:00Z",
+    updatedAt: "2026-11-22T00:00:00Z",
+  };
+
+  it("sends the new name and reads the renamed connection as the list does", async () => {
+    const fetchMock = vi.fn(answer(200, listed));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await renameMyCredential("cred-1", "Work plan");
+    expect(sent(fetchMock)).toMatchObject({
+      url: "http://controller.test/me/credentials/cred-1",
+      method: "PATCH",
+      body: { label: "Work plan" },
+    });
+    expect(result).toEqual({
+      success: true,
+      credential: {
+        id: "cred-1",
+        kind: "codex_auth_json",
+        label: "Work plan",
+        isDefault: false,
+        metadata: { account_id: "acct_123456" },
+        subscriptionUsage: null,
+        lastUsedAt: null,
+        revokedAt: null,
+        createdAt: "2026-11-01T00:00:00Z",
+        updatedAt: "2026-11-22T00:00:00Z",
+      },
+    });
+  });
+
+  it("keeps a refusal's code and plain sentence", async () => {
+    const refusal = "Leave the email address out of the name. Teammates see it on this connection's agent.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(answer(400, { message: refusal, code: "credential_label_has_email" })),
+    );
+    expect(await renameMyCredential("cred-1", "ann@example.com")).toEqual({
+      success: false,
+      error: refusal,
+      code: "credential_label_has_email",
+      status: 400,
+    });
+  });
+});
+
+describe("startDeviceAuth", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("names the sign-in it replaces, and sends no body otherwise", async () => {
+    const fetchMock = vi.fn(
+      answer(200, {
+        sessionId: "session-1",
+        provider: "codex",
+        verificationUrl: "https://auth.example.test/codex/device",
+        userCode: "INERT-CODE",
+        expiresAt: "2026-11-22T00:15:00Z",
+        pollIntervalSeconds: 5,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await startDeviceAuth("codex", { replacesCredentialId: "old-chatgpt" })).toMatchObject({
+      success: true,
+      sessionId: "session-1",
+    });
+    expect(sent(fetchMock, 0)).toMatchObject({
+      url: "http://controller.test/me/auth/device/codex/start",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: { replacesCredentialId: "old-chatgpt" },
+    });
+
+    await startDeviceAuth("codex");
+    const plain = sent(fetchMock, 1);
+    expect(plain.body).toBeUndefined();
+    expect(plain.headers).not.toHaveProperty("content-type");
+  });
+});
+
+describe("getDeviceAuthStatus", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads whether a finished sign-in replaced the one it was started to replace", async () => {
+    const completed = { sessionId: "session-1", provider: "codex", status: "completed", credentialId: "cred-new" };
+    const read = async (extra: Record<string, unknown>) => {
+      vi.stubGlobal("fetch", vi.fn(answer(200, { ...completed, ...extra })));
+      const status = await getDeviceAuthStatus("session-1");
+      return [status.replaced, status.notReplacedReason];
+    };
+    expect(await read({ replaced: true })).toEqual([true, null]);
+    expect(await read({ replaced: false, reason: "different_account" })).toEqual([false, "different_account"]);
+    expect(await read({ replaced: false, reason: "gone" })).toEqual([false, "gone"]);
+    expect(await read({ replaced: false, reason: "account_unknown" })).toEqual([false, "account_unknown"]);
+    // Nothing replaced, an older controller, or a reason it does not know.
+    expect(await read({})).toEqual([null, null]);
+    expect(await read({ replaced: false, reason: "solar_flare" })).toEqual([false, null]);
   });
 });

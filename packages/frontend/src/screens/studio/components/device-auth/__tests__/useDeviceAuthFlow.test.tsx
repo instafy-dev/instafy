@@ -112,6 +112,44 @@ describe("useDeviceAuthFlow", () => {
     expect(captured?.busy).toBe(false);
   });
 
+  it("names the ChatGPT sign-in a new one replaces, and nothing otherwise", async () => {
+    sdkMock.startDeviceAuth.mockResolvedValue({ success: false, error: "Stopped by the test." });
+
+    await act(async () => captured?.begin({ provider: "codex", replacesCredentialId: "old-chatgpt" }));
+    expect(sdkMock.startDeviceAuth).toHaveBeenLastCalledWith("codex", { replacesCredentialId: "old-chatgpt" });
+
+    await act(async () => captured?.begin({ provider: "codex", replacesCredentialId: null }));
+    expect(sdkMock.startDeviceAuth).toHaveBeenLastCalledWith("codex");
+    expect(sdkMock.startDeviceAuth.mock.lastCall).toHaveLength(1);
+  });
+
+  it("hands the completion what the controller did with the sign-in it replaces", async () => {
+    sdkMock.startDeviceAuth.mockResolvedValue({
+      success: true,
+      sessionId: "session-again",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      pollIntervalSeconds: 5,
+    });
+    sdkMock.getDeviceAuthStatus.mockResolvedValue({
+      success: true,
+      status: "completed",
+      credentialId: "new-chatgpt",
+      replaced: false,
+      notReplacedReason: "different_account",
+    });
+    await act(async () => captured?.begin({ provider: "codex", replacesCredentialId: "old-chatgpt" }));
+    await flushEffects();
+    expect(completionMock).toHaveBeenCalledWith({
+      provider: "codex",
+      sessionId: "session-again",
+      credentialId: "new-chatgpt",
+      replaced: false,
+      notReplacedReason: "different_account",
+    });
+  });
+
   it("turns an expired session into an actionable failure without polling", async () => {
     sdkMock.startDeviceAuth.mockResolvedValue({
       success: true,
