@@ -23012,20 +23012,16 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .get("aggregated_output")
                             .cloned()
                             .unwrap_or(JsonValue::Null);
-                        // What the step is in plain words, from its argv only (never its output).
-                        let activity =
-                            activity_labels::command_activity(item.get("command_argv"), command);
                         // `instafy web search` that sent nothing (no search key in the space, the
                         // turn's searches used, or a call it refused) ends as the AI's own search
                         // that searched nothing does: Studio shows no step for it, where it read
                         // "Tried searching the web" for a search there was nothing to send to.
                         let status = if event_type == "item.completed"
-                            && activity.as_ref().is_some_and(|activity| {
-                                activity_labels::search_command_sent_nothing(
-                                    activity,
-                                    exit_code.as_i64(),
-                                )
-                            }) {
+                            && activity_labels::search_command_sent_nothing(
+                                item.get("command_argv"),
+                                command,
+                                exit_code.as_i64(),
+                            ) {
                             WEB_SEARCH_SEARCHED_NOTHING
                         } else {
                             status
@@ -23043,7 +23039,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                         if let Some(argv) = item.get("command_argv") {
                             metadata["commandArgv"] = argv.clone();
                         }
-                        if let Some(activity) = activity {
+                        // What the step is in plain words, from its argv only (never its output).
+                        if let Some(activity) =
+                            activity_labels::command_activity(item.get("command_argv"), command)
+                        {
                             metadata["activity"] = activity;
                         }
                         let key = format!("command::{item_id}::{status}::{event_type}::{command}");

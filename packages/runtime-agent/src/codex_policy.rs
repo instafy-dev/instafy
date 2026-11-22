@@ -216,6 +216,11 @@ pub(crate) fn apply_runtime_codex_policy(
         .web_search_mode
         .set(search_mode)
         .context("Codex web-search requirements conflict with the authorized runtime policy")?;
+    // The run's commands are told whether it has that search, from this mode alone.
+    mark_commands_of_a_run_that_searches(
+        &mut config.permissions.shell_environment_policy,
+        search_mode == WebSearchMode::Live,
+    );
     // Native search follows the controller capability, including a custom-named proxy provider.
     // The feature flag below still lets the model choose its normal search transport.
     config.model_provider.supports_standalone_web_search = search_mode == WebSearchMode::Live;
