@@ -1638,20 +1638,25 @@ fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_p
 /// put the reviews in its missing line, though it tried no reviewer's own site: every review cell and the reply said "I
 /// didn't find", where an earlier test's pass had found three of six reviews through a reviewer's own links (local
 /// tests, Nov 20). `instafy-comparing` says that with no search a turn opens up to two reviewers' own sites and follows
-/// their links, and says which it tried, before a review counts as not found; that a review nobody could look for is
-/// "not checked", in neither of the browser's lines, with one offer to read a site the person names; and that "I didn't
-/// find" is only for a value looked for. A run's own web search, and the missing line for a review still without a
-/// page, stay.
+/// their links before a review counts as not found, and only once a reviewer's page was read: a reviewer's site that
+/// stopped the turn (a bot check, a block) was looked at, not read, and a review the missing line names reads "I didn't
+/// find" wherever it goes. A review no reviewer's page could be read for is "not checked", in neither of the browser's
+/// lines, and the reply names such reviews once with an offer to read a site the person names: what is missing and
+/// what they can ask for, as the replies guide says, never the turn's own limits ("you can't search for reviews here"
+/// is the shape it rules out). "I didn't find" is only for a value looked for. Which sites were tried is not the
+/// skill's to ask for: where a browser turn's words are posted, the replies guide already has them say where they
+/// looked, and in a page's hand-back they reach neither the person nor the build. A run's own web search, and the
+/// missing line for a review still without a page, stay.
 #[test]
 fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_found() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let comparing = flat(COMPARING_SKILL);
-    // In this order: the search or a reviewer's site, the sites tried, then what nobody could look for.
+    // In this order: the search or a reviewer's site, a reviewer's page read, then what no page could be read for.
     let mut at = 0;
     for line in [
         "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.",
-        "- With no search, open up to two reviewers' own sites that way and follow their links, and say which sites you tried. Only then is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
-        "- A review nobody could look for (no reviewer's site could be tried) is \"not checked\" on the page and in the reply, and goes in neither line. The reply says once that you can't search for reviews here and offers to read a site the person names.",
+        "- With no search, open up to two reviewers' own sites that way and follow their links. Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
+        "- A review no reviewer's page could be read for (none could be tried, or each one stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
     ] {
         let found = comparing[at..]
             .find(line)
@@ -1663,6 +1668,20 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
     ));
     // The exit no longer stands on its own line, ahead of the sites to try.
     assert!(!comparing.contains("- A review you have no address or link for"));
+    // A reply says what is missing and what the person can ask for, never what its turn can't do: no line of a topic
+    // skill that speaks of the reply tells it to say so. Where it looked is the replies guide's to ask, not the skill's.
+    let agents = flat(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/instafy/AGENTS.md"
+    )));
+    assert!(agents.contains("- Never describe the turn itself: its run, pass, snapshot, tabs, tools, checks (\"validation passed\") or limits (\"I can't use a browser here\"). Say what is missing and what they can ask for."));
+    assert!(agents.contains("- When you didn't find something, say where you looked"));
+    for skill in [COMPARING_SKILL, GETTING_AROUND_SKILL] {
+        for line in skill.lines().filter(|line| line.contains("reply")) {
+            assert!(!line.contains("can't"), "{line}");
+        }
+    }
+    assert!(!comparing.contains("say which sites you tried"));
     assert!(
         COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len() <= TOPIC_SKILLS_MAX_BYTES,
         "{} bytes",
@@ -1681,7 +1700,11 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
             "{transport}"
         );
         assert!(
-            prompt.contains("- A review nobody could look for (no reviewer's site could be tried)"),
+            prompt.contains("Only once a reviewer's page was read is a review you have no address or link for a value you didn't find"),
+            "{transport}"
+        );
+        assert!(
+            prompt.contains("- A review no reviewer's page could be read for (none could be tried, or each one stopped you)"),
             "{transport}"
         );
     }
