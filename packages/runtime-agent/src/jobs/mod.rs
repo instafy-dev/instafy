@@ -16195,12 +16195,17 @@ fn refused_card_retry_prompt(prompt: &str, broken: &[&str], searched_or_read: bo
             "\n- It held an e-mail address: name the page and what to do there without the person's details.",
         );
     }
-    // The earlier behaviour: searches and reads are done whatever the first attempt did.
-    let _ = searched_or_read;
-    let (fix, found) = (
-        "Fix only the card:",
-        "\n- This turn's searches and reads are done: do not search or read any page again. Write the card from what they found, or answer from the pages you read with no card.",
-    );
+    let (fix, found) = if searched_or_read {
+        (
+            "Fix only the card:",
+            "\n- This turn's searches and reads are done: do not search or read any page again. Write the card from what they found, or answer from the pages you read with no card.",
+        )
+    } else {
+        (
+            "Fix the card:",
+            "\n- This turn read and searched nothing yet: find the page first, then answer from what you read, or name the page in the card.",
+        )
+    };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
         - Your previous answer's `request_browser` card was refused for what its task says. {fix}{rules}{found}\n\
@@ -16233,11 +16238,12 @@ fn refused_card_retry_options(
     {
         retry.provider_conversation_state = Some(thread.clone());
     }
-    // The earlier behaviour: no search and no shell whatever the first attempt did.
-    let _ = searched_or_read;
-    retry.disable_native_web_search = true;
-    retry.disable_shell_tool = true;
     retry.require_first_tool_call = false;
+    if searched_or_read {
+        retry.disable_native_web_search = true;
+        retry.disable_shell_tool = true;
+        retry.disable_local_browser = true;
+    }
 }
 
 fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> String {

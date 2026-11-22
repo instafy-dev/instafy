@@ -90,8 +90,14 @@ pub(super) fn rules_refused_cards_broke(reply: &Value) -> Vec<&'static str> {
         if !REFUSED_FOR_ITS_TASK.contains(&rule) {
             continue;
         }
-        // The earlier behaviour: the first rule a card broke only.
         broken.push(rule);
+        let task = action
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if rule == NAMES_NO_PAGE && crate::search_query::holds_an_email_address(task) {
+            broken.push(HOLDS_AN_EMAIL_ADDRESS);
+        }
     }
     broken
 }
@@ -271,8 +277,9 @@ impl BrowserRequest {
     /// refusal among them. Whether the browser reads such a page once they press it stays as it
     /// was. A card the routing step posts is the person's own message.
     pub(super) fn wait_for_a_press_where_it_opens(&mut self, sites: &BTreeSet<String>) {
-        // The earlier behaviour: no card waits for what the reader didn't read.
-        let _ = (sites, self.routed);
+        if !self.routed && !hosts_studio_reads(&self.task).is_disjoint(sites) {
+            self.waits_for_a_press = true;
+        }
     }
 
     /// Whether Studio leaves this card a button for the person to open, by what its task names,

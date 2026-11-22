@@ -108,6 +108,7 @@ export function browserRequestFromMessage(message: ChatMessage): BrowserRequest 
     location: value.location,
     ...(value.continueBuilding === true ? { continueBuilding: true } : {}),
     ...(value.routed === true ? { routed: true as const } : {}),
+    ...(value.waitsForThePerson === true ? { waitsForThePerson: true as const } : {}),
   };
 }
 
