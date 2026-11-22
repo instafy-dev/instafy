@@ -7847,19 +7847,28 @@ function refuseUnansweredAddress(url) {
 // search, which they refused (a local test, Nov 8); a guessed path on a site
 // nobody gave, told only of the generic way on, ended the turn with no hours,
 // though the bookshop's home page would have opened (a local test, Nov 9).
+// A search nobody gave (an address with a query) on a site nobody gave is told
+// of no home page: told one always opens, a turn refused a search engine's
+// results address opened that engine's home page, typed the search there and
+// left the person a prompt for a search nobody asked for (a local test,
+// Nov 20). The home page itself still opens, a reviewer's own site included.
 // Where to go next is the generic step fact (NEXT_SOURCE). A refused address
 // was never opened, so the turn writes no finding line for it: runtime-agent
 // reads the refusal by its words (`shared_browser::address_not_given`) and
 // leaves out one it wrote anyway.
 function refuseUngivenAddress(url) {
-  if (!actionPolicy.isPublicHost(new URL(url).hostname) || !approvalProtocol.addressNotGiven(url)) {
+  const asked = new URL(url);
+  if (!actionPolicy.isPublicHost(asked.hostname) || !approvalProtocol.addressNotGiven(url)) {
     return;
   }
   const home = approvalProtocol.siteGiven(url)
-    ? `this site's home page, ${new URL(url).origin}/,`
-    : "a site's home page";
+    ? `this site's home page, ${asked.origin}/,`
+    : asked.search.length > 1
+      ? ""
+      : "a site's home page";
+  const opens = home ? `, and ${home} always opens` : "";
   throw new Error(
-    `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given, and ${home} always opens. ${NEXT_SOURCE}`,
+    `No message and no page Octo read gave this address, so it was not opened and gets no finding line: Octo opens only addresses it was given${opens}. ${NEXT_SOURCE}`,
   );
 }
 

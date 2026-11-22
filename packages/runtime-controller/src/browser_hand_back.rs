@@ -204,8 +204,9 @@ pub(crate) const AFTER_A_PROMPT_KEY: &str = "browser_hand_back_after_a_prompt";
 /// site and the person's answer (`denied`, `expired`) or a page that changed
 /// after their yes (`stale`), from the browser turn's own
 /// `browser/terminal-consent` artifact ([`step_not_done`]), never its words.
-/// The runtime tells the building turn to say it didn't run and not to try it
-/// again (runtime-agent `browser_hand_back::STEP_NOT_DONE_LINE`).
+/// The runtime tells the building turn to write "not checked" for its values
+/// and not to try it again, and ends that turn's reply with its own line for
+/// the step (runtime-agent `browser_hand_back::STEP_NOT_DONE_LINE`).
 pub(crate) const STEP_NOT_DONE_RECORD_KEY: &str = "stepNotDone";
 /// The step kinds a [`STEP_NOT_DONE_RECORD_KEY`] names: the browser steps a
 /// prompt asks about (runtime-agent `shared_browser_activity::STEPS`).
