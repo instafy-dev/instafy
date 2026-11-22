@@ -310,9 +310,14 @@ pub(crate) async fn insert_user_credential(
         NewCredentialLabel::Given(label) => (label, None),
         NewCredentialLabel::ChatGptSignIn { replaces } => {
             let account_id = metadata.get("account_id").and_then(JsonValue::as_str);
-            let sign_in =
-                crate::device_auth::chatgpt_sign_in(&transaction, user_id, replaces, account_id)
-                    .await?;
+            let sign_in = crate::device_auth::chatgpt_sign_in(
+                &transaction,
+                keys,
+                user_id,
+                replaces,
+                account_id,
+            )
+            .await?;
             (Some(sign_in.label), sign_in.replacement)
         }
     };
@@ -2370,14 +2375,20 @@ async fn set_my_default_credential(
         .await
         .map_err(|error| internal_error(format!("failed to clear default credential: {error}")))?;
 
-    transaction
+    // Still live here too: a replacement or revoke may have retired the row
+    // since it was read above. Setting a retired row would leave no live
+    // default; refusing rolls the cleared default back as well.
+    let promoted = transaction
         .execute(
             "update user_credentials set is_default = true, updated_at = now()
-             where id = $1 and user_id = $2",
+             where id = $1 and user_id = $2 and revoked_at is null",
             &[&credential_id, &user_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to set default credential: {error}")))?;
+    if promoted == 0 {
+        return Err(not_found("credential not found"));
+    }
 
     if previous_default_provider
         .as_deref()
@@ -3332,11 +3343,12 @@ fn augment_metadata_with_provider(
     JsonValue::Object(map)
 }
 
-/// Every lease, refresh and probe of a stored credential opens it here. A row
-/// stored before the credential guard can hold a Claude sign-in; it is refused
-/// here, before any refresh, so it is never leased to the proxy, refreshed or
-/// probed.
-fn decode_authoritative_credential_payload(
+/// Every lease, refresh and probe of a stored credential opens it here, and so
+/// does Sign in again to read an older ChatGPT sign-in's account
+/// (`device_auth::chatgpt_sign_in`). A row stored before the credential guard
+/// can hold a Claude sign-in; it is refused here, before any refresh, so it is
+/// never leased to the proxy, refreshed or probed.
+pub(crate) fn decode_authoritative_credential_payload(
     keys: &CredentialKeyRing,
     nonce_b64: &str,
     ciphertext_b64: &str,

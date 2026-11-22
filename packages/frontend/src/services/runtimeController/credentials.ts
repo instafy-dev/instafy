@@ -106,8 +106,11 @@ export interface DeviceAuthStatusResult {
    * when it replaced nothing, or from an older controller.
    */
   replaced?: boolean | null;
-  /** Why it did not: another ChatGPT account, or the old one was gone. */
-  notReplacedReason?: "different_account" | "gone" | null;
+  /**
+   * Why it did not: another ChatGPT account, an account that could not be
+   * read, or the old one was gone.
+   */
+  notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
   error?: string | null;
 }
 
@@ -606,7 +609,11 @@ export async function getDeviceAuthStatus(
       credentialId: typeof payload.credentialId === "string" ? payload.credentialId : null,
       replaced: typeof payload.replaced === "boolean" ? payload.replaced : null,
       notReplacedReason:
-        payload.reason === "different_account" || payload.reason === "gone" ? payload.reason : null,
+        payload.reason === "different_account" ||
+        payload.reason === "account_unknown" ||
+        payload.reason === "gone"
+          ? payload.reason
+          : null,
       error: typeof payload.error === "string" ? payload.error : null,
     };
   } catch (error) {

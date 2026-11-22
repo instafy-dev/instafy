@@ -13,3 +13,11 @@ export const CHATGPT_SIGNED_IN_AGAIN = "Signed in again.";
 /** Sign in again of another ChatGPT account, which the controller added beside the old one. */
 export const CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT =
   "That signed in to a different ChatGPT account, so it was added as a new connection. The old one is still here.";
+
+/**
+ * Sign in again that was added beside the old one for any other reason: the
+ * controller could not read which account one of them is of, or it is one
+ * that does not replace sign-ins and said nothing about it.
+ */
+export const CHATGPT_SIGN_IN_ADDED_BESIDE =
+  "That sign-in was added as a new connection. The old one is still here.";

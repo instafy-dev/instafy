@@ -20,7 +20,7 @@ const deviceAuthMocks = vi.hoisted(() => ({
     | ((input: {
         credentialId?: string | null;
         replaced?: boolean | null;
-        notReplacedReason?: "different_account" | "gone" | null;
+        notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
       }) => Promise<{ success: true; warning?: string }>)
     | null,
 }));
@@ -615,11 +615,16 @@ describe("useCredentialsConnectFlow Sign in again", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  // Opens the ChatGPT step to replace the row and starts its device sign-in.
   async function signInAgain() {
     await act(async () => captured?.openConnectModalToReplace(signIn, "codex"));
+    await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
   }
 
-  async function complete(status: { replaced?: boolean | null; notReplacedReason?: "different_account" | "gone" | null }) {
+  async function complete(status: {
+    replaced?: boolean | null;
+    notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
+  }) {
     let result: { success: true; warning?: string } | undefined;
     await act(async () => {
       result = await deviceAuthMocks.onCompleted?.({ credentialId: "new-chatgpt", ...status });
@@ -631,7 +636,6 @@ describe("useCredentialsConnectFlow Sign in again", () => {
     await signInAgain();
     expect(captured?.connectModalProps.connectModalStep).toBe("codex");
     expect(captured?.connectModalProps.signInAgainOf).toBe("ChatGPT");
-    await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
     expect(deviceAuthMocks.begin).toHaveBeenLastCalledWith({
       provider: "codex",
       replacesCredentialId: "old-chatgpt",
@@ -672,10 +676,24 @@ describe("useCredentialsConnectFlow Sign in again", () => {
     expect(calls).toEqual(["test"]);
   });
 
-  it("treats a sign-in whose old one was gone as a new sign-in", async () => {
+  it("takes no default for a sign-in whose old one was gone", async () => {
+    // A second Sign in again of the same row finds it retired by the first,
+    // whose replacement already has the default.
     await signInAgain();
     expect(await complete({ replaced: false, notReplacedReason: "gone" })).toEqual({ success: true });
-    expect(calls).toEqual(["test", "setDefault new-chatgpt"]);
+    expect(calls).toEqual(["test"]);
+  });
+
+  it.each([
+    ["an account that could not be read", { replaced: false, notReplacedReason: "account_unknown" as const }],
+    ["a controller that does not replace sign-ins", {}],
+  ])("says the old one is still there after %s, and takes no default", async (_case, status) => {
+    await signInAgain();
+    expect(await complete(status)).toEqual({
+      success: true,
+      warning: "That sign-in was added as a new connection. The old one is still here.",
+    });
+    expect(calls).toEqual(["test"]);
   });
 
   it("closing the dialog forgets the replacement", async () => {
@@ -685,6 +703,9 @@ describe("useCredentialsConnectFlow Sign in again", () => {
     await act(async () => captured?.openConnectModalAtStep("codex"));
     await act(async () => captured?.connectModalProps.onBeginDeviceAuth("codex"));
     expect(deviceAuthMocks.begin).toHaveBeenLastCalledWith({ provider: "codex", replacesCredentialId: null });
+    // A plain connect finishes as one: the new sign-in may become the default.
+    expect(await complete({})).toEqual({ success: true });
+    expect(calls).toEqual(["test", "setDefault new-chatgpt"]);
   });
 });
 

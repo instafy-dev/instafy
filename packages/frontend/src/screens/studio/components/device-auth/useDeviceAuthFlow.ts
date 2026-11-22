@@ -40,7 +40,7 @@ export function useDeviceAuthFlow({
     credentialId?: string | null;
     /** Whether it took the place of the sign-in it was started to replace. */
     replaced?: boolean | null;
-    notReplacedReason?: "different_account" | "gone" | null;
+    notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
   }) => Promise<DeviceAuthFlowCompletionResult> | DeviceAuthFlowCompletionResult;
   onCancelled?: () => void;
 } = {}) {

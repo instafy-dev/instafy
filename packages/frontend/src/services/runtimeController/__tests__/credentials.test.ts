@@ -230,6 +230,7 @@ describe("getDeviceAuthStatus", () => {
     expect(await read({ replaced: true })).toEqual([true, null]);
     expect(await read({ replaced: false, reason: "different_account" })).toEqual([false, "different_account"]);
     expect(await read({ replaced: false, reason: "gone" })).toEqual([false, "gone"]);
+    expect(await read({ replaced: false, reason: "account_unknown" })).toEqual([false, "account_unknown"]);
     // Nothing replaced, an older controller, or a reason it does not know.
     expect(await read({})).toEqual([null, null]);
     expect(await read({ replaced: false, reason: "solar_flare" })).toEqual([false, null]);

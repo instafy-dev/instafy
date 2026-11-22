@@ -29,6 +29,10 @@ const controller = vi.hoisted(() => ({
   replaces: null as string | null,
   // The ChatGPT account the person signs in to.
   account: "acct_person",
+  // A controller from before Sign in again, which replaces nothing and says nothing.
+  older: false,
+  // Another session of Sign in again for the same row finished first.
+  retiredMeanwhile: false,
   calls: [] as string[],
 }));
 const desktop = vi.hoisted(() => ({ available: false }));
@@ -137,6 +141,8 @@ describe("Sign in again", () => {
     controller.rows = [];
     controller.replaces = null;
     controller.account = "acct_person";
+    controller.older = false;
+    controller.retiredMeanwhile = false;
     controller.calls = [];
     desktop.available = false;
     showStatus.mockReset();
@@ -171,8 +177,17 @@ describe("Sign in again", () => {
     let outcome: { replaced?: boolean; notReplacedReason?: "different_account" | "gone" } = {};
     credentials.getDeviceAuthStatus.mockImplementation(async () => {
       if (!controller.rows.some((row) => row.id === "cred-fresh")) {
+        if (controller.retiredMeanwhile) {
+          for (const row of controller.rows) {
+            row.revokedAt = "2026-11-22T11:59:00.000Z";
+          }
+          controller.rows.push(signInRow("cred-first", "ChatGPT", true, controller.account));
+        }
         const old = controller.rows.find((row) => row.id === controller.replaces && !row.revokedAt);
-        if (old && old.metadata.account_id === controller.account) {
+        if (controller.older) {
+          controller.rows.push(signInRow("cred-fresh", "ChatGPT", false, controller.account));
+          outcome = {};
+        } else if (old && old.metadata.account_id === controller.account) {
           controller.rows.push(signInRow("cred-fresh", old.label ?? "ChatGPT", old.isDefault, controller.account));
           old.isDefault = false;
           old.revokedAt = "2026-11-22T12:00:00.000Z";
@@ -274,6 +289,37 @@ describe("Sign in again", () => {
     await signInAgainOn("cred-stale");
     await until("the list to reload", () => liveRows().length === 1);
     expect(controller.calls).toEqual(["save", "test cred-fresh"]);
+  });
+
+  it("against a controller that does not replace, says the old one is still there and takes no default", async () => {
+    controller.rows = [signInRow("cred-stale", "ChatGPT", true, "acct_person")];
+    controller.older = true;
+    await signInAgainOn("cred-stale");
+    await until("the list to reload", () => liveRows().length === 2);
+    expect(controller.calls).toEqual(["save", "test cred-fresh"]);
+    expect(controller.rows.find((row) => row.id === "cred-stale")?.isDefault).toBe(true);
+    expect(showStatus).toHaveBeenCalledWith(
+      "That sign-in was added as a new connection. The old one is still here.",
+      "warning",
+      6500,
+      undefined,
+    );
+  });
+
+  it("whose row another session replaced first leaves the default with that replacement", async () => {
+    controller.rows = [signInRow("cred-stale", "ChatGPT", true, "acct_person")];
+    controller.retiredMeanwhile = true;
+    await signInAgainOn("cred-stale");
+    await until("the list to reload", () => liveRows().length === 2);
+    // Saved fresh beside the first session's replacement, which keeps the default.
+    expect(controller.calls).toEqual(["save", "test cred-fresh"]);
+    expect(
+      controller.rows.filter((row) => !row.revokedAt).map((row) => [row.id, row.isDefault]),
+    ).toEqual([
+      ["cred-first", true],
+      ["cred-fresh", false],
+    ]);
+    expect(showStatus).toHaveBeenCalledWith("ChatGPT credentials connected.", "success", 3500);
   });
 
   it("of another ChatGPT account adds a connection and keeps the old one", async () => {

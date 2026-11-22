@@ -27,6 +27,8 @@ use crate::credentials;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
 
 const DEFAULT_CODEX_ISSUER: &str = "https://auth.openai.com";
+/// The object of OpenAI's ID token that holds its ChatGPT claims.
+const OPENAI_AUTH_CLAIMS: &str = "https://api.openai.com/auth";
 const DEFAULT_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_DEVICE_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -333,6 +335,10 @@ pub(crate) enum SignInReplacement {
     /// That sign-in is of another ChatGPT account, so this one was saved as a
     /// new connection beside it, which stays.
     DifferentAccount,
+    /// Which ChatGPT account one of the two is of could not be read, so they
+    /// are not taken for one: this one was saved as a new connection beside
+    /// that one, which stays.
+    AccountUnknown,
     /// That sign-in was removed meanwhile, so this one was saved as a new one.
     Gone,
 }
@@ -344,13 +350,53 @@ pub(crate) struct ChatGptSignIn {
     pub(crate) replacement: Option<SignInReplacement>,
 }
 
-/// Whether two ChatGPT sign-ins are of one ChatGPT account: both name the
-/// same account id, or neither names one.
-fn same_chatgpt_account(replaced: Option<&str>, new: Option<&str>) -> bool {
-    fn account(id: Option<&str>) -> Option<&str> {
-        id.map(str::trim).filter(|id| !id.is_empty())
+/// Whether two ChatGPT sign-ins are of one ChatGPT account, decided only on
+/// account ids both of them name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountMatch {
+    Same,
+    Different,
+    Unknown,
+}
+
+fn chatgpt_account_match(replaced: Option<&str>, new: Option<&str>) -> AccountMatch {
+    match (known_account_id(replaced), known_account_id(new)) {
+        (Some(replaced), Some(new)) if replaced == new => AccountMatch::Same,
+        (Some(_), Some(_)) => AccountMatch::Different,
+        _ => AccountMatch::Unknown,
     }
-    account(replaced) == account(new)
+}
+
+fn known_account_id(id: Option<&str>) -> Option<&str> {
+    id.map(str::trim).filter(|id| !id.is_empty())
+}
+
+/// The ChatGPT account a saved sign-in is of: its metadata's `account_id`,
+/// or, for one saved before device sign-ins stored it, the account its own
+/// sealed auth.json names (`tokens.account_id`, else its ID token's claim).
+/// The auth.json is opened as a lease opens it, read for that one id and
+/// dropped; none of it is kept. None when neither says.
+fn saved_chatgpt_account_id(
+    keys: &CredentialKeyRing,
+    metadata_account_id: Option<&str>,
+    nonce_b64: &str,
+    ciphertext_b64: &str,
+) -> Option<String> {
+    if let Some(account_id) = known_account_id(metadata_account_id) {
+        return Some(account_id.to_string());
+    }
+    let auth_json =
+        credentials::decode_authoritative_credential_payload(keys, nonce_b64, ciphertext_b64)
+            .ok()?;
+    let tokens = auth_json.get("tokens")?;
+    known_account_id(tokens.get("account_id").and_then(JsonValue::as_str))
+        .map(str::to_string)
+        .or_else(|| {
+            tokens
+                .get("id_token")
+                .and_then(JsonValue::as_str)
+                .and_then(extract_chatgpt_account_id)
+        })
 }
 
 /// Decides, in the transaction that saves a finished ChatGPT device sign-in
@@ -358,14 +404,15 @@ fn same_chatgpt_account(replaced: Option<&str>, new: Option<&str>) -> bool {
 /// takes the place of the sign-in it was started to replace.
 ///
 /// It does when that sign-in is still one of the person's live ChatGPT
-/// sign-ins and of the same ChatGPT account (`same_chatgpt_account`, against
-/// `account_id`, the new sign-in's): the new one takes its name, and the
-/// saving transaction gives it the old one's default and agents and retires
-/// the old one, so nothing is left for Studio to finish and closing Studio
-/// midway changes nothing. Its row is locked here, before any agent row, as a
-/// revoke locks them. Otherwise, the old one gone, revoked or of another
-/// account, the new one is a sign-in like any other, with the numbered
-/// default name (`credential_labels::chatgpt_sign_in_label`). A number is
+/// sign-ins and both name the same ChatGPT account: `account_id`, the new
+/// sign-in's from its tokens, and the old one's (`saved_chatgpt_account_id`).
+/// The new one then takes its name, and the saving transaction gives it the
+/// old one's default and agents and retires the old one, so nothing is left
+/// for Studio to finish. The old row is locked here, before any agent row, as
+/// a revoke locks them, and without blocking the key-share locks agent writes
+/// take on it. Otherwise, the old one gone, revoked, of another account or of
+/// an account that cannot be read, the new one is a sign-in like any other,
+/// with the numbered default name (`credential_labels::chatgpt_sign_in_label`). A number is
 /// free when no live connection of the person's and none of their agents that
 /// are not deleted goes by it: an agent outlives a removed connection with the
 /// connection's name, so a later sign-in must not give a second agent that
@@ -373,6 +420,7 @@ fn same_chatgpt_account(replaced: Option<&str>, new: Option<&str>) -> bool {
 /// finish together take different numbers.
 pub(crate) async fn chatgpt_sign_in(
     transaction: &Transaction<'_>,
+    keys: &CredentialKeyRing,
     user_id: Uuid,
     replaces: Option<Uuid>,
     account_id: Option<&str>,
@@ -388,11 +436,12 @@ pub(crate) async fn chatgpt_sign_in(
     let replaced = match replaces {
         Some(replaced_id) => transaction
             .query_opt(
-                "select label, is_default, metadata->>'account_id' as account_id
+                "select label, is_default, metadata->>'account_id' as account_id,
+                        nonce_b64, ciphertext_b64
                  from user_credentials
                  where id = $1 and user_id = $2 and id <> $3
                    and kind = 'codex_auth_json' and revoked_at is null
-                 for update",
+                 for no key update",
                 &[&replaced_id, &user_id, &reserved],
             )
             .await
@@ -406,14 +455,22 @@ pub(crate) async fn chatgpt_sign_in(
         (None, _) => (None, None),
         (Some(_), None) => (Some(SignInReplacement::Gone), None),
         (Some(_), Some((id, row))) => {
-            if same_chatgpt_account(row.get("account_id"), account_id) {
-                let replacement = SignInReplacement::Replaced {
-                    id,
-                    was_default: row.get("is_default"),
-                };
-                (Some(replacement), row.get::<_, Option<String>>("label"))
-            } else {
-                (Some(SignInReplacement::DifferentAccount), None)
+            let replaced_account = saved_chatgpt_account_id(
+                keys,
+                row.get("account_id"),
+                row.get("nonce_b64"),
+                row.get("ciphertext_b64"),
+            );
+            match chatgpt_account_match(replaced_account.as_deref(), account_id) {
+                AccountMatch::Same => {
+                    let replacement = SignInReplacement::Replaced {
+                        id,
+                        was_default: row.get("is_default"),
+                    };
+                    (Some(replacement), row.get::<_, Option<String>>("label"))
+                }
+                AccountMatch::Different => (Some(SignInReplacement::DifferentAccount), None),
+                AccountMatch::Unknown => (Some(SignInReplacement::AccountUnknown), None),
             }
         }
     };
@@ -470,7 +527,7 @@ struct DeviceAuthStatusResponse {
     /// whether it took that sign-in's place.
     #[serde(skip_serializing_if = "Option::is_none")]
     replaced: Option<bool>,
-    /// Why it did not: `different_account` or `gone`.
+    /// Why it did not: `different_account`, `account_unknown` or `gone`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1696,6 +1753,7 @@ fn local_device_auth_status_response(session: DeviceAuthSession) -> DeviceAuthSt
         None => (None, None),
         Some(SignInReplacement::Replaced { .. }) => (Some(true), None),
         Some(SignInReplacement::DifferentAccount) => (Some(false), Some("different_account")),
+        Some(SignInReplacement::AccountUnknown) => (Some(false), Some("account_unknown")),
         Some(SignInReplacement::Gone) => (Some(false), Some("gone")),
     };
 
@@ -2866,14 +2924,21 @@ async fn exchange_codex_code_for_tokens(
         .map_err(|error| format!("token exchange response invalid: {error}"))
 }
 
+/// The ChatGPT account an OpenAI ID token is for. OpenAI puts the claim in
+/// the token's `https://api.openai.com/auth` object, where Codex reads it; a
+/// top-level `chatgpt_account_id` is read only when that one is missing.
 fn extract_chatgpt_account_id(id_token: &str) -> Option<String> {
     let payload_b64 = id_token.split('.').nth(1)?;
     let decoded = BASE64URL.decode(payload_b64.as_bytes()).ok()?;
     let json: JsonValue = serde_json::from_slice(&decoded).ok()?;
-    json.get("chatgpt_account_id")
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    let claim = |claims: Option<&JsonValue>| {
+        claims
+            .and_then(|claims| claims.get("chatgpt_account_id"))
+            .and_then(JsonValue::as_str)
+            .and_then(|value| known_account_id(Some(value)))
+            .map(str::to_string)
+    };
+    claim(json.get(OPENAI_AUTH_CLAIMS)).or_else(|| claim(Some(&json)))
 }
 
 fn build_codex_auth_json(tokens: CodexOauthTokenResp, account_id: Option<&str>) -> JsonValue {

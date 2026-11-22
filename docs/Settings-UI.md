@@ -787,14 +787,18 @@ The row of a ChatGPT sign-in made with a device code also has **Sign in again** 
 its menu), which opens the ChatGPT step to replace it with the device sign-in alone, with no
 Desktop import, auth.json or name there; **Reconnect**, which uploads an auth.json in its place,
 stays as it was. The sign-in says which one it replaces (`replacesCredentialId`), and the controller
-settles it when the sign-in finishes, in the transaction that saves it. Of the same ChatGPT account
-(both name the same account id, or neither names one), the new sign-in replaces the old one in
+settles it when the sign-in finishes, in the transaction that saves it. When both name a ChatGPT
+account and it is the same (the new one's from its tokens, the old one's from its metadata or, for
+one saved before sign-ins stored it, from its own saved auth.json), the new sign-in replaces it in
 place: it keeps the name, whether it is the default and its agents, and the old one is retired as
-a revoke retires one; Studio says "Signed in again.". Of another account, it is added as a new
-connection with the numbered name and an agent of its own, and the old one stays, which Studio
-says. One whose old sign-in was removed meanwhile is a new sign-in like any other. Studio retires
-nothing on this path and only reports the new sign-in's test: closing the dialog before the sign-in
-finishes cancels it, and one that finishes after Studio has gone is settled all the same.
+a revoke retires one; Studio says "Signed in again.". Of another account, or when either account
+cannot be read, it is added as a new connection with the numbered name and an agent of its own,
+and the old one stays, which Studio says. One whose old sign-in was removed meanwhile, such as by a
+second Sign in again of the same row, is a new sign-in like any other. Studio retires nothing on
+this path, takes the default for none of these, and only reports the new sign-in's test: closing the
+dialog before the sign-in finishes cancels it, and one that finishes after Studio has gone is
+settled all the same. Every device sign-in stores its ChatGPT account in its metadata, which the
+row's account hint shows.
 
 An API key that replaces a connection, and Reconnect, keep its name unless the person types another
 or that name breaks the rules, and then take the name the path gives a new connection ("OpenAI",

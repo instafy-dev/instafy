@@ -22,6 +22,7 @@ import {
   CHATGPT_CONNECTION_DEFAULT_WARNING,
   CHATGPT_CONNECTION_RESOLUTION_WARNING,
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
+  CHATGPT_SIGN_IN_ADDED_BESIDE,
   CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT,
   CHATGPT_SIGNED_IN_AGAIN,
 } from "./device-auth/deviceAuthCompletion";
@@ -172,8 +173,9 @@ export function useCredentialsConnectFlow({
   const [zaiLabelDraft, setZaiLabelDraft] = useState("");
   const [geminiApiKeyDraft, setGeminiApiKeyDraft] = useState("");
   const [geminiLabelDraft, setGeminiLabelDraft] = useState("");
-  // Set when a finished sign-in took the place of the one Sign in again
-  // replaces, so the success line says so.
+  // The sign-in the device sign-in under way was started to replace, if any,
+  // and whether a finished one took its place, so the success line says so.
+  const deviceSignInReplacesRef = useRef<string | null>(null);
   const signedInAgainRef = useRef(false);
   const handleDeviceAuthCompleted = useCallback(
     async ({
@@ -183,7 +185,7 @@ export function useCredentialsConnectFlow({
     }: {
       credentialId?: string | null;
       replaced?: boolean | null;
-      notReplacedReason?: "different_account" | "gone" | null;
+      notReplacedReason?: "different_account" | "account_unknown" | "gone" | null;
     }): Promise<{ success: true; warning?: string }> => {
       if (!credentialId) {
         return {
@@ -192,28 +194,38 @@ export function useCredentialsConnectFlow({
         };
       }
 
-      // Sign in again is the controller's: a sign-in of the same account
-      // took the old one's place, name, default and agents when it was saved,
-      // and one of another account was added beside it. Nothing is retired
-      // here, and the test below only reports.
-      const ofAnotherAccount = replaced === false && notReplacedReason === "different_account";
-      if (replaced === true) {
-        signedInAgainRef.current = true;
+      // Sign in again is the controller's to settle: a sign-in of the same
+      // account took the old one's place, name, default and agents when it
+      // was saved. Whatever the outcome, Studio promotes and retires nothing
+      // here, and the test only reports: a second session for the same row
+      // finds the old one gone and must not take the default from the first.
+      if (deviceSignInReplacesRef.current !== null) {
+        const testResult = await testMyCredential(credentialId).catch(() => null);
+        if (replaced === true) {
+          signedInAgainRef.current = true;
+        } else if (notReplacedReason !== "gone") {
+          // Another account, one that could not be read, or a controller
+          // that does not replace sign-ins and so says nothing: the old one
+          // is still there.
+          return {
+            success: true,
+            warning:
+              notReplacedReason === "different_account"
+                ? CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT
+                : CHATGPT_SIGN_IN_ADDED_BESIDE,
+          };
+        }
+        return testResult?.success && testResult.ok
+          ? { success: true }
+          : { success: true, warning: CHATGPT_CONNECTION_VERIFICATION_WARNING };
       }
 
       const testResult = await testMyCredential(credentialId).catch(() => null);
-      if (ofAnotherAccount) {
-        return { success: true, warning: CHATGPT_SIGN_IN_OF_ANOTHER_ACCOUNT };
-      }
       if (!testResult?.success || !testResult.ok) {
         return {
           success: true,
           warning: CHATGPT_CONNECTION_VERIFICATION_WARNING,
         };
-      }
-      // Its default is the old one's.
-      if (replaced === true) {
-        return { success: true };
       }
 
       // The controller saved it without taking the default from Instafy AI;
@@ -373,9 +385,10 @@ export function useCredentialsConnectFlow({
       try {
         // Sign in again names the sign-in it replaces; the controller then
         // replaces that one when this one finishes, even if Studio is gone.
+        deviceSignInReplacesRef.current = replaceTargetRef.current?.id ?? null;
         await beginDeviceAuthFlow({
           provider,
-          replacesCredentialId: replaceTargetRef.current?.id ?? null,
+          replacesCredentialId: deviceSignInReplacesRef.current,
         });
       } finally {
         setConnectPending(false);
