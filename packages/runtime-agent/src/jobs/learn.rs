@@ -872,6 +872,11 @@ const LEGACY_COMPARING_SHA256: &[&str] = &[
     // item's own page stayed beside another page's figure, and a price came from the product
     // page, or for dates from the place's own booking form.
     "ce1087c66c678cb4fcf2c07693b7aaa02f0ec79f6a3d17ce5dcf8f999ce82143", // v2
+    // From before a review no page links to was looked for on up to two reviewers' own sites,
+    // with no search, and counted as not found only once a reviewer's page was read, one no
+    // reviewer's page could be read for was "not checked", and "I didn't find" was only for a
+    // value looked for.
+    "68e895d6befa87ac4f44e96f3822478037d3b4a11d39eb364e63f89ce4167906", // v3
 ];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the
 /// browser, research and page skills, under them in the skills tree.
@@ -890,6 +895,11 @@ const LEGACY_GETTING_AROUND_SHA256: &[&str] = &[
     // highlighted for them, and a planner nobody sent was "not run", with the last step taken
     // said and "again" only for a step of the same turn.
     "867ef76cbe062683760a4cc911c22648cccd47085f4c5f221a0adb67a94c1179", // v2
+    // From before a planner whose fields never show, or one of whose fields is the person's,
+    // gave way to the place's own getting-there lines in its words, a planner that showed no
+    // fields in the chat was linked with the values to type instead of opened again, and a
+    // click's answer that a field still holds what was typed meant a suggestion to click.
+    "6a9f1c67e61de65a86dde32096e797d4931099c207c7719df1a25d7bf3a94173", // v3
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
