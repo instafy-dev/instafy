@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   Bookmark,
+  Cpu,
   Expand,
   Github,
   Group,
@@ -89,6 +90,7 @@ export function ComposerActionMenu({
   onImportGithubRepo,
   onSelectConnector,
   onBrowseConnectors,
+  onConnectAi,
   installedSkillNames = NO_INSTALLED_SKILLS,
   onInsertCommand,
   onQueueMessage,
@@ -127,6 +129,10 @@ export function ComposerActionMenu({
   // prefills.
   onSelectConnector?: (connector: ProductConnector) => void;
   onBrowseConnectors?: () => void;
+  // "Connect an AI" closes the menu and opens the Add AI connection dialog, the
+  // one Your AI opens: a ChatGPT sign-in or an API key, each of which gets an
+  // agent of its own.
+  onConnectAi?: () => void;
   installedSkillNames?: ReadonlySet<string>;
   onInsertCommand: (command: string) => void;
   onQueueMessage?: () => void;
@@ -390,6 +396,17 @@ export function ComposerActionMenu({
                 onPress={() => setView("connect")}
                 end={<NavArrowRight className="h-4 w-4" aria-hidden="true" />}
                 testId="composer-action-menu-connect"
+              />
+            ) : null}
+            {!mutationDisabled && onConnectAi ? (
+              <ActionRow
+                icon={<Cpu className="h-4 w-4" aria-hidden="true" />}
+                title="Connect an AI"
+                onPress={() => {
+                  closeMenu();
+                  onConnectAi();
+                }}
+                testId="composer-action-menu-add-ai"
               />
             ) : null}
             {!mutationDisabled && showBrowserAction ? (

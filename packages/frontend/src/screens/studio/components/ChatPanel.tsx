@@ -7108,6 +7108,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onImportGithubRepo: beginGithubImport,
           onSelectConnector: handleSelectConnector,
           onBrowseConnectors: openConnectBrowse,
+          onConnectAi: user ? openGettingStartedConnectModal : undefined,
           installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
           onQueueMessage: () => {

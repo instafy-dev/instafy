@@ -3,6 +3,7 @@ import type { ControllerCredentialListItem } from "../../sdk/instafy";
 import {
   formatCredentialKind,
   formatCredentialOptionLabel,
+  resolveCredentialAccountHint,
 } from "../credentialFormatting";
 
 function createCredential(
@@ -28,5 +29,25 @@ describe("credentialFormatting", () => {
 
     expect(formatCredentialKind(credential)).toBe("This machine");
     expect(formatCredentialOptionLabel(credential)).toBe("Local Codex auth.json · This machine");
+  });
+
+  it("tells two ChatGPT sign-ins with the same label apart by their accounts", () => {
+    const first = createCredential({
+      id: "credential-chatgpt-1",
+      label: "ChatGPT",
+      metadata: { source: "device_code", account_id: "acct-aaaaaa111111" },
+    });
+    const second = createCredential({
+      id: "credential-chatgpt-2",
+      label: "ChatGPT",
+      metadata: { source: "device_code", account_id: "acct-bbbbbb222222" },
+    });
+
+    expect(formatCredentialOptionLabel(first)).toMatch(/^ChatGPT · .+ · acct …111111$/);
+    expect(formatCredentialOptionLabel(second)).toMatch(/^ChatGPT · .+ · acct …222222$/);
+    expect(resolveCredentialAccountHint(first)).toBe("acct …111111");
+    expect(resolveCredentialAccountHint({ ...first, metadata: { source: "device_code" } })).toBe(
+      "id …creden",
+    );
   });
 });
