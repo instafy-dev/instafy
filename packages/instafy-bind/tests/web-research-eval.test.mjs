@@ -296,7 +296,7 @@ test("research and browser policy checks match the current skills", () => {
   const browser = flat(BROWSER_SKILL);
   const finding = {
     no_guessed_paths: ["Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box.", "Never invent a page path"],
-    missing_page_searched: ["A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.", "then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named"],
+    missing_page_searched: ["A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task.", "then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named"],
     configured_sites_not_opened: ["Instafy's browser has no web search: open a search engine only when the person named one.", "an explicit workspace policy refusal ends that page"],
     facts_from_own_page: ["A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page: those only lead to it."],
   };

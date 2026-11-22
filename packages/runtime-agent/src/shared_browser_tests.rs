@@ -3740,7 +3740,7 @@ fn every_step_that_ends_a_page_points_to_finding_a_page_and_names_no_source() {
     let finding = &skill[skill.find("## Finding a page").expect("section")..];
     let finding = &finding[..finding.find("\n## ").expect("next section")];
     assert!(finding.contains(
-        "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source."
+        "- A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source."
     ));
     // The list sends a page that ended to its site's home page only where that page opens: a
     // link-only site refuses every address, its root too, a site the person declined is not

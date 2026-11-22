@@ -216,12 +216,14 @@ history entries the runtime receives), the expected route and why. A case can al
 after a Stop and an Undo, "keep going" must not require a change. Whether that turn then leaves the undone change
 alone, only a real turn shows. A case with `"integratedSearch": true` is sent where Octo can search the web for the
 message, as a job whose grant lets its turn search: its routing input then has the one line that says so, and that
-Instafy's browser can't, after the browser skill's routing section, and availability for dates at places nobody
+Instafy's browser can't, above the browser skill's routing section, and availability for dates at places nobody
 named, answered in a reply, stays `direct` as other research answered in a reply does, unless a site must be used
 first. With `"researchPagesSearchFirst": true`
 as well, it is sent on a runtime with `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` on: a second line says research that ends
 in a page searches first, and such research stays `direct` too; without it, that line says such research doesn't
-search first, and it goes to the browser first. A case's `pages`
+search first, and it goes to the browser first. The section puts in braces the words that hold only until such
+research searches first; a case sent where it does reads the section without them, and every other case reads them
+without the braces, so a dump of a case sent without search is byte for byte what it was. A case's `pages`
 are the space's pages as the controller gives a job them, each `"madeIn": "this chat"` or `"another chat"`: the routing
 input names them as a turn that may write files reads them. A case can also list words its routing answer's `summary`
 must name where a routed browser turn reads it (`"summaryNames"`, in the card's task after the person's words), such as
