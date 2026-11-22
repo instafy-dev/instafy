@@ -1671,6 +1671,23 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
         "{} bytes",
         COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len()
     );
+    // A browser turn whose words ask for reviews reads them, in either browser.
+    let tmp = scaffolded_space();
+    for transport in ["shared", "desktop-personal"] {
+        let prompt = fresh_prompt(
+            tmp.path(),
+            "Compare the three latest e-readers of one maker, with two independent reviews each.",
+            json!({ "browserTransport": transport }),
+        );
+        assert!(
+            prompt.contains("- With no search, open up to two reviewers' own sites that way"),
+            "{transport}"
+        );
+        assert!(
+            prompt.contains("- A review nobody could look for (no reviewer's site could be tried)"),
+            "{transport}"
+        );
+    }
 }
 
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
@@ -2985,6 +3002,20 @@ fn a_planner_that_cant_be_run_gives_the_places_own_lines_and_isnt_opened_again()
     ));
     assert!(browser.contains("still holds what was typed: none of its suggestions is chosen."));
     assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
+    // A browser turn whose words ask for a route reads them, in either browser.
+    let tmp = scaffolded_space();
+    for transport in ["shared", "desktop-personal"] {
+        let prompt = fresh_prompt(
+            tmp.path(),
+            "Now find how to get there by tram from the main square.",
+            json!({ "browserTransport": transport }),
+        );
+        assert!(prompt.contains(section), "{transport}");
+        assert!(
+            prompt.contains("with its link and \"the planner wasn't run, so no times\""),
+            "{transport}"
+        );
+    }
 }
 
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
