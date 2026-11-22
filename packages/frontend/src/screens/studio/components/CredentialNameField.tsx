@@ -2,9 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
-
-/** The most characters a connection's name has; the controller refuses more. */
-export const CREDENTIAL_NAME_MAX_LENGTH = 60;
+import { clampCredentialLabel } from "../../../utils/credentialLabelRules";
 
 type CredentialNameFieldProps = {
   /** The name the connection goes by now, which labels the field. */
@@ -22,8 +20,10 @@ type CredentialNameFieldProps = {
 /**
  * A saved connection's name as a text field, which Rename puts in place of the
  * name. It takes focus with the name selected; Enter saves and Escape cancels,
- * since Desktop has no `window.prompt`. A refusal shows under the field and is
- * read with it.
+ * since Desktop has no `window.prompt`, except while an input method is
+ * composing, whose Enter and Escape are its own. The field holds at most the
+ * 60 characters the controller saves, counted as code points as it counts
+ * them, so 60 emoji fit. A refusal shows under the field and is read with it.
  */
 export function CredentialNameField({
   name,
@@ -53,8 +53,22 @@ export function CredentialNameField({
         <Input
           ref={inputRef}
           value={draft}
-          onChange={(event) => onDraftChange(event.target.value)}
+          onChange={(event) => {
+            // Cut only once a composition ends: cutting text an input method
+            // is still composing breaks the composition.
+            const composing = (event.nativeEvent as InputEvent).isComposing === true;
+            onDraftChange(composing ? event.target.value : clampCredentialLabel(event.target.value));
+          }}
+          onCompositionEnd={(event) => onDraftChange(clampCredentialLabel(event.currentTarget.value))}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) {
+              // The input method's own Enter or Escape, which must not reach a
+              // dialog or page around the field either.
+              if (event.key === "Escape") {
+                event.stopPropagation();
+              }
+              return;
+            }
             if (event.key === "Enter") {
               event.preventDefault();
               onSave();
@@ -70,7 +84,6 @@ export function CredentialNameField({
           }}
           // Read-only rather than disabled while saving, so focus stays here.
           readOnly={pending}
-          maxLength={CREDENTIAL_NAME_MAX_LENGTH}
           aria-label={`New name for ${name}`}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId : undefined}

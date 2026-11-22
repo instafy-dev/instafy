@@ -774,16 +774,31 @@ confirmed unavailability. Reserve the separate status summary for loading, error
 account that needs to be selected as default.
 
 Each saved, live connection has **Rename** (Rename… in its menu on a narrow screen), which turns
-its name into a text field with Save and Cancel: Enter saves, Escape cancels, and a refused name
-says why under the field. Instafy AI's row has none. The person's agents on that connection whose
-display name still reads exactly as the old name take the new one; an agent named by hand keeps
-its name, and no handle changes, since people mention agents by them (`PATCH /me/credentials/:id`).
-While a live connection is named "ChatGPT", a new ChatGPT sign-in takes the lowest free number
-("ChatGPT 2", then "ChatGPT 3"), so two plans read apart. A reconnect keeps the old connection's
-name: what replaces it takes that name unless the person types another, and a ChatGPT sign-in says
-which sign-in it replaces (`replacesCredentialId`), since the old one is still live when the new
-one is saved. A name is 1 to 60 characters on one line and never holds an email address, whoever
-types it: the agent made for a connection goes by its name, and teammates see that agent.
+its name into a text field with Save and Cancel: Enter saves and Escape cancels, except while an
+input method is composing, and a name the rules below refuse is not sent but says why under the
+field. Instafy AI's row has none. The person's agents on that connection whose display name still
+reads exactly as the old name take the new one; an agent named by hand keeps its name, and no handle
+changes, since people mention agents by them (`PATCH /me/credentials/:id`).
+
+A new ChatGPT sign-in is named "ChatGPT", or the lowest free number ("ChatGPT 2", then "ChatGPT 3")
+while a live connection or an agent of the person's that is not deleted is named that, so two plans
+read apart. The row of a ChatGPT sign-in made with a device code also has **Sign in again** (Sign in
+again… in its menu), which opens the ChatGPT step to replace it; **Reconnect**, which uploads an
+auth.json in its place, stays as it was. The sign-in says which one it replaces
+(`replacesCredentialId`), since the old one is still live when the new one is saved, and the new one
+takes the old one's name. Once the new one passes its test it becomes the default if the old one was,
+and the old one is removed, as **Replace** does for an API key; a new one that fails its test leaves
+both, with a warning. An auth.json chosen in that step, or Desktop's local Codex login, replaces the
+sign-in the same way, except that one failing its test is removed again.
+
+What replaces a connection takes its name unless the person types another or that name breaks the
+rules, and then takes the name the path gives a new connection ("Browser upload", "OpenAI"); so does
+Reconnect. Studio checks every name by the controller's rules before it sends one
+(`utils/credentialLabelRules.ts`, which `credential_label_fixtures.json` pins to the controller's
+copy), and the controller's credential routes save a name only when it is 1 to 60 characters, counted
+as code points, on one line, with no control, text-direction or other invisible characters (joiners,
+non-joiners and variation selectors excepted) and no email address, whoever types it: the agent made
+for a connection goes by its name, and teammates see that agent.
 
 In Instafy Desktop on macOS, and only for a person `CLAUDE_CODE_LANE_USER_IDS` covers (the space's
 runtime status carries `claudeCodeLane`), Connections also shows **Claude Code on this computer**

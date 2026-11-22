@@ -947,7 +947,6 @@ describe("CredentialsSettingsCard", () => {
       const input = field()!;
       expect(input.value).toBe("Browser upload");
       expect(input.getAttribute("aria-label")).toBe("New name for Browser upload");
-      expect(input.maxLength).toBe(60);
       expect(document.activeElement).toBe(input);
       // The row's other actions wait until the name is saved or the edit is cancelled.
       expect(container.querySelector('[data-testid="credentials-connection-test-cred-old"]')).toBeNull();
@@ -1036,6 +1035,118 @@ describe("CredentialsSettingsCard", () => {
       expect(managed?.querySelector('[aria-label^="Rename"]')).toBeNull();
       expect(renameButton()).not.toBeNull();
     });
+
+    it("does not send a name the controller would refuse", async () => {
+      await startRename();
+      await typeName("ann@example.com");
+      await press("Enter");
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+      expect(row()?.querySelector('[role="alert"]')?.textContent).toBe(
+        "Leave the email address out of the name. Teammates see it on this connection's agent.",
+      );
+      await typeName("Chat\u200BGPT");
+      await press("Enter");
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+      expect(row()?.querySelector('[role="alert"]')?.textContent).toBe(
+        "Use a name of 1 to 60 characters on one line.",
+      );
+    });
+
+    it("keeps the field to 60 characters counted as code points, so 60 emoji fit", async () => {
+      await startRename();
+      await typeName("😀".repeat(61));
+      expect(field()?.value).toBe("😀".repeat(60));
+      expect(field()?.hasAttribute("maxlength")).toBe(false);
+    });
+
+    it("leaves Enter and Escape to an input method that is composing", async () => {
+      await startRename();
+      await typeName("Work plan");
+      for (const key of ["Enter", "Escape"]) {
+        await act(async () => {
+          const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+          Object.defineProperty(event, "isComposing", { value: true });
+          field()?.dispatchEvent(event);
+          await settle();
+        });
+        expect(field()?.value).toBe("Work plan");
+      }
+      expect(mocks.renameCredential).not.toHaveBeenCalled();
+    });
+
+    it("a save that ends late leaves another row's field open", async () => {
+      const second = { ...oldCredential, id: "cred-second", label: "Second", isDefault: false };
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [oldCredential, second] });
+      let finishSave!: (result: unknown) => void;
+      mocks.renameCredential.mockReturnValue(new Promise((resolve) => { finishSave = resolve; }));
+      await startRename();
+      await typeName("Work plan");
+      await press("Enter");
+      expect(mocks.renameCredential).toHaveBeenCalledOnce();
+
+      // The first save is still on its way when the person renames the second row.
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-rename-cred-second"]')!.click();
+        await settle();
+      });
+      const secondField = () =>
+        container.querySelector<HTMLInputElement>('[data-testid="credentials-connection-name-field-cred-second-input"]');
+      expect(secondField()?.value).toBe("Second");
+
+      const renamed = { ...oldCredential, label: "Work plan" };
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [renamed, second] });
+      await act(async () => {
+        finishSave({ success: true, credential: renamed });
+        await settle();
+      });
+      expect(row()?.textContent).toContain("Work plan");
+      expect(secondField()?.value).toBe("Second");
+    });
+  });
+
+  describe("Sign in again", () => {
+    const deviceSignIn = {
+      ...oldCredential,
+      id: "cred-chatgpt",
+      label: "ChatGPT",
+      metadata: { source: "device_code", account_id: "acct_9876543210" },
+    };
+
+    it("replaces a ChatGPT device sign-in from the ChatGPT step, keeping it as the target", async () => {
+      mocks.listCredentials.mockResolvedValue({ success: true, credentials: [deviceSignIn] });
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="credentials-connection-sign-in-again-cred-chatgpt"]',
+      )!;
+      expect(button.textContent).toBe("Sign in again");
+      // The auth.json reconnect stays beside it.
+      expect(container.querySelector('[data-testid="credentials-connection-reconnect-cred-chatgpt"]')).not.toBeNull();
+      await act(async () => button.click());
+      expect(mocks.openConnectModalToReplace).toHaveBeenCalledExactlyOnceWith(
+        { id: "cred-chatgpt", label: "ChatGPT", savedLabel: "ChatGPT" },
+        "codex",
+      );
+
+      const trigger = container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-menu-cred-chatgpt"]')!;
+      await act(async () => { trigger.focus(); trigger.click(); });
+      const labels = Array.from(document.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent);
+      expect(labels).toEqual(["Test", "Rename…", "Sign in again…", "Reconnect auth.json…", "Remove…"]);
+      const item = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+        (entry) => entry.textContent === "Sign in again…",
+      )!;
+      await act(async () => item.click());
+      expect(mocks.openConnectModalToReplace).toHaveBeenCalledTimes(2);
+      expect(mocks.openConnectModalToReplace).toHaveBeenLastCalledWith(
+        { id: "cred-chatgpt", label: "ChatGPT", savedLabel: "ChatGPT" },
+        "codex",
+      );
+    });
+
+    it("is not offered on an uploaded auth.json, which reconnects in place", async () => {
+      await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+      expect(container.querySelector('[data-testid="credentials-connection-sign-in-again-cred-old"]')).toBeNull();
+      expect(container.querySelector('[data-testid="credentials-connection-reconnect-cred-old"]')).not.toBeNull();
+    });
   });
 
   it("shows needs-reconnect feedback for structured expired ChatGPT credentials", async () => {
@@ -1114,5 +1225,29 @@ describe("CredentialsSettingsCard", () => {
     });
     expect(mocks.revokeCredential).toHaveBeenCalledWith("cred-old");
     expect(mocks.showStatus).toHaveBeenCalledWith("Credential reconnected.", "success", 3000);
+  });
+
+  it.each([
+    ["Work plan", "Work plan"],
+    // Saved before the rules: reconnecting must not be refused for its name.
+    ["ann@example.com", "Browser upload"],
+    [null, "Browser upload"],
+  ])("reconnects auth.json named %j as %j", async (saved, sent) => {
+    mocks.listCredentials.mockResolvedValue({ success: true, credentials: [{ ...oldCredential, label: saved }] });
+    mocks.createCodexCredential.mockResolvedValue({ success: true, credentialId: "cred-new" });
+    mocks.revokeCredential.mockResolvedValue({ success: true });
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="credentials-connection-reconnect-cred-old"]')!.click();
+      await flush();
+    });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="credentials-reconnect-auth-json-input"]')!;
+    const file = { text: vi.fn().mockResolvedValue(JSON.stringify({ tokens: { access_token: "new-token" } })) };
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await flush();
+    });
+    expect(mocks.createCodexCredential.mock.lastCall?.[0]).toMatchObject({ label: sent });
   });
 });

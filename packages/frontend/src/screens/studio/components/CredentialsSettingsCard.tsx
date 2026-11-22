@@ -37,9 +37,11 @@ import { defaultAgentFace, hatchlingSeed, resolveAiFace, type Hatchling } from "
 import { normalizeCustomAgentHandle } from "../../../assistants/localBuiltInAssistantCatalog";
 import {
   formatCredentialKind,
+  isChatGptDeviceSignIn,
   resolveCredentialAccountHint,
   resolveCredentialLabel,
 } from "../../../utils/credentialFormatting";
+import { checkCredentialLabel, savableCredentialLabel } from "../../../utils/credentialLabelRules";
 import {
   AI_PROVIDER_OPTIONS,
   modelOptionsForProvider,
@@ -428,6 +430,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [credentialTestFeedback, setCredentialTestFeedback] = useState<Record<string, CredentialTestFeedback>>({});
   const [mobileCredentialMenuId, setMobileCredentialMenuId] = useState<string | null>(null);
   const [credentialRename, setCredentialRename] = useState<CredentialRename | null>(null);
+  // The field open now, for a save that ends after the person moved on.
+  const credentialRenameRef = useRef(credentialRename);
+  credentialRenameRef.current = credentialRename;
   const renameFocusReturnRef = useRef<Pick<CredentialRename, "credentialId" | "returnFocusTo"> | null>(null);
   const reconnectFileInputRef = useRef<HTMLInputElement | null>(null);
   const reconnectCredentialIdRef = useRef<string | null>(null);
@@ -722,7 +727,12 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     [credentialsById],
   );
 
+  // Closes the field only while it is still this connection's: a save that
+  // ends after the person opened another row's field leaves that one open.
   const closeRename = useCallback((rename: CredentialRename) => {
+    if (credentialRenameRef.current?.credentialId !== rename.credentialId) {
+      return;
+    }
     renameFocusReturnRef.current = { credentialId: rename.credentialId, returnFocusTo: rename.returnFocusTo };
     setCredentialRename(null);
   }, []);
@@ -746,10 +756,16 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       return;
     }
     const credential = credentialsById.get(rename.credentialId) ?? null;
-    const name = rename.draft.trim();
+    const check = checkCredentialLabel(rename.draft);
+    const name = check.ok ? check.label : rename.draft.trim();
     // Nothing to save when the name reads as it did.
     if (!credential || name === resolveCredentialLabel(credential)) {
       closeRename(rename);
+      return;
+    }
+    // A name the controller would refuse is not sent; its sentence shows here.
+    if (!check.ok) {
+      setCredentialRename({ ...rename, error: check.message });
       return;
     }
     setCredentialRename({ ...rename, pending: true, error: null });
@@ -817,7 +833,9 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         const authJson = await readCredentialJsonFile(file);
         const result = await createCodexCredential({
           authJson,
-          label: resolveCredentialLabel(credential) || "Browser upload",
+          // Its own name when the controller would save it again, so an
+          // older name that breaks the rules does not stop the reconnect.
+          label: savableCredentialLabel(credential.label) ?? "Browser upload",
           makeDefault: credential.isDefault,
         });
         if (!result.success || !result.credentialId) {
@@ -1782,6 +1800,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                   // Only a live saved connection: Instafy AI's row is drawn apart, and the
                   // controller refuses a revoked one.
                   const canRename = !credential.revokedAt;
+                  // A ChatGPT sign-in made with a device code is made again the same
+                  // way, replacing this one; an uploaded auth.json reconnects in place.
+                  const canSignInAgain = !credential.revokedAt && isChatGptDeviceSignIn(credential);
+                  const signInAgain = () => openConnectModalToReplace(
+                    { id: credential.id, label: label || "this connection", savedLabel: credential.label },
+                    "codex",
+                  );
                   const renaming = credentialRename?.credentialId === credential.id ? credentialRename : null;
                   return (
                     <li key={credential.id} data-testid={`credentials-connection-row-${credential.id}`}>
@@ -1920,6 +1945,20 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                   Replace
                                 </Button>
                               ) : null}
+                              {canSignInAgain ? (
+                                <Button
+                                  onPress={signInAgain}
+                                  isDisabled={pending || testPending}
+                                  variant={testFeedbackState === "needs_reconnect" ? "outline" : "ghost"}
+                                  tone={testFeedbackState === "needs_reconnect" ? "accent" : "neutral"}
+                                  elevation="none"
+                                  size="xs"
+                                  radius="full"
+                                  data-testid={`credentials-connection-sign-in-again-${credential.id}`}
+                                >
+                                  Sign in again
+                                </Button>
+                              ) : null}
                               {canReconnectAuthJson ? (
                                 <Button
                                   onPress={() => handleTriggerReconnectCredential(credential.id)}
@@ -1997,6 +2036,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                         void handleTestCredential(credential.id);
                                       } else if (action === "rename") {
                                         beginRename(credential.id, "menu");
+                                      } else if (action === "sign-in-again") {
+                                        signInAgain();
                                       } else if (action === "reconnect") {
                                         handleTriggerReconnectCredential(credential.id);
                                       } else if (action === "replace") {
@@ -2020,6 +2061,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                                         <MenuItemContent start={<EditPencil aria-hidden="true" />}>
                                           Rename…
                                         </MenuItemContent>
+                                      </StudioMenuItem>
+                                    ) : null}
+                                    {canSignInAgain ? (
+                                      <StudioMenuItem id="sign-in-again" isDisabled={testPending}>
+                                        <MenuItemContent>Sign in again…</MenuItemContent>
                                       </StudioMenuItem>
                                     ) : null}
                                     {canReplace ? (

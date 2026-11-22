@@ -2109,11 +2109,14 @@ async fn rename_my_credential(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
+    // Held against another rename or a revoke until the commit, but not
+    // against the key-share lock an agent write takes for its foreign key to
+    // this row, which `for update` would block.
     let Some(previous) = transaction
         .query_opt(
             "select label from user_credentials
              where id = $1 and user_id = $2 and revoked_at is null
-             for update",
+             for no key update",
             &[&credential_id, &user_id],
         )
         .await

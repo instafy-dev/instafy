@@ -3,15 +3,20 @@
 //! A connection's name is also the display name of the agent made for it, and
 //! that agent's handle is made from it
 //! (`ai_agents::create_default_agent_for_credential`). Teammates see both
-//! wherever the agent takes part, so a name holds no email address, whoever
-//! typed it. Every name a connection is saved or renamed with is a
-//! [`CredentialLabel`], which only [`CredentialLabel::parse`] and the ChatGPT
-//! defaults below make.
+//! wherever the agent takes part, so the controller's routes save no name
+//! that holds an email address, whoever typed it. Every name they save a
+//! connection with or rename it to is a [`CredentialLabel`], which only
+//! [`CredentialLabel::parse`] and the ChatGPT defaults below make.
+//! `credential_label_fixtures.json` pins these rules, and Studio's copy
+//! (`packages/frontend/src/utils/credentialLabelRules.ts`) is tested against
+//! the same file, so Studio never sends a name the controller refuses.
 
 use std::collections::HashSet;
 
 use axum::http::StatusCode;
 use axum::Json;
+use unicode_normalization::char::is_combining_mark;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::ApiError;
 
@@ -33,20 +38,51 @@ pub(crate) const CREDENTIAL_LABEL_HAS_EMAIL_MESSAGE: &str =
 const CHATGPT_SIGN_IN_LABEL: &str = "ChatGPT";
 
 /// The at signs an address can be written with: `@` and its full-width and
-/// small forms, which read the same.
+/// small forms, which read the same. NFKC, which the email check reads names
+/// in, makes the other two `@`.
 const AT_SIGNS: [char; 3] = ['@', '\u{FF20}', '\u{FE6B}'];
 
-/// The dots a domain can be written with: `.` and the full-width, halfwidth
+/// The dots a domain can be written with: `.`; the full-width, halfwidth
 /// ideographic and ideographic full stops, which internationalized domain
-/// names read as dots.
-const DOMAIN_DOTS: [char; 4] = ['.', '\u{FF0E}', '\u{FF61}', '\u{3002}'];
+/// names read as dots; and the small full stop and the one-dot leader, which
+/// read as one. NFKC makes all but the ideographic two `.`, and the halfwidth
+/// ideographic one the ideographic one, so the set holds after it too.
+const DOMAIN_DOTS: [char; 6] = [
+    '.', '\u{FF0E}', '\u{FF61}', '\u{3002}', '\u{FE52}', '\u{2024}',
+];
 
 /// Characters an address's local part may have besides letters and digits.
 const LOCAL_PART_PUNCTUATION: &str = "!#$%&'*+-/=?^_`{|}~.";
 
+/// Unicode's Default_Ignorable_Code_Point set (DerivedCoreProperties.txt, as
+/// of Unicode 17.0, the property Studio's copy reads from the browser):
+/// characters that show nothing, such as the zero-width space, the word
+/// joiner, the byte order mark, the soft hyphen, the Hangul fillers, the
+/// text-direction marks and the tag characters.
+const DEFAULT_IGNORABLE: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{034F}', '\u{034F}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{115F}', '\u{1160}'),
+    ('\u{17B4}', '\u{17B5}'),
+    ('\u{180B}', '\u{180F}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{206F}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{FE00}', '\u{FE0F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{FFF0}', '\u{FFF8}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0000}', '\u{E0FFF}'),
+];
+
 /// A name a connection may be saved with: trimmed, 1 to
-/// [`CREDENTIAL_LABEL_MAX_CHARS`] characters on one line, without control,
-/// line-break or text-direction characters, and without an email address.
+/// [`CREDENTIAL_LABEL_MAX_CHARS`] characters (code points) on one line,
+/// without control, line-break, text-direction or other invisible characters,
+/// and without an email address.
 #[derive(Debug)]
 pub(crate) struct CredentialLabel(String);
 
@@ -90,19 +126,36 @@ fn label_refused(code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
 }
 
 /// Control characters, the Unicode line and paragraph separators, and the
-/// marks that reorder text, which could make a name read as something else.
+/// default-ignorable characters a name does not keep: the marks that reorder
+/// text and the ones that show nothing could make a name read as something
+/// else, hide an email address from the check below, or be a whole name that
+/// looks empty.
 fn breaks_a_one_line_name(character: char) -> bool {
     character.is_control()
-        || matches!(
-            character,
-            '\u{2028}'
-                | '\u{2029}'
-                | '\u{061C}'
-                | '\u{200E}'
-                | '\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2066}'..='\u{2069}'
-        )
+        || matches!(character, '\u{2028}' | '\u{2029}')
+        || (is_default_ignorable(character) && !is_kept_in_names(character))
+}
+
+fn is_default_ignorable(character: char) -> bool {
+    DEFAULT_IGNORABLE
+        .iter()
+        .any(|(first, last)| (*first..=*last).contains(&character))
+}
+
+/// The default-ignorable characters a name keeps, because scripts and emoji
+/// need them: the zero-width non-joiner and joiner, and the variation
+/// selectors (Unicode's Variation_Selector set, the Mongolian free ones
+/// included).
+fn is_kept_in_names(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200C}'
+            | '\u{200D}'
+            | '\u{180B}'..='\u{180D}'
+            | '\u{180F}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// Whether `text` holds an email address: an at sign with a character of an
@@ -111,24 +164,44 @@ fn breaks_a_one_line_name(character: char) -> bool {
 /// more characters, one of them a letter. "ann@example.com" and
 /// "Work (ann.lee@corp.co.uk)" hold one; "@octo", "Work @ home", "team@home"
 /// and "v1.5@2.0" do not.
+///
+/// The text is read as a person sees it: in its NFKC form, so full-width and
+/// other look-alike letters, at signs and dots count as the plain ones; without
+/// its default-ignorable characters, so an invisible one the name keeps (a
+/// joiner or a variation selector) does not split the address; and with each
+/// combining mark taken as part of the letter it sits on.
 pub(crate) fn holds_email_address(text: &str) -> bool {
-    let characters: Vec<char> = text.chars().collect();
+    let characters: Vec<char> = text
+        .nfkc()
+        .filter(|character| !is_default_ignorable(*character))
+        .collect();
     characters.iter().enumerate().any(|(at, character)| {
-        if !AT_SIGNS.contains(character) || at == 0 {
+        if !AT_SIGNS.contains(character) {
             return false;
         }
-        let before = characters[at - 1];
-        if !(before.is_alphanumeric() || LOCAL_PART_PUNCTUATION.contains(before)) {
+        let Some(before) = characters[..at]
+            .iter()
+            .rev()
+            .find(|character| !is_combining_mark(**character))
+        else {
+            return false;
+        };
+        if !(before.is_alphanumeric() || LOCAL_PART_PUNCTUATION.contains(*before)) {
             return false;
         }
         let domain: String = characters[at + 1..]
             .iter()
-            .take_while(|character| {
-                character.is_alphanumeric() || **character == '-' || DOMAIN_DOTS.contains(character)
-            })
+            .take_while(|character| is_domain_character(**character))
             .collect();
         is_email_domain(&domain)
     })
+}
+
+fn is_domain_character(character: char) -> bool {
+    character.is_alphanumeric()
+        || character == '-'
+        || DOMAIN_DOTS.contains(&character)
+        || is_combining_mark(character)
 }
 
 fn is_email_domain(domain: &str) -> bool {
@@ -199,28 +272,83 @@ mod tests {
         CredentialLabel::parse(raw).ok().map(|label| label.0)
     }
 
-    #[test]
-    fn a_name_is_trimmed_and_one_line_of_at_most_sixty_characters() {
-        assert_eq!(parsed("  Work ChatGPT  ").as_deref(), Some("Work ChatGPT"));
-        // Sixty characters, counted as characters, not bytes.
-        let sixty = "é".repeat(60);
-        assert_eq!(parsed(&sixty), Some(sixty));
-        // An emoji joined by zero-width joiners is a name like any other.
-        assert_eq!(parsed("ChatGPT 👩‍💻").as_deref(), Some("ChatGPT 👩‍💻"));
+    /// The lists Studio's copy of these rules is tested against too.
+    fn fixtures() -> serde_json::Value {
+        serde_json::from_str(include_str!("credential_label_fixtures.json")).expect("fixtures")
+    }
 
+    fn strings<'a>(fixtures: &'a serde_json::Value, key: &str) -> Vec<&'a str> {
+        let items = fixtures[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixtures list {key}"));
+        assert!(!items.is_empty(), "{key}");
+        items
+            .iter()
+            .map(|item| item.as_str().expect("string"))
+            .collect()
+    }
+
+    #[test]
+    fn names_follow_the_fixtures() {
+        let fixtures = fixtures();
+        for name in strings(&fixtures, "valid") {
+            assert_eq!(parsed(name).as_deref(), Some(name), "{name:?}");
+        }
+        for pair in fixtures["trimmed"].as_array().expect("trimmed") {
+            let raw = pair[0].as_str().expect("name");
+            let saved = pair[1].as_str().expect("saved");
+            assert_eq!(parsed(raw).as_deref(), Some(saved), "{raw:?}");
+        }
+        for name in strings(&fixtures, "invalid") {
+            assert_eq!(
+                refusal_code(name).as_deref(),
+                Some(CREDENTIAL_LABEL_INVALID_CODE),
+                "{name:?}"
+            );
+        }
+        for name in strings(&fixtures, "hasEmail") {
+            assert!(holds_email_address(name), "{name:?}");
+            assert_eq!(
+                refusal_code(name).as_deref(),
+                Some(CREDENTIAL_LABEL_HAS_EMAIL_CODE),
+                "{name:?}"
+            );
+        }
+        let Err((_, Json(error))) = CredentialLabel::parse("ann@example.com") else {
+            panic!("an email address is refused");
+        };
+        assert_eq!(error.message, CREDENTIAL_LABEL_HAS_EMAIL_MESSAGE);
+    }
+
+    #[test]
+    fn a_name_is_at_most_sixty_code_points() {
+        // Counted as characters, not bytes or UTF-16 units, so sixty emoji fit.
+        for unit in ["a", "é", "😀"] {
+            assert!(parsed(&unit.repeat(60)).is_some(), "{unit}");
+            assert_eq!(
+                refusal_code(&unit.repeat(61)).as_deref(),
+                Some(CREDENTIAL_LABEL_INVALID_CODE),
+                "{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn invisible_characters_and_look_alikes_hide_no_email_address() {
+        // A name of one invisible character looks empty.
+        assert_eq!(
+            refusal_code("\u{200B}").as_deref(),
+            Some(CREDENTIAL_LABEL_INVALID_CODE)
+        );
+        // An invisible character in an address no longer splits it from the
+        // check: it is refused itself.
         for raw in [
-            "",
-            "   ",
-            &"a".repeat(61),
-            "Work\nChatGPT",
-            "Work\rChatGPT",
-            "Work\tChatGPT",
-            "Work\u{0}ChatGPT",
-            "Work\u{85}ChatGPT",
-            "Work\u{2028}ChatGPT",
-            "Work\u{2029}ChatGPT",
-            "\u{202E}TPGtahC",
-            "ChatGPT\u{2066}",
+            "ann\u{200B}@example.com",
+            "ann@\u{200B}example.com",
+            "ann\u{00AD}@example.com",
+            "ann\u{FEFF}@example.com",
+            "ann\u{2060}@example.com",
+            "ann@example.com\u{E0001}",
         ] {
             assert_eq!(
                 refusal_code(raw).as_deref(),
@@ -228,45 +356,29 @@ mod tests {
                 "{raw:?}"
             );
         }
-    }
-
-    #[test]
-    fn a_name_holds_no_email_address() {
+        // A combining mark, or a dot NFKC reads as `.`, leaves the address one.
         for raw in [
-            "ann@example.com",
-            "ChatGPT (ann.lee@corp.co.uk)",
-            "<ann+work@mail.example.io>",
-            "mailto:ann@example.com",
-            "Write to ann@example.com.",
-            "ann\u{FF20}example.com",
-            "ann@example\u{FF0E}com",
-            "anna@例え.テスト",
+            "anne\u{0301}@example.com",
+            "ann\u{0359}@example.com",
+            "ann@example\u{FE52}com",
+            "ann@example\u{2024}com",
+            // The invisible characters a name keeps do not split it either.
+            "ann\u{200D}@example.com",
+            "ann@exa\u{200C}mple.com",
         ] {
-            assert!(holds_email_address(raw), "{raw:?}");
             assert_eq!(
                 refusal_code(raw).as_deref(),
                 Some(CREDENTIAL_LABEL_HAS_EMAIL_CODE),
                 "{raw:?}"
             );
         }
-        let Err((_, Json(error))) = CredentialLabel::parse("ann@example.com") else {
-            panic!("an email address is refused");
-        };
-        assert_eq!(error.message, CREDENTIAL_LABEL_HAS_EMAIL_MESSAGE);
-
+        // Names that need those characters still pass: emoji sequences joined
+        // by ZWJ or styled by a variation selector, and words written with ZWNJ.
         for raw in [
-            "ChatGPT",
-            "ChatGPT 2",
-            "@octo's ChatGPT",
-            "Work @ home",
-            "team@home",
-            "ann@",
-            "@example.com",
-            "v1.5@2.0",
-            "z.ai",
-            "Plan @ 5.30pm",
+            "ChatGPT 👩\u{200D}💻",
+            "\u{2764}\u{FE0F} plan",
+            "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}",
         ] {
-            assert!(!holds_email_address(raw), "{raw:?}");
             assert_eq!(parsed(raw).as_deref(), Some(raw), "{raw:?}");
         }
     }

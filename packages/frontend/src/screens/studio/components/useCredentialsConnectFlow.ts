@@ -24,6 +24,7 @@ import {
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
 } from "./device-auth/deviceAuthCompletion";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
+import { checkCredentialLabel, savableCredentialLabel } from "../../../utils/credentialLabelRules";
 
 const {
   createCodex: createCodexCredential,
@@ -45,9 +46,13 @@ export type CredentialReplaceTarget = {
   savedLabel?: string | null;
 };
 
-/** The replaced connection's own name, when it has one. */
+/**
+ * The replaced connection's own name, when it has one the controller would
+ * save again; otherwise the path's own name applies, so an older name that
+ * breaks the rules never stops the replacement.
+ */
 function savedLabelOf(target: CredentialReplaceTarget | null): string | null {
-  return target?.savedLabel?.trim() || null;
+  return savableCredentialLabel(target?.savedLabel);
 }
 
 async function readJsonFile(file: File): Promise<unknown> {
@@ -139,6 +144,143 @@ export function useCredentialsConnectFlow({
   const [zaiLabelDraft, setZaiLabelDraft] = useState("");
   const [geminiApiKeyDraft, setGeminiApiKeyDraft] = useState("");
   const [geminiLabelDraft, setGeminiLabelDraft] = useState("");
+  // Verification failed, so the half-created credential has to go. When that
+  // cleanup itself fails, keep the removal on the toast instead of sending the
+  // user to AI Connections to finish it by hand.
+  const reportUnverifiedCredential = useCallback(
+    async (credentialId: string, message: string, durationMs: number) => {
+      const revokeResult = await revokeMyCredential(credentialId);
+      if (revokeResult.success) {
+        showStatus(message, "error", durationMs);
+        return;
+      }
+      showStatus(
+        `${message} The unverified connection could not be removed.`,
+        "error",
+        durationMs,
+        {
+          actionLabel: "Remove it",
+          onAction: () => {
+            void (async () => {
+              const retryResult = await revokeMyCredential(credentialId);
+              if (!retryResult.success) {
+                showStatus(
+                  retryResult.error ?? "Unable to remove the unverified connection.",
+                  "error",
+                  5000,
+                );
+                return;
+              }
+              showStatus("Unverified connection removed.", "success", 2500, {
+                presentation: "confirmation",
+              });
+              await loadCredentials({ silent: true });
+            })();
+          },
+        },
+      );
+    },
+    [loadCredentials, showStatus],
+  );
+
+  /**
+   * Retire the credential this connection replaced.
+   *
+   * Order matters and there is only one safe one: create (never default) →
+   * test → promote → revoke. `revoke_my_credential` sets is_default = false
+   * and promotes nothing, so retiring first — or retiring a credential that is
+   * currently the default without promoting — leaves the workspace with no
+   * default at all and drops chat into needs_default.
+   *
+   * Promotion is decided HERE, from the live list, because the default can
+   * move while the modal is open.
+   */
+  const finalizeCredentialReplacement = useCallback(
+    async (replacementId: string) => {
+      const target = replaceTargetRef.current;
+      replaceTargetRef.current = null;
+      if (!target) {
+        return;
+      }
+      // Only when the outgoing credential is the live default. A user on
+      // managed AI has zero defaults deliberately; promoting here would flip
+      // them into BYOC behind their back.
+      if (isCredentialDefault?.(target.id)) {
+        const promoted = await setDefaultCredential(replacementId).catch(() => null);
+        if (!promoted?.success) {
+          showStatus(
+            "Connected, but it could not be made the default. Choose it below, then remove the old one.",
+            "warning",
+            7000,
+          );
+          return;
+        }
+      }
+      const revoked = await revokeMyCredential(target.id).catch(() => null);
+      if (!revoked?.success) {
+        showStatus(
+          `Connected, but "${target.label}" could not be removed. Remove it below.`,
+          "warning",
+          7000,
+        );
+        return;
+      }
+      showStatus("Connection replaced. Agents pinned to the old one now use the default.", "success", 4500);
+    },
+    [isCredentialDefault, showStatus],
+  );
+
+  /**
+   * Finish a replacement saved from the ChatGPT step with an auth.json or
+   * Desktop's local Codex login. As for an API key, the new connection is
+   * tested before anything is retired; one that fails is removed again and
+   * the old one stays. True once the old one is retired.
+   */
+  const verifyAndFinalizeReplacement = useCallback(
+    async (credentialId: string): Promise<boolean> => {
+      const testResult = await testMyCredential(credentialId).catch(() => null);
+      if (!testResult?.success || !testResult.ok) {
+        const detail = formatCredentialTestFailureMessage(
+          testResult?.success ? testResult.output : testResult?.error,
+        );
+        await reportUnverifiedCredential(
+          credentialId,
+          detail
+            ? `The new login couldn't be verified, so the old one stays: ${detail}`
+            : "The new login couldn't be verified, so the old one stays.",
+          7000,
+        );
+        return false;
+      }
+      await finalizeCredentialReplacement(credentialId);
+      return true;
+    },
+    [finalizeCredentialReplacement, formatCredentialTestFailureMessage, reportUnverifiedCredential],
+  );
+
+  /**
+   * The name the person typed, trimmed, or "" when they typed none. A name
+   * the controller would refuse is never sent: its sentence shows instead and
+   * this gives false. Desktop's import in particular would only say it failed.
+   */
+  const typedLabelOrRefusal = useCallback(
+    (draft: string): string | false => {
+      if (!draft.trim()) {
+        return "";
+      }
+      const check = checkCredentialLabel(draft);
+      if (check.ok) {
+        return check.label;
+      }
+      showStatus(check.message, "error", 5000);
+      return false;
+    },
+    [showStatus],
+  );
+
+  // Set when a finished ChatGPT sign-in replaced another (Sign in again),
+  // whose own message then stands in for "connected".
+  const deviceSignInReplacedRef = useRef(false);
   const handleDeviceAuthCompleted = useCallback(
     async ({
       credentialId,
@@ -152,12 +294,21 @@ export function useCredentialsConnectFlow({
         };
       }
 
+      // Nothing is retired before the new sign-in passes its test.
       const testResult = await testMyCredential(credentialId).catch(() => null);
       if (!testResult?.success || !testResult.ok) {
         return {
           success: true,
           warning: CHATGPT_CONNECTION_VERIFICATION_WARNING,
         };
+      }
+
+      // Sign in again: the new sign-in becomes the default if the old one
+      // was, then the old one is retired, as an API-key replacement does.
+      if (replaceTargetRef.current) {
+        await finalizeCredentialReplacement(credentialId);
+        deviceSignInReplacedRef.current = true;
+        return { success: true };
       }
 
       // The controller saved it without taking the default from Instafy AI;
@@ -176,7 +327,7 @@ export function useCredentialsConnectFlow({
 
       return { success: true };
     },
-    [],
+    [finalizeCredentialReplacement],
   );
   const deviceAuth = useDeviceAuthFlow({ onCompleted: handleDeviceAuthCompleted });
   const completedDeviceAuthSessionRef = useRef<string | null>(null);
@@ -349,6 +500,8 @@ export function useCredentialsConnectFlow({
     }
     completedDeviceAuthSessionRef.current = deviceAuthSession.sessionId;
 
+    const replaced = deviceSignInReplacedRef.current;
+    deviceSignInReplacedRef.current = false;
     void (async () => {
       await loadCredentials({ silent: true });
       notifyAiConfigChanged("codex_oauth_connected");
@@ -364,7 +517,7 @@ export function useCredentialsConnectFlow({
               }
             : undefined,
         );
-      } else {
+      } else if (!replaced) {
         showStatus("ChatGPT credentials connected.", "success", 3500);
       }
       closeConnectModal();
@@ -394,18 +547,29 @@ export function useCredentialsConnectFlow({
     }
 
     if (canUseDesktopConnect) {
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
       setConnectPending(true);
       try {
+        // While replacing, the default is decided once the new one is tested.
+        const replacing = replaceTargetRef.current !== null;
         const result = await connectDesktopCodexAuthJson({
-          label:
-            labelDraft.trim() || savedLabelOf(replaceTargetRef.current) || "Codex on this computer",
-          ...newConnectionDefaultOption(),
+          label: typedLabel || savedLabelOf(replaceTargetRef.current) || "Codex on this computer",
+          ...(replacing ? { makeDefault: false } : newConnectionDefaultOption()),
         });
         if (!result.success) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
           return;
         }
-        showStatus("Codex credentials connected.", "success", 3500);
+        if (replacing) {
+          if (!(await verifyAndFinalizeReplacement(result.credentialId))) {
+            return;
+          }
+        } else {
+          showStatus("Codex credentials connected.", "success", 3500);
+        }
         setLabelDraft("");
         await loadCredentials({ silent: true });
         notifyAiConfigChanged("codex_connected");
@@ -429,7 +593,9 @@ export function useCredentialsConnectFlow({
     newConnectionDefaultOption,
     notifyAiConfigChanged,
     showStatus,
+    typedLabelOrRefusal,
     userPresent,
+    verifyAndFinalizeReplacement,
   ]);
 
   // Dev-only: seed this machine's Codex login through the same completion
@@ -489,19 +655,32 @@ export function useCredentialsConnectFlow({
         return;
       }
 
+      const typedLabel = typedLabelOrRefusal(labelDraft);
+      if (typedLabel === false) {
+        return;
+      }
+
       setConnectPending(true);
       try {
         const authJson = await readJsonFile(file);
+        // While replacing, the default is decided once the new one is tested.
+        const replacing = replaceTargetRef.current !== null;
         const result = await createCodexCredential({
           authJson,
-          label: labelDraft.trim() || savedLabelOf(replaceTargetRef.current) || "Browser upload",
-          ...newConnectionDefaultOption(),
+          label: typedLabel || savedLabelOf(replaceTargetRef.current) || "Browser upload",
+          ...(replacing ? { makeDefault: false } : newConnectionDefaultOption()),
         });
-        if (!result.success) {
+        if (!result.success || !result.credentialId) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
           return;
         }
-        showStatus("Codex credentials connected.", "success", 3500);
+        if (replacing) {
+          if (!(await verifyAndFinalizeReplacement(result.credentialId))) {
+            return;
+          }
+        } else {
+          showStatus("Codex credentials connected.", "success", 3500);
+        }
         setLabelDraft("");
         await loadCredentials({ silent: true });
         notifyAiConfigChanged("codex_connected");
@@ -519,94 +698,10 @@ export function useCredentialsConnectFlow({
       newConnectionDefaultOption,
       notifyAiConfigChanged,
       showStatus,
+      typedLabelOrRefusal,
       userPresent,
+      verifyAndFinalizeReplacement,
     ],
-  );
-
-  // Verification failed, so the half-created credential has to go. When that
-  // cleanup itself fails, keep the removal on the toast instead of sending the
-  // user to AI Connections to finish it by hand.
-  const reportUnverifiedCredential = useCallback(
-    async (credentialId: string, message: string, durationMs: number) => {
-      const revokeResult = await revokeMyCredential(credentialId);
-      if (revokeResult.success) {
-        showStatus(message, "error", durationMs);
-        return;
-      }
-      showStatus(
-        `${message} The unverified connection could not be removed.`,
-        "error",
-        durationMs,
-        {
-          actionLabel: "Remove it",
-          onAction: () => {
-            void (async () => {
-              const retryResult = await revokeMyCredential(credentialId);
-              if (!retryResult.success) {
-                showStatus(
-                  retryResult.error ?? "Unable to remove the unverified connection.",
-                  "error",
-                  5000,
-                );
-                return;
-              }
-              showStatus("Unverified connection removed.", "success", 2500, {
-                presentation: "confirmation",
-              });
-              await loadCredentials({ silent: true });
-            })();
-          },
-        },
-      );
-    },
-    [loadCredentials, showStatus],
-  );
-
-  /**
-   * Retire the credential this connection replaced.
-   *
-   * Order matters and there is only one safe one: create (never default) →
-   * test → promote → revoke. `revoke_my_credential` sets is_default = false
-   * and promotes nothing, so retiring first — or retiring a credential that is
-   * currently the default without promoting — leaves the workspace with no
-   * default at all and drops chat into needs_default.
-   *
-   * Promotion is decided HERE, from the live list, because the default can
-   * move while the modal is open.
-   */
-  const finalizeCredentialReplacement = useCallback(
-    async (replacementId: string) => {
-      const target = replaceTargetRef.current;
-      replaceTargetRef.current = null;
-      if (!target) {
-        return;
-      }
-      // Only when the outgoing credential is the live default. A user on
-      // managed AI has zero defaults deliberately; promoting here would flip
-      // them into BYOC behind their back.
-      if (isCredentialDefault?.(target.id)) {
-        const promoted = await setDefaultCredential(replacementId).catch(() => null);
-        if (!promoted?.success) {
-          showStatus(
-            "Connected, but it could not be made the default. Choose it below, then remove the old one.",
-            "warning",
-            7000,
-          );
-          return;
-        }
-      }
-      const revoked = await revokeMyCredential(target.id).catch(() => null);
-      if (!revoked?.success) {
-        showStatus(
-          `Connected, but "${target.label}" could not be removed. Remove it below.`,
-          "warning",
-          7000,
-        );
-        return;
-      }
-      showStatus("Connection replaced. Agents pinned to the old one now use the default.", "success", 4500);
-    },
-    [isCredentialDefault, showStatus],
   );
 
   const handleConnectApiKey = useCallback(
@@ -645,10 +740,14 @@ export function useCredentialsConnectFlow({
             : provider === "zai"
               ? zaiLabelDraft
               : geminiLabelDraft;
+      const typedLabel = typedLabelOrRefusal(draftLabel);
+      if (typedLabel === false) {
+        return false;
+      }
       // A replacement keeps the replaced connection's name unless the person
       // typed another.
       const label =
-        draftLabel.trim() ||
+        typedLabel ||
         savedLabelOf(replaceTargetRef.current) ||
         (provider === "openai"
           ? "OpenAI"
@@ -747,6 +846,7 @@ export function useCredentialsConnectFlow({
       finalizeCredentialReplacement,
       reportUnverifiedCredential,
       showStatus,
+      typedLabelOrRefusal,
       userPresent,
       zaiApiKeyDraft,
       zaiLabelDraft,

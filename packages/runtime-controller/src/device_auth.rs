@@ -322,9 +322,12 @@ async fn replaced_chatgpt_sign_in(
 /// numbering alone would call a reconnected "ChatGPT" "ChatGPT 2". A sign-in
 /// started with `replacesCredentialId` therefore takes that sign-in's name as
 /// it is now, while it is live; otherwise, or once it is gone, the numbered
-/// default applies (`credential_labels::chatgpt_sign_in_label`). The lock on
-/// the person's connection names makes two sign-ins that finish together take
-/// different numbers.
+/// default applies (`credential_labels::chatgpt_sign_in_label`). A number is
+/// free when no live connection of the person's and none of their agents that
+/// are not deleted goes by it: an agent outlives a removed connection with the
+/// connection's name, so a later sign-in must not give a second agent that
+/// name. The lock on the person's connection names makes two sign-ins that
+/// finish together take different numbers.
 pub(crate) async fn chatgpt_sign_in_label(
     transaction: &Transaction<'_>,
     user_id: Uuid,
@@ -349,12 +352,25 @@ pub(crate) async fn chatgpt_sign_in_label(
         .iter()
         .map(|row| (row.get("id"), row.get("label")))
         .collect();
+    let agent_names: Vec<String> = transaction
+        .query(
+            "select display_name from user_agents
+             where user_id = $1 and deleted_at is null and display_name is not null",
+            &[&user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load agent names: {error}")))?
+        .iter()
+        .map(|row| row.get("display_name"))
+        .collect();
     let replaced = replaces
         .and_then(|replaced_id| live.iter().find(|(id, _)| *id == replaced_id))
         .and_then(|(_, label)| label.as_deref());
     Ok(credential_labels::chatgpt_sign_in_label(
         replaced,
-        live.iter().filter_map(|(_, label)| label.as_deref()),
+        live.iter()
+            .filter_map(|(_, label)| label.as_deref())
+            .chain(agent_names.iter().map(String::as_str)),
     ))
 }
 
