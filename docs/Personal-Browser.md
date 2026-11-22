@@ -529,7 +529,9 @@ screen, and never for the suggestion a field's list highlights as a person
 types). A text area is never named by what it holds. The list holds the
 controls in view; `omittedControls` counts those drawn above or below it,
 which scrolling reaches, and any past 500, never one in view that no click
-reaches or one off to a side scrolling never shows.
+reaches or one off to a side scrolling never shows. `leftOut` says how many
+there are for each reason, as the Shared Browser's reading does for its own:
+`outsideView` and `listFull`.
 
 ### Agent tabs
 
