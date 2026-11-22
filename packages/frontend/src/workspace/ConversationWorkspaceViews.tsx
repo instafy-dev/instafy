@@ -51,14 +51,16 @@ export function ConversationWorkspaceViews({ placement = "header" }: { placement
   const closeBrowser = conversationBrowser.close;
   const dirty = new Set(workspace.files.filter(file => file.modified !== file.generated).map(file => file.path));
   const resources: ConversationSurface[] = [
-    ...(hasBrowser ? [{ id: "browser", label: "Browser", panelId: "conversation-workspace-browser", icon: <Globe className="h-3.5 w-3.5" />,
+    // A tab a waiting pause offers opens the view once selected (ChatPanel);
+    // until then nothing else here counts it as a view.
+    ...(hasBrowser || conversationBrowser.offered ? [{ id: "browser", label: "Browser", panelId: "conversation-workspace-browser", icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: conversationBrowser.pageTitle ?? null, agentName: conversationBrowser.agentName ?? null }),
       attention: conversationBrowser.attention ? <span className="text-amber-600">Approve</span> : undefined,
       // Only the view closes (ChatPanel's closeBrowserTab). The tab goes at
       // once, also while one of the chat's own tabs is in front of its panel.
       onClose: closeBrowser ? () => {
         closeBrowser();
-        setConversationBrowser(scope, { ...conversationBrowser, available: false });
+        setConversationBrowser(scope, { ...conversationBrowser, available: false, offered: false });
       } : undefined }] : []),
     ...surfaces.files.map(file => ({ id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,
       panelId: "conversation-workspace-file", icon: <Page className="h-3.5 w-3.5" />, dirty: dirty.has(file.path),

@@ -226,7 +226,8 @@ import {
   useChatViewTabs,
 } from "./chatBrowserTab";
 import { useChatBrowserView } from "./useChatBrowserView";
-import { useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
+import { openBrowserPause, useShowBrowserOnHumanInput, useShowBrowserOnRequest } from "./useShowBrowserOnRequest";
+import { BrowserPauseRow } from "./BrowserPauseRow";
 import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
@@ -898,11 +899,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runs: runRecords,
     show: showBrowserForHumanInput,
   });
+  // The pause in Instafy's browser that still waits for this person, read
+  // from the chat's latest messages (whichever part of the chat is shown):
+  // after a reload, on another device or with the view closed, the chat
+  // still leads back to that page.
+  const openPause = useMemo(
+    () => jobThread ? null : openBrowserPause(recentMessages, runRecords, currentUserId),
+    [currentUserId, jobThread, recentMessages, runRecords],
+  );
+  const openPauseRun = openPause ? runRecords.find((run) => run.id === openPause.runId) ?? null : null;
+  // While it waits, the chat keeps its Browser tab, which opens the view,
+  // also where this device has no view saved. A view the person closed here
+  // stays closed, or its close would do nothing: the row under the pause
+  // leads back then.
+  const pauseOffersBrowserTab = openPause !== null && !hasBrowserView && browserSessionStateHydrated && !browserViewClosed;
+  const browserTabShown = hasBrowserView || pauseOffersBrowserTab;
   useEffect(() => {
-    if (conversationWorkspace && !jobThread && surfaces.activeId === "browser" && hasHiddenBrowserSession && !browserSessionOpen) {
+    if (
+      conversationWorkspace && !jobThread && surfaces.activeId === "browser" && !browserSessionOpen &&
+      (hasHiddenBrowserSession || pauseOffersBrowserTab)
+    ) {
       handleToggleBrowserSession();
     }
-  }, [conversationWorkspace, jobThread, surfaces.activeId, hasHiddenBrowserSession, browserSessionOpen, handleToggleBrowserSession]);
+  }, [conversationWorkspace, jobThread, surfaces.activeId, hasHiddenBrowserSession, pauseOffersBrowserTab, browserSessionOpen, handleToggleBrowserSession]);
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, [setBrowserSubtab]);
@@ -1127,6 +1146,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setSharedBrowserActivated(true);
     setBrowserTransport("shared");
   }, [browserTransportScopeKey]);
+  // The press under a pause that still waits: Instafy's browser, where the
+  // pause is, comes forward as the Browser tab brings it. It sends Octo
+  // nothing, as the page may be gone: the person lets Octo continue from the
+  // Browser view once they are done there.
+  const openBrowserForPause = useCallback(() => {
+    revealSharedBrowserApproval();
+    showBrowserForHumanInput();
+  }, [revealSharedBrowserApproval, showBrowserForHumanInput]);
   const resumeSharedBrowser = useCallback((runtimeId: string) => {
     revealSharedBrowserApproval();
     resumeBrowserSession(runtimeId);
@@ -1251,7 +1278,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, []);
   const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
   const guardNavigation = useStudioGuardedNavigation();
-  const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
+  const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || pauseOffersBrowserTab || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
   const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
     conversationId: activeConversationId,
     inputValue,
@@ -3431,6 +3458,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (conversationWorkspace) {
       setConversationBrowser(surfaceScope, {
         available: hasBrowserView,
+        // No view yet, but a pause waits in it: selecting the tab opens it.
+        offered: pauseOffersBrowserTab,
         attention: browserApprovalAttention,
         pageTitle: browserActivePageTitle,
         agentName: browserAgentActive ? browserAgentName : null,
@@ -3445,6 +3474,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     closeBrowserTab,
     conversationWorkspace,
     hasBrowserView,
+    pauseOffersBrowserTab,
     setConversationBrowser,
     surfaceScope,
   ]);
@@ -6453,7 +6483,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const sitePreviewPanelId = conversationWorkspace ? "conversation-workspace-preview" : `${chatPanelId}-preview`;
   const resourceTabs: ConversationSurface[] = [
-    ...(hasBrowserView ? [{
+    ...(browserTabShown ? [{
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: browserActivePageTitle, agentName: browserAgentActive ? browserAgentName : null }),
       attention: browserApprovalAttention ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
@@ -6756,6 +6786,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 )}
               />
             ) : null}
+            {/* At the chat's own end, never under an earlier part of it shown around a message. */}
+            {openPause && !messageTargetActive ? (
+              <BrowserPauseRow
+                pause={openPause}
+                // Instafy's browser on screen, not this device's own in its place.
+                browserVisible={browserVisible && browserTransport === "shared"}
+                onOpen={openBrowserForPause}
+                // An avatar only when the row above is not the paused run's.
+                avatar={fallbackRowContinuesTail(displayedMessages[displayedMessages.length - 1], openPauseRun)
+                  ? ASSISTANT_AVATAR_GUTTER_PLACEHOLDER
+                  : renderAssistantAvatar(openPauseRun?.metadata ?? null)}
+              />
+            ) : null}
             {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
             {workspaceStartStall.showNotice ? (
               <WorkspaceStartStalledRow
@@ -6850,6 +6893,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     humanInputIdentityKey={browserHandoff.identityKey}
                     humanInputRunIds={browserHumanInputRunIds}
                     humanInputStoppedRunIds={browserHumanInputStoppedRunIds}
+                    pausedPageId={openPause?.pageId ?? null}
                     onTakeOverAgent={browserHandoff.sharedJobWhileAgentHolds ? takeOverSharedBrowser : null}
                     onContinueAfterHumanInput={browserHandoff.continueSharedRun}
                     onPresenceChange={setSharedBrowserPresence}

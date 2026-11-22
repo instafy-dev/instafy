@@ -171,12 +171,14 @@ type HostProps = {
   pageLoading?: boolean;
   /** Another space, whose browser this view has not shown before. */
   project?: string;
+  /** The tab of a pause that still waits for the person, from the chat's own record of it. */
+  pausedPageId?: string | null;
 };
 
 /** Studio's part: tabs are read only while the view is opening or live. */
 function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl = "https://www.visitlisboa.com/",
   agentPageIds, hidden = false, compact = false, pausedRunId, holdingRunId, earlierRunIds = [], stoppedRunIds = [], teammates = false, onContinue,
-  pageTitle, pageLoading, project = projectId }: HostProps) {
+  pageTitle, pageLoading, project = projectId, pausedPageId = null }: HostProps) {
   const [kind, setKind] = useState<HostedBrowserViewKind | null>(null);
   const pagesActive = hostedBrowserPagesActive(kind);
   const [ready, setReady] = useState(false);
@@ -202,6 +204,7 @@ function Host({ agentHolds, viewOnly = false, conversationId = "chat-a", pageUrl
     onViewStateChange={setKind} conversationId={conversationId}
     {...(pausedRunId ? { humanInputIdentityKey: `user-1:${conversationId}`, humanInputRunIds: new Set([...earlierRunIds, pausedRunId]) } : {})}
     humanInputStoppedRunIds={new Set(stoppedRunIds)}
+    pausedPageId={pausedPageId}
     onContinueAfterHumanInput={onContinue ?? null}
     spaceHasTeammates={teammates}
     sharedBrowserCapabilitiesResolved sharedBrowserCapabilitiesAvailable
@@ -360,6 +363,30 @@ describe("Shared Browser view while Octo drives", () => {
     // One viewer throughout: the tab never left the stage.
     expect(mocks.rfb.at(-1)).toBe(driving);
     expect(driving.disconnect).not.toHaveBeenCalled();
+  });
+
+  // Dogfood, Nov 22: the morning after Octo paused on a sign-in, the space's
+  // machine had stopped overnight, and its browser came back with one blank
+  // tab. The view said only "No page open".
+  it("says the paused page closed with the browser, and how to start over", async () => {
+    const blank = () => document.querySelector('[data-testid="browser-session-blank-page"]')?.textContent ?? null;
+    await act(async () => root.render(<Host agentHolds={false} pageUrl="about:blank" pausedPageId="PAGE-BEFORE-THE-STOP" />));
+    await advance(1_000);
+    const driving = mocks.rfb.at(-1)!;
+    await act(async () => { driving.listeners.connect?.(); driving.frame(); });
+    await advance(100);
+    expect(blank()).toBe(
+      "The page Octo paused on closed when Instafy's browser stopped. Send your request again to start over.",
+    );
+    expect(blank()).not.toContain("\u2014");
+    // The paused tab is still open (blank only for now): nothing is said of it.
+    await act(async () => root.render(<Host agentHolds={false} pageUrl="about:blank" pausedPageId="PAGE1" />));
+    await advance(100);
+    expect(blank()).toBe("No page open");
+    // No pause waits.
+    await act(async () => root.render(<Host agentHolds={false} pageUrl="about:blank" />));
+    await advance(100);
+    expect(blank()).toBe("No page open");
   });
 
   it("drops the still when the chat changes, and says where Octo is instead", async () => {

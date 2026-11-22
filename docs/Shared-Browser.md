@@ -2751,7 +2751,20 @@ checks the whole page. A snapshot with no such record is checked whole. When
 it comes in while the chat is open, Studio switches the person whose turn it is
 (the run's `initiatingUserId`) to the Browser view, where the highlighted fields
 are (once per pause; history, a reload and other members' pauses switch
-nothing). While it waits on the person's fields, a row of its own under the
+nothing). The chat keeps a way back to a pause that still waits, read from the
+chat's own record of it, so a reload, another device, a request that ran out
+or a closed Browser view keep it too: the newest pause step of a turn in
+Instafy's browser that the person started, with no message from a person since
+and no Stop of its turn (a press of **Let Octo continue** is such a message). While
+Instafy's browser is not on screen, a row at the end of the chat offers **Open
+Instafy's browser**, which brings the Browser view forward and sends Octo
+nothing. The chat's Browser tab stays while the pause waits, also on a device
+with no view saved, and selecting it opens the view; a view the person closed
+on that device stays closed, and the row leads back. When the browser no longer
+lists the paused tab (it stopped, and its tabs went with it), the empty stage
+says "The page Octo paused on closed when Instafy's browser stopped. Send your
+request again to start over." in place of "No page open". While it waits on
+the person's fields, a row of its own under the
 toolbar, at every width (a narrow toolbar folds its controls into a menu), says:
 "This space's browser keeps you signed in for its chats until you clear it.",
 or "…for its chats and members…" when other people can open the space (see

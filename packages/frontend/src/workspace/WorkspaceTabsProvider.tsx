@@ -51,6 +51,11 @@ import {
 /** What a conversation's Browser view tab shows, published by its chat panel. */
 export type ConversationBrowserState = {
   available: boolean;
+  /**
+   * No view is open, but a pause in Instafy's browser still waits for the
+   * viewer: the tab shows, and selecting it opens the view (ChatPanel).
+   */
+  offered?: boolean;
   /** A browser approval waits for the viewer. */
   attention: boolean;
   /** The title of the chat's own tab, where a message goes. */
@@ -68,6 +73,7 @@ const NO_CONVERSATION_BROWSER: ConversationBrowserState = { available: false, at
 
 function sameConversationBrowser(left: ConversationBrowserState | undefined, right: ConversationBrowserState): boolean {
   return Boolean(left) && left!.available === right.available && left!.attention === right.attention &&
+    (left!.offered ?? false) === (right.offered ?? false) &&
     (left!.pageTitle ?? null) === (right.pageTitle ?? null) && (left!.agentName ?? null) === (right.agentName ?? null) &&
     left!.close === right.close;
 }
