@@ -2643,7 +2643,8 @@ is further down than a reading walks (over a million characters) says so
 reaches.]"). The text between them is masked exactly as the whole page's text
 is; when it cannot be, the page is read from its top with the cut line. `scripts/shared-browser-page-reading-e2e.mjs`
 shows each of these in Chromium. A closed shadow root is read by neither the
-text nor the list. The control's
+text nor the list, and a main part drawn only in one reads as not drawn yet.
+The control's
 box stays inside the controller for the visible cursor, and the step's result
 is its structured content, with one line as its text (see above).
 On the page the person chose, a page with sign-in fields (a password or

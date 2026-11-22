@@ -2808,7 +2808,7 @@ export async function runSharedBrowserPageReadingFixture() {
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",
-        "A closed shadow root is read by neither the text nor the controls, and says nothing.",
+        "A closed shadow root is read by neither the text nor the controls, and a main part drawn only in one reads as not drawn yet.",
       ],
     };
     fs.writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
