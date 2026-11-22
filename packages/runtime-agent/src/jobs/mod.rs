@@ -34495,8 +34495,8 @@ mod tests {
     /// once, as a browser turn with no build after it has. The build is asked only to write "not
     /// checked" where that step's value would go and never to try it again: asked to say which
     /// step didn't run and to offer to ask again, an expired prompt's build wrote "the browser's
-    /// Google form step wasn't completed because it received no answer, so those reviews remain
-    /// not checked", with no offer (a local test, Nov 20). And a denied turn with no build after
+    /// form step wasn't completed because it received no answer, so those reviews remain not
+    /// checked", with no offer (a local test, Nov 20). And a denied turn with no build after
     /// it says it once: its own account and next step ("submit the order on the page yourself")
     /// came right above the runtime's, which read "Tell Octo what to try instead."
     #[test]
