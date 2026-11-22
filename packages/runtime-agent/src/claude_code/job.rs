@@ -429,10 +429,7 @@ mod tests {
             },
             LaunchEnvSnapshot::default(),
             Confinement::new([PathBuf::from("/workspace")]),
-            Trust {
-                euid: 501,
-                admin_gid: None,
-            },
+            Trust::current(),
         )
         .unwrap()
         .unwrap()

@@ -2809,15 +2809,16 @@ mod tests {
         }
     }
 
+    /// `raw` parsed with the process's own trust: a test that checks a real folder through the
+    /// grant needs that folder's owner, the effective user, to be trusted, whatever uid the
+    /// platform gives it (501 on a Mac, 1001 on a Linux CI runner). Tests of made-up ownership
+    /// build a `Trust` of their own.
     fn parse(raw: RawLaunchGrant) -> Result<Option<LaunchGrant>, NotReadyReason> {
         LaunchGrant::parse(
             raw,
             snapshot(),
             Confinement::new([PathBuf::from("/workspace")]),
-            Trust {
-                euid: 501,
-                admin_gid: None,
-            },
+            Trust::current(),
         )
     }
 
@@ -3544,6 +3545,7 @@ mod tests {
     /// stay ready; the timed re-probe waits for the reset rather than probing now. Neither a login
     /// the grant does not have nor a reset time that passed holds anything, and nothing runs for
     /// a login the grant does not have.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_hold_is_its_logins_alone() {
         let folder = tempfile::tempdir().unwrap();
