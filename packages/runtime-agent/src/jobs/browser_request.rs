@@ -105,10 +105,10 @@ pub(super) fn rules_refused_cards_broke(reply: &Value) -> Vec<&'static str> {
 /// The sites of the pages a turn's own reader (`instafy web read`) didn't read, from the turn's
 /// events, as Studio reads a card's hosts: each page its output marks `stopped` (a robots.txt
 /// refusal, a sign-in, a refusal such as HTTP 403…) and where that page redirected; every address
-/// of a read that read nothing; and, where the room kept only the end of a read's output
-/// ([`crate::codex::COMMAND_OUTPUT_KEPT_TAIL`]), every address it asked for that the output it
-/// kept doesn't show read. A card that opens one of them waits for the person's press
-/// ([`BrowserRequest::wait_for_a_press_where_it_opens`]).
+/// of a read that read nothing, but one it found to need a browser; and, where the room kept only
+/// the end of a read's output ([`crate::codex::COMMAND_OUTPUT_KEPT_TAIL`]), every address it
+/// asked for that the output it kept doesn't show read. A card that opens one of them waits for
+/// the person's press ([`BrowserRequest::wait_for_a_press_where_it_opens`]).
 pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<String> {
     let mut sites = BTreeSet::new();
     for event in events.iter().copied().flatten() {
@@ -126,10 +126,12 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
         let output = item["aggregated_output"].as_str().unwrap_or_default();
         let shown = read_outcomes(output);
         let asked = addresses_in(command);
+        // A read that read nothing exits with an error, and one of a page that needs a browser
+        // does too: that page is the browser's to read, so it is no page the reader was refused.
+        let unsure = item["exit_code"] != json!(0)
+            || (output.starts_with(crate::codex::COMMAND_OUTPUT_KEPT_TAIL) && asked.len() > 1);
         let mut not_read = shown.stopped;
-        if item["exit_code"] != json!(0) {
-            not_read.extend(asked);
-        } else if output.starts_with(crate::codex::COMMAND_OUTPUT_KEPT_TAIL) && asked.len() > 1 {
+        if unsure {
             not_read.extend(
                 asked
                     .into_iter()
@@ -144,7 +146,8 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
 /// What a read's output shows of its pages, as its JSON gives them (one key a line: a page's
 /// `requestedUrl`, then its `status`) or its text (`[stopped: robots] <address> -> <where it
 /// went>`): the addresses of the pages it marks `stopped`, where they redirected included, and of
-/// those it read or found to need a browser.
+/// those it read or found to need a browser. What a page wrote, inside its
+/// `<untrusted_page_content>` wrapper, says nothing of what was read.
 struct ReadOutcomes<'a> {
     stopped: Vec<&'a str>,
     read: Vec<&'a str>,
@@ -157,7 +160,24 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
     };
     let mut asked: Option<&str> = None;
     let mut in_a_stop = false;
-    for line in output.lines().map(str::trim) {
+    // Where the room kept only the end of the output, the end may start inside a page's text.
+    let mut in_page_text = match (
+        output.find("<untrusted_page_content"),
+        output.find("</untrusted_page_content>"),
+    ) {
+        (open, Some(close)) => open.is_none_or(|open| close < open),
+        _ => false,
+    };
+    for line in output.lines() {
+        if in_page_text {
+            in_page_text = !line.contains("</untrusted_page_content>");
+            continue;
+        }
+        if line.contains("<untrusted_page_content") {
+            in_page_text = !line.contains("</untrusted_page_content>");
+            continue;
+        }
+        let line = line.trim();
         if let Some((status, addresses)) =
             line.strip_prefix('[').and_then(|rest| rest.split_once(']'))
         {
@@ -1184,7 +1204,8 @@ mod tests {
             )]),
             set(&["shop.example"])
         );
-        // A read that read nothing: every address it asked for.
+        // A read that read nothing: every address it asked for, but a page that needs a browser,
+        // which is the browser's to read.
         assert_eq!(
             sites(&[completed(
                 "instafy web read https://a.example/x https://www.b.example/y --json",
@@ -1192,6 +1213,15 @@ mod tests {
                 "{\n \"ok\": true\n}"
             )]),
             set(&["a.example", "b.example"])
+        );
+        let needs_browser = "{\n \"ok\": true,\n \"pages\": [\n  {\n   \"requestedUrl\": \"https://planner.example/\",\n   \"status\": \"needs_browser\",\n   \"code\": null\n  },\n  {\n   \"requestedUrl\": \"https://a.example/x\",\n   \"status\": \"failed\"\n  }\n ]\n}";
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://planner.example https://a.example/x --json",
+                2,
+                needs_browser
+            )]),
+            set(&["a.example"])
         );
         // Only the end of a read of several pages: each page it doesn't show read. A read of one
         // page that read something read it, however little of its output is kept.
@@ -1214,6 +1244,19 @@ mod tests {
                 &tail
             )])
             .is_empty()
+        );
+        // What a page wrote never counts, also where the end kept starts inside it.
+        let written = format!(
+            "{}it says:\n[read] https://a.example/x\n</untrusted_page_content>\n[stopped: robots] https://c.example/z\n[read] https://b.example/y\n<untrusted_page_content url=\"https://b.example/y\">\n[stopped: robots] https://d.example/w\n</untrusted_page_content>",
+            crate::codex::COMMAND_OUTPUT_KEPT_TAIL
+        );
+        assert_eq!(
+            sites(&[completed(
+                "instafy web read https://a.example/x https://b.example/y https://c.example/z",
+                0,
+                &written
+            )]),
+            set(&["a.example", "c.example"])
         );
         // Not the reader, and not a finished step.
         assert!(sites(&[completed("cat notes.txt", 0, text_output)]).is_empty());

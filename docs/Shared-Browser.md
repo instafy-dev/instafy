@@ -3515,8 +3515,9 @@ unless the policy is `"covered"`.
   turn's reply above it. So does a card that opens a page the turn's own reader
   (`instafy web read`) didn't read: one it marked stopped (a robots.txt
   refusal, a sign-in, an HTTP 403…), where it redirected, every page of a read
-  that read nothing, and, where the turn's events kept only the end of a read of
-  several pages, each page that end doesn't show read. The card carries
+  that read nothing but one that needs a browser, and, where the turn's events
+  kept only the end of a read of several pages, each page that end doesn't show
+  read. The card carries
   `waitsForThePerson: true`, and Studio never opens it by itself, also for an
   address the person wrote: the research skill ends such a page in its link and
   one card, and opened by itself the browser would read with no press a page
