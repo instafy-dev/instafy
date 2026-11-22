@@ -13218,19 +13218,19 @@ async fn collect_workspace_change_receipts(
         && let Some(before) = before
         && let Some(after) = collect_git_status_porcelain(workspace_dir).await
     {
-        *files = normalize_codex_files(
+        *files = status_change_receipts(
             workspace_dir,
-            infer_codex_files_from_git_status_delta(before, &after)
+            infer_codex_files_from_git_status_delta(workspace_dir, before, &after)
                 .into_iter()
                 .filter(|file| !is_runtime_owned_workspace_path(&file.workspace_path))
                 .collect(),
-        )?;
+        );
         held.leave_out_held(files);
     }
     // Retry checks weigh this attempt separately from work a stopped lease saved.
     let own_files_len = files.len();
     if tracks_changes {
-        add_resumed_turn_files(files, earlier_attempt, before);
+        add_resumed_turn_files(workspace_dir, files, earlier_attempt, before);
         held.leave_out_held(files);
     }
     Ok(own_files_len)
@@ -15748,6 +15748,45 @@ fn normalize_codex_files(
     Ok(normalized)
 }
 
+/// What a turn's `git status` says it changed ([`infer_codex_files_from_git_status_delta`]),
+/// as its receipts: each file by its path in the space's folder, less a created or changed file
+/// the folder no longer holds. Unlike [`normalize_codex_files`], which carries out what a
+/// model's reply says to write or delete, this never touches the folder: the status reports
+/// what the turn already did there.
+fn status_change_receipts(
+    workspace_dir: &Path,
+    files: Vec<CodexFileDescriptor>,
+) -> Vec<CodexFileDescriptor> {
+    files
+        .into_iter()
+        .filter_map(|mut file| {
+            // A status path starts at the folder's root, so a leading folder named like the
+            // space's own folder is one of its folders, not the space's name.
+            let relative = sanitize_relative_workspace_path(&file.workspace_path)
+                .filter(|relative| !relative.as_os_str().is_empty());
+            let Some(relative) = relative else {
+                warn!(workspace_path = %file.workspace_path, "dropping a changed path outside the workspace");
+                return None;
+            };
+            let deleted = matches!(
+                file.change.as_ref().map(|change| &change.kind),
+                Some(FileChangeKind::Deleted)
+            );
+            if !deleted && !workspace_dir.join(&relative).exists() {
+                warn!(
+                    workspace_path = %file.workspace_path,
+                    "changed path missing from workspace; leaving it out of the receipts"
+                );
+                return None;
+            }
+            let relative = relative.to_string_lossy().to_string();
+            file.workspace_path = relative.clone();
+            file.path = relative;
+            Some(file)
+        })
+        .collect()
+}
+
 async fn normalize_codex_files_for_commit(
     workspace_dir: &Path,
     mut files: Vec<CodexFileDescriptor>,
@@ -15872,8 +15911,10 @@ fn sanitize_relative_workspace_path(path: &str) -> Option<PathBuf> {
 }
 
 fn delete_path_if_exists(path: &Path) -> Result<()> {
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => {
+    // The path itself, not what a symbolic link there points to: a dangling link is deleted
+    // too, and a link to a folder is deleted, never the folder.
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
             fs::remove_file(path).with_context(|| format!("failed to delete file {:?}", path))?;
         }
         Ok(metadata) if metadata.is_dir() => {
@@ -15881,7 +15922,12 @@ fn delete_path_if_exists(path: &Path) -> Result<()> {
                 .with_context(|| format!("failed to delete directory {:?}", path))?;
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // Nothing is there, also when a file now stands where a folder of the path was.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) => {}
         Err(error) => {
             return Err(error).with_context(|| format!("failed to inspect path {:?}", path));
         }
@@ -21041,11 +21087,17 @@ async fn checkpoint_files_with_status_delta(
     let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
         return files;
     };
-    files.extend(status_delta_files_for_checkpoint(before, &after, reported));
+    files.extend(status_delta_files_for_checkpoint(
+        workspace_dir,
+        before,
+        &after,
+        reported,
+    ));
     files
 }
 
 fn status_delta_files_for_checkpoint(
+    workspace_dir: &Path,
     before: &HashMap<String, GitStatusEntry>,
     after: &HashMap<String, GitStatusEntry>,
     reported: &[CodexFileDescriptor],
@@ -21055,7 +21107,7 @@ fn status_delta_files_for_checkpoint(
         .filter(|file| !file.is_read_reference())
         .flat_map(|file| [file.workspace_path.clone(), file.path.clone()])
         .collect::<HashSet<_>>();
-    infer_codex_files_from_git_status_delta(before, after)
+    infer_codex_files_from_git_status_delta(workspace_dir, before, after)
         .into_iter()
         .filter(|file| {
             let Some(sanitized) = sanitize_relative_workspace_path(&file.workspace_path) else {
@@ -21079,6 +21131,7 @@ fn status_delta_files_for_checkpoint(
 /// counts them and the checkpoint saves them. Without that record (a first
 /// lease, or another folder's attempt), it adds nothing.
 fn add_resumed_turn_files(
+    workspace_dir: &Path,
     files: &mut Vec<CodexFileDescriptor>,
     earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
     before: Option<&HashMap<String, GitStatusEntry>>,
@@ -21086,11 +21139,26 @@ fn add_resumed_turn_files(
     let (Some(earlier_attempt), Some(before)) = (earlier_attempt, before) else {
         return;
     };
-    let resumed = status_delta_files_for_checkpoint(earlier_attempt, before, files);
+    let resumed = status_delta_files_for_checkpoint(workspace_dir, earlier_attempt, before, files);
     files.extend(resumed);
 }
 
+/// The paths whose `git status` changed from `before` to `after`, each with what happened to
+/// it: created (`??` or a code with `A`), deleted (a code with `D`) or changed.
+///
+/// A `D` is a deletion only where the folder in `workspace_dir` holds nothing at that name, as
+/// its disk resolves the name, or holds a folder there while git's work-tree column says the
+/// tracked file is gone: a file replaced by a folder, whose own files have lines of their own
+/// unless the folder is ignored. Where it still holds something else, git's `D` is about the
+/// index, and the path is left out. That covers a file `git rm --cached` kept (an ignored one
+/// gets no `??` line) and, on a disk that ignores case, the old name of a rename that only
+/// changed case, which names the renamed file there. That file, created under its new name in
+/// git's eyes, counts as changed: it is the one the old name held. Nothing is deleted for any of
+/// these paths either way: [`status_change_receipts`] never touches the folder, and a save never
+/// asks the origin that serves the folder to delete what it holds in any spelling
+/// ([`workspace_commit::commit_to_hosted_origin`]).
 fn infer_codex_files_from_git_status_delta(
+    workspace_dir: &Path,
     before: &HashMap<String, GitStatusEntry>,
     after: &HashMap<String, GitStatusEntry>,
 ) -> Vec<CodexFileDescriptor> {
@@ -21106,18 +21174,44 @@ fn infer_codex_files_from_git_status_delta(
         .collect();
     paths.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-    paths
+    // The folded names of the paths whose `D` the folder still holds.
+    let mut kept = HashSet::new();
+    let changes = paths
         .into_iter()
-        .map(|(path, status)| {
+        .filter_map(|(path, status)| {
             let status_code = status.code.as_str();
             let kind = if status_code == "??" || status_code.contains('A') {
                 FileChangeKind::Created
             } else if status_code.contains('D') {
-                FileChangeKind::Deleted
+                match fs::symlink_metadata(workspace_dir.join(path)) {
+                    Ok(metadata)
+                        if metadata.is_dir() && status_code.as_bytes().get(1) == Some(&b'D') =>
+                    {
+                        FileChangeKind::Deleted
+                    }
+                    Ok(_) => {
+                        kept.insert(origin_http_server::apply::portable_key(path));
+                        return None;
+                    }
+                    Err(_) => FileChangeKind::Deleted,
+                }
             } else {
                 FileChangeKind::Changed
             };
+            Some((path, kind))
+        })
+        .collect::<Vec<_>>();
 
+    changes
+        .into_iter()
+        .map(|(path, kind)| {
+            let kind = if matches!(kind, FileChangeKind::Created)
+                && kept.contains(&origin_http_server::apply::portable_key(path))
+            {
+                FileChangeKind::Changed
+            } else {
+                kind
+            };
             let raw = match kind {
                 FileChangeKind::Created => json!({ "type": "created" }),
                 FileChangeKind::Deleted => json!({ "type": "deleted" }),
@@ -25721,7 +25815,9 @@ mod tests {
             change: FileChangeDescriptor::parse(json!({ "type": "created" })),
         }];
 
-        let extra = status_delta_files_for_checkpoint(&before, &after, &reported);
+        // A folder that holds none of these paths: each status line stands as it is.
+        let folder = tempdir().unwrap();
+        let extra = status_delta_files_for_checkpoint(folder.path(), &before, &after, &reported);
         let mut paths = extra
             .iter()
             .map(|file| file.workspace_path.as_str())
@@ -25787,8 +25883,11 @@ mod tests {
             (".instafy/state.json".to_string(), entry("??", "i")),
         ]);
 
+        // A folder that holds none of these paths: each status line stands as it is.
+        let folder = tempdir().unwrap();
+        let folder = folder.path();
         let mut files = Vec::new();
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        add_resumed_turn_files(folder, &mut files, Some(&earlier_attempt), Some(&before));
         assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
         let kind = |path: &str| {
             files
@@ -25802,7 +25901,7 @@ mod tests {
 
         // A path the turn reports itself is not added again.
         let mut files = vec![reported("notes/rolling.md")];
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        add_resumed_turn_files(folder, &mut files, Some(&earlier_attempt), Some(&before));
         assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
 
         // Without a record of an earlier attempt in this folder (a first
@@ -25810,9 +25909,14 @@ mod tests {
         // adds nothing, whatever the folder holds. Nor does it when nothing
         // changed since that attempt began.
         let mut files = Vec::new();
-        add_resumed_turn_files(&mut files, None, Some(&before));
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), None);
-        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&earlier_attempt));
+        add_resumed_turn_files(folder, &mut files, None, Some(&before));
+        add_resumed_turn_files(folder, &mut files, Some(&earlier_attempt), None);
+        add_resumed_turn_files(
+            folder,
+            &mut files,
+            Some(&earlier_attempt),
+            Some(&earlier_attempt),
+        );
         assert!(files.is_empty());
     }
 
@@ -33469,6 +33573,300 @@ mod tests {
         assert!(!records_workspace_change_receipts(false, false));
     }
 
+    /// A folder that is the person's own git repository, as a Desktop folder can be, with
+    /// `files` committed (ignored ones too).
+    fn own_repository(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let workspace = tempdir().expect("workspace");
+        commit_own_repository(workspace.path(), files);
+        workspace
+    }
+
+    fn commit_own_repository(ws: &Path, files: &[(&str, &str)]) {
+        fixture_git(ws, &["init", "-q", "-b", "main"]);
+        for (path, text) in files {
+            fs::create_dir_all(ws.join(path).parent().unwrap()).expect("folder");
+            fs::write(ws.join(path), text).expect("file");
+            fixture_git(ws, &["add", "-f", "--", path]);
+        }
+        fixture_git(
+            ws,
+            &[
+                "-c",
+                "user.name=Instafy Test",
+                "-c",
+                "user.email=test@instafy.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "saved",
+            ],
+        );
+    }
+
+    fn fixture_git(ws: &Path, args: &[&str]) {
+        let output = crate::git_env::git_command()
+            .args(args)
+            .current_dir(ws)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The receipts of a plain-text write turn, whose model reports no files: the paths whose
+    /// `git status` changed since `before`.
+    async fn status_receipts(
+        ws: &Path,
+        before: &HashMap<String, GitStatusEntry>,
+    ) -> Vec<CodexFileDescriptor> {
+        let mut files = Vec::new();
+        collect_workspace_change_receipts(
+            ws,
+            &mut files,
+            true,
+            Some(before),
+            None,
+            &space_pages::HeldPages::default(),
+        )
+        .await
+        .expect("the turn's receipts");
+        files
+    }
+
+    /// Each file's path and what it says happened to it.
+    fn listed_changes(files: &[CodexFileDescriptor]) -> Vec<(&str, &str)> {
+        files
+            .iter()
+            .map(|file| {
+                let kind = match file.change.as_ref().map(|change| &change.kind) {
+                    Some(FileChangeKind::Created) => "created",
+                    Some(FileChangeKind::Deleted) => "deleted",
+                    Some(FileChangeKind::Changed) => "changed",
+                    _ => "other",
+                };
+                (file.workspace_path.as_str(), kind)
+            })
+            .collect()
+    }
+
+    /// Stop tracking `.env`: `git rm --cached .env`, with `.env` in `.gitignore`, leaves the
+    /// file in the folder, and `git status` shows only `D  .env`, because an ignored file gets
+    /// no `??` line. The receipts took that for a deletion and deleted the person's `.env`. The
+    /// folder still holds both files, so the turn lists neither and its checkpoint saves
+    /// neither: `notes/private.md` is a path a save could publish, unlike `.env`.
+    #[tokio::test]
+    async fn untracking_an_ignored_file_keeps_it_in_the_folder() {
+        let workspace = own_repository(&[
+            (".gitignore", ".env\nnotes/private.md\n"),
+            (".env", "TOKEN=kept\n"),
+            ("notes/private.md", "kept too\n"),
+        ]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws).await.unwrap();
+        fixture_git(ws, &["rm", "-q", "--cached", ".env", "notes/private.md"]);
+        let after = collect_git_status_porcelain(ws).await.unwrap();
+        assert_eq!(
+            after.get(".env").map(|status| status.code.as_str()),
+            Some("D ")
+        );
+
+        let files = status_receipts(ws, &before).await;
+        assert_eq!(fs::read_to_string(ws.join(".env")).unwrap(), "TOKEN=kept\n");
+        assert_eq!(
+            fs::read_to_string(ws.join("notes/private.md")).unwrap(),
+            "kept too\n"
+        );
+        assert!(files.is_empty(), "{:?}", listed_changes(&files));
+        let checkpoint = checkpoint_files_with_status_delta(ws, Some(&before), &files).await;
+        assert!(checkpoint.is_empty(), "{:?}", listed_changes(&checkpoint));
+    }
+
+    /// A tracked file `a` replaced by a folder `a/x`: `git status` shows ` D a` and `?? a/x`.
+    /// `a` sorts first, so the receipts deleted the folder, the turn's new work, then dropped
+    /// `a/x` as missing, and the checkpoint deleted `a`. The file `a` is gone, as git's
+    /// work-tree column says, so it is a deletion beside the new file, and the receipts only
+    /// report it.
+    #[tokio::test]
+    async fn a_file_replaced_by_a_folder_keeps_the_folder() {
+        let workspace = own_repository(&[("a", "a file\n")]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws).await.unwrap();
+        fs::remove_file(ws.join("a")).unwrap();
+        fs::create_dir(ws.join("a")).unwrap();
+        fs::write(ws.join("a/x"), "the turn's new file\n").unwrap();
+
+        let files = status_receipts(ws, &before).await;
+        assert_eq!(
+            fs::read_to_string(ws.join("a/x")).unwrap(),
+            "the turn's new file\n"
+        );
+        assert_eq!(
+            listed_changes(&files),
+            [("a", "deleted"), ("a/x", "created")]
+        );
+        let checkpoint = checkpoint_files_with_status_delta(ws, Some(&before), &files).await;
+        assert_eq!(
+            listed_changes(&checkpoint),
+            [("a", "deleted"), ("a/x", "created")]
+        );
+    }
+
+    /// A tracked file `scratch` replaced by an ignored folder of that name, as a `.venv` file
+    /// naming an environment gives way to the environment's folder: `git status` shows only
+    /// ` D scratch`, since nothing in an ignored folder gets a `??` line. The receipts deleted
+    /// the whole folder. The file is gone, so the turn lists its deletion, and the folder keeps
+    /// what it holds.
+    #[tokio::test]
+    async fn a_file_replaced_by_an_ignored_folder_keeps_the_folder() {
+        let workspace = own_repository(&[(".gitignore", "scratch/\n"), ("scratch", "a file\n")]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws).await.unwrap();
+        fs::remove_file(ws.join("scratch")).unwrap();
+        fs::create_dir(ws.join("scratch")).unwrap();
+        fs::write(ws.join("scratch/y"), "kept\n").unwrap();
+
+        let files = status_receipts(ws, &before).await;
+        assert_eq!(fs::read_to_string(ws.join("scratch/y")).unwrap(), "kept\n");
+        assert_eq!(listed_changes(&files), [("scratch", "deleted")]);
+        let checkpoint = checkpoint_files_with_status_delta(ws, Some(&before), &files).await;
+        assert_eq!(listed_changes(&checkpoint), [("scratch", "deleted")]);
+    }
+
+    /// A space whose folder is named `site` and holds a folder `site/` of its own, as a Django
+    /// project holds a package named like it. `git status` names `site/index.html` from the
+    /// folder's root, so its receipt keeps the inner folder. Read as a model's path, the leading
+    /// `site/` was taken for the space's name and dropped: the change to `site/about.html` was
+    /// lost as missing, and the deletion of `site/index.html` named the space's top
+    /// `index.html`.
+    #[tokio::test]
+    async fn a_folder_named_like_the_space_keeps_its_name_in_the_receipts() {
+        let parent = tempdir().expect("parent");
+        let ws = parent.path().join("site");
+        fs::create_dir(&ws).unwrap();
+        commit_own_repository(
+            &ws,
+            &[
+                ("index.html", "top\n"),
+                ("site/about.html", "about\n"),
+                ("site/index.html", "inner\n"),
+            ],
+        );
+        let before = collect_git_status_porcelain(&ws).await.unwrap();
+        fs::write(ws.join("site/about.html"), "about, changed\n").unwrap();
+        fs::remove_file(ws.join("site/index.html")).unwrap();
+
+        let files = status_receipts(&ws, &before).await;
+        assert_eq!(fs::read_to_string(ws.join("index.html")).unwrap(), "top\n");
+        assert_eq!(
+            listed_changes(&files),
+            [
+                ("site/about.html", "changed"),
+                ("site/index.html", "deleted")
+            ]
+        );
+        assert!(files.iter().all(|file| file.path == file.workspace_path));
+    }
+
+    /// The status lines a case-only rename and its neighbours give, on a disk of either kind.
+    /// `Foo.txt` is in the folder, so its `D` is about the index, and the created `foo.txt`,
+    /// one name with it once case is set aside, counts as changed. A folder where git's
+    /// work-tree column has the `D` (`a`) replaced a tracked file, so that is a deletion; a
+    /// folder beside an index-only `D` (`b`, as `git rm --cached` of a submodule leaves) is
+    /// not. `gone.txt` is nowhere, and `new.txt` folds to no kept name.
+    #[test]
+    fn a_created_name_that_folds_to_a_kept_deletion_counts_as_changed() {
+        let workspace = tempdir().expect("workspace");
+        let ws = workspace.path();
+        fs::write(ws.join("Foo.txt"), "renamed\n").unwrap();
+        fs::create_dir(ws.join("a")).unwrap();
+        fs::create_dir(ws.join("b")).unwrap();
+        let after = [
+            ("Foo.txt", "D "),
+            ("a", " D"),
+            ("b", "D "),
+            ("foo.txt", "A "),
+            ("gone.txt", " D"),
+            ("new.txt", "??"),
+        ]
+        .into_iter()
+        .map(|(path, code)| (path.to_string(), GitStatusEntry::new(code, None)))
+        .collect::<HashMap<_, _>>();
+
+        let files = infer_codex_files_from_git_status_delta(ws, &HashMap::new(), &after);
+        assert_eq!(
+            listed_changes(&files),
+            [
+                ("a", "deleted"),
+                ("foo.txt", "changed"),
+                ("gone.txt", "deleted"),
+                ("new.txt", "created"),
+            ]
+        );
+    }
+
+    /// `git mv Foo.txt foo.txt`: `git status` shows `D  Foo.txt` and `A  foo.txt`. On a disk
+    /// that ignores case, as a Mac's does, `Foo.txt` names the renamed file and sorts first, so
+    /// the receipts deleted the renamed file. There the folder still holds `Foo.txt`, so only
+    /// the new name is listed, as changed: it is the file the old name held. On a disk that
+    /// tells case apart nothing holds `Foo.txt`, and both names are listed: the checkpoint saves
+    /// that rename
+    /// (`workspace_commit::tests::a_case_only_rename_and_an_untracked_env_keep_their_files_through_a_real_origin`).
+    /// The file stays on either disk.
+    #[tokio::test]
+    async fn a_case_only_rename_keeps_the_renamed_file() {
+        let workspace = own_repository(&[("Foo.txt", "renamed\n")]);
+        let ws = workspace.path();
+        let ignores_case = ws.join("FOO.TXT").exists();
+        let before = collect_git_status_porcelain(ws).await.unwrap();
+        fixture_git(ws, &["mv", "Foo.txt", "foo.txt"]);
+
+        let files = status_receipts(ws, &before).await;
+        let names = fs::read_dir(ws)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name != ".git")
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["foo.txt"]);
+        assert_eq!(fs::read_to_string(ws.join("foo.txt")).unwrap(), "renamed\n");
+        let expected: &[(&str, &str)] = if ignores_case {
+            &[("foo.txt", "changed")]
+        } else {
+            &[("Foo.txt", "deleted"), ("foo.txt", "created")]
+        };
+        assert_eq!(listed_changes(&files), expected);
+        let checkpoint = checkpoint_files_with_status_delta(ws, Some(&before), &files).await;
+        assert_eq!(listed_changes(&checkpoint), expected);
+    }
+
+    /// A tracked folder `a/` replaced by a file `a`: `git status` shows `?? a` and ` D a/x`.
+    /// Deleting `a/x` failed with "not a directory", which failed the turn. Nothing holds
+    /// `a/x` now, so it is a deletion, and the receipts only report it.
+    #[tokio::test]
+    async fn a_folder_replaced_by_a_file_keeps_the_file() {
+        let workspace = own_repository(&[("a/x", "in a folder\n")]);
+        let ws = workspace.path();
+        let before = collect_git_status_porcelain(ws).await.unwrap();
+        fs::remove_dir_all(ws.join("a")).unwrap();
+        fs::write(ws.join("a"), "now a file\n").unwrap();
+
+        let files = status_receipts(ws, &before).await;
+        assert_eq!(fs::read_to_string(ws.join("a")).unwrap(), "now a file\n");
+        assert_eq!(
+            listed_changes(&files),
+            [("a", "created"), ("a/x", "deleted")]
+        );
+        let checkpoint = checkpoint_files_with_status_delta(ws, Some(&before), &files).await;
+        assert_eq!(
+            listed_changes(&checkpoint),
+            [("a", "created"), ("a/x", "deleted")]
+        );
+    }
+
     #[test]
     fn direct_routing_preflight_file_change_requirement_updates_runtime_expectations() {
         let job = test_lease_job(
@@ -41021,7 +41419,8 @@ mod tests {
             GitStatusEntry::new("??", Some("private-after-fingerprint".to_string())),
         )]);
 
-        let inferred = infer_codex_files_from_git_status_delta(&before, &after);
+        let folder = tempdir().unwrap();
+        let inferred = infer_codex_files_from_git_status_delta(folder.path(), &before, &after);
         assert_eq!(inferred.len(), 1);
         assert_eq!(inferred[0].path, "nested/notes.md");
         assert_eq!(inferred[0].workspace_path, "nested/notes.md");
@@ -43008,6 +43407,65 @@ mod tests {
         assert_eq!(
             fs::read_to_string(tmp.path().join("notes.md")).unwrap(),
             "someone else's"
+        );
+    }
+
+    /// A reply that replaced the folder `a/` with a file `a` and reports `a/x` deleted: nothing
+    /// is at `a/x` once `a` is a file, so the deletion is done, where it failed the turn
+    /// ("Not a directory") and left the new file unsaved.
+    #[test]
+    fn a_reported_deletion_below_a_file_is_already_done() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("a"), "a file now").unwrap();
+
+        let normalized = normalize_codex_files(
+            tmp.path(),
+            vec![
+                changed_file("a/x", Some(FileChangeKind::Deleted)),
+                changed_file("a", Some(FileChangeKind::Created)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|file| file.workspace_path.as_str())
+                .collect::<Vec<_>>(),
+            ["a/x", "a"]
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("a")).unwrap(),
+            "a file now"
+        );
+    }
+
+    /// A reported deletion of a symbolic link deletes the link: a dangling one, which looked
+    /// like nothing and stayed, and one to a folder, whose folder stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_reported_deletion_of_a_link_deletes_the_link() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+        fs::create_dir(ws.join("folder")).unwrap();
+        fs::write(ws.join("folder/kept.txt"), "kept").unwrap();
+        std::os::unix::fs::symlink("missing.txt", ws.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("folder", ws.join("to-folder")).unwrap();
+
+        normalize_codex_files(
+            ws,
+            vec![
+                changed_file("dangling", Some(FileChangeKind::Deleted)),
+                changed_file("to-folder", Some(FileChangeKind::Deleted)),
+            ],
+        )
+        .unwrap();
+
+        assert!(fs::symlink_metadata(ws.join("dangling")).is_err());
+        assert!(fs::symlink_metadata(ws.join("to-folder")).is_err());
+        assert_eq!(
+            fs::read_to_string(ws.join("folder/kept.txt")).unwrap(),
+            "kept"
         );
     }
 

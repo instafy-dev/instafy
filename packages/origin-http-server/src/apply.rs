@@ -593,7 +593,7 @@ fn validate_portable_component(component: &str) -> Result<(), OriginError> {
 /// one round takes a capital sharp s (`ẞ`) only to `ß`, which the next
 /// takes to `ss`. It also takes a dotless `ı` for `i`, which errs toward
 /// refusing a name.
-pub(crate) fn portable_key(path: &str) -> String {
+pub fn portable_key(path: &str) -> String {
     let fold = |name: &str| -> String {
         name.nfd()
             .collect::<String>()
