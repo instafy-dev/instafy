@@ -419,6 +419,11 @@ struct Scan {
     /// Something else ran: an unknown command, a file written, a substitution, or a script or
     /// construct this never reads.
     other: bool,
+    /// The last thing the step runs is a labelled command, alone: nothing runs after it, and no
+    /// other command shares its pipeline. Its exit status is then the step's whenever it ran,
+    /// also when that is not 0, where `&&` and `set -e` only say that it exited 0 when the step
+    /// did (`instafy web search … > r.json && jq … r.json` exits as jq did).
+    ends_labelled: bool,
 }
 
 impl Scan {
@@ -976,6 +981,7 @@ impl<'a> Matcher<'a> {
             }
             label.result_unknown = !last;
             scan.found.push(label);
+            scan.ends_labelled = true;
         } else if is_look(words) {
             scan.looks.push(look());
         } else {
@@ -1077,6 +1083,11 @@ impl<'a> Matcher<'a> {
         depth: usize,
         scan: &mut Scan,
     ) {
+        // Whatever this runs, it runs after everything visited before it: a labelled command
+        // among it marks the step's end again.
+        if !matches!(node.kind(), "comment" | "function_definition") {
+            scan.ends_labelled = false;
+        }
         match node.kind() {
             "command" => {
                 // A command or process substitution runs a command of its own, never read here.
@@ -1107,6 +1118,7 @@ impl<'a> Matcher<'a> {
                             self.visit(body, src, in_loop, false, depth, scan);
                         }
                         self.visit(pipeline, src, in_loop, last, depth, scan);
+                        scan.ends_labelled = false;
                     }
                     // `cmd <<'JSON' && next || other` runs as `(cmd && next) || other`.
                     Some(HeredocRest::Chain(and, right)) => {
@@ -1167,8 +1179,14 @@ impl<'a> Matcher<'a> {
                     .filter(|child| child.kind() != "comment")
                     .collect();
                 let end = children.len().saturating_sub(1);
+                let shared = children.len() > 1;
                 for (index, child) in children.into_iter().enumerate() {
                     self.visit(child, src, in_loop, last && index == end, depth, scan);
+                }
+                // With `set -o pipefail` the status is the last one that failed: no command that
+                // shares a pipeline ends the step alone.
+                if shared {
+                    scan.ends_labelled = false;
                 }
             }
             "negated_command" | "if_statement" | "elif_clause" | "else_clause" => {
@@ -1496,11 +1514,7 @@ fn command_words(node: Node<'_>, src: &str) -> Option<Vec<Word>> {
     (!words.is_empty()).then_some(words)
 }
 
-fn label_command_with(
-    packs: &[PackActivity],
-    argv: Option<&JsonValue>,
-    command: &str,
-) -> Option<JsonValue> {
+fn scan_command_with(packs: &[PackActivity], argv: Option<&JsonValue>, command: &str) -> Scan {
     let matcher = Matcher::new(packs);
     let mut scan = Scan::default();
     let argv: Option<Vec<&str>> = argv
@@ -1514,7 +1528,15 @@ fn label_command_with(
         }
         _ => matcher.label_script(command, false, true, 0, &mut scan),
     }
-    scan.activity()
+    scan
+}
+
+fn label_command_with(
+    packs: &[PackActivity],
+    argv: Option<&JsonValue>,
+    command: &str,
+) -> Option<JsonValue> {
+    scan_command_with(packs, argv, command).activity()
 }
 
 /// The `activity` of a command, from its argv (`command_argv`), else its command line.
@@ -1552,16 +1574,38 @@ pub fn command_activity(argv: Option<&JsonValue>, command: &str) -> Option<JsonV
 const WEB_SEARCH_SENT_NOTHING_EXITS: [i64; 2] = [3, 64];
 
 /// Whether a command step ended as a web search that sent nothing: the one thing the runtime
-/// names in it is one `instafy web search`, the step's exit status is that command's, and it
-/// says nothing was sent. Read from the step's own label (its argv) and its exit code, never
-/// from its output. The step then ends as the AI's own search that searched nothing does, and
-/// Studio shows none: no "Searching the web" for a search there was nothing to send to.
-pub fn search_command_sent_nothing(activity: &JsonValue, exit_code: Option<i64>) -> bool {
-    activity["key"] == WEB_SEARCH.key
-        && activity["count"] == 1
-        && activity["also"].as_array().is_some_and(Vec::is_empty)
-        && activity.get("result").is_none()
-        && exit_code.is_some_and(|code| WEB_SEARCH_SENT_NOTHING_EXITS.contains(&code))
+/// names in it is one `instafy web search`, it is the last thing the step runs, alone, so the
+/// step's exit status is that command's, and it says nothing was sent. Read from the step's
+/// argv and its exit code, never from its output. The step then ends as the AI's own search that
+/// searched nothing does, and Studio shows none: no "Searching the web" for a search there was
+/// nothing to send to. A command after the search, or beside it in a pipeline, may have set the
+/// exit (`instafy web search … > r.json && jq … r.json` exits 3 when jq can't read its filter),
+/// and then the step reads as before.
+pub fn search_command_sent_nothing(
+    argv: Option<&JsonValue>,
+    command: &str,
+    exit_code: Option<i64>,
+) -> bool {
+    sent_nothing_with(installed_pack_activities(), argv, command, exit_code)
+}
+
+fn sent_nothing_with(
+    packs: &[PackActivity],
+    argv: Option<&JsonValue>,
+    command: &str,
+    exit_code: Option<i64>,
+) -> bool {
+    if !exit_code.is_some_and(|code| WEB_SEARCH_SENT_NOTHING_EXITS.contains(&code)) {
+        return false;
+    }
+    let scan = scan_command_with(packs, argv, command);
+    scan.ends_labelled
+        && matches!(
+            scan.found.as_slice(),
+            [search] if search.key == WEB_SEARCH.key
+                && search.count == Some(1)
+                && !search.result_unknown
+        )
 }
 
 /// A search the AI ran with its own web search, labelled as `instafy web search` is: "searched the
@@ -2212,27 +2256,36 @@ mod tests {
     /// A step that ran one `instafy web search`, whose exit says nothing was sent, is a search
     /// that searched nothing: no search key in the space or the turn's searches used (3), or a
     /// call the command refused (64). Any other exit is a search that ran or was tried, and a
-    /// step that names anything else, or whose exit is not the search's, stays as it reads.
+    /// step that names anything else, or whose exit may be another command's, stays as it reads.
     #[test]
     fn a_search_command_that_sent_nothing_is_known_by_its_label_and_its_exit() {
         let sent_nothing = |script: &str, exit: Option<i64>| {
             let argv = json!(["/bin/bash", "-lc", script]);
-            let activity = label_command_with(&[], Some(&argv), script).expect("label");
-            search_command_sent_nothing(&activity, exit)
+            sent_nothing_with(&[], Some(&argv), script, exit)
         };
         let search = "instafy web search \"city museum hours\" --json";
         assert!(sent_nothing(search, Some(3)));
         assert!(sent_nothing(search, Some(64)));
-        assert!(sent_nothing(
+        // Its command line alone, as an older event has it.
+        assert!(sent_nothing_with(
+            &[],
+            None,
+            &format!("/bin/bash -lc '{search}'"),
+            Some(3)
+        ));
+        for script in [
             "cd /workspace && instafy web search ramen",
-            Some(3)
-        ));
-        // A turn's own first step (a local test, Nov 20): the budget names nothing, and the
-        // step's exit status is the search's.
-        assert!(sent_nothing(
+            // A turn's own first step (a local test, Nov 20): the budget names nothing, and the
+            // search, last, sets the step's exit whenever it ran.
             "instafy web budget --json && instafy web search \"vacuum price today\" --json",
-            Some(3)
-        ));
+            // Its answer kept in a file, or a note beside it: the search still ends the step.
+            "instafy web search ramen --json > /tmp/s.json",
+            "instafy web search ramen 2>&1 # the hours",
+            "bash -lc 'instafy web search ramen'",
+            "set -e; cd /workspace; instafy web search ramen",
+        ] {
+            assert!(sent_nothing(script, Some(3)), "{script}");
+        }
         // Found results, found none or no provider answered, the command itself failed, or it
         // has not ended.
         for exit in [Some(0), Some(2), Some(70), Some(1), Some(-1), None] {
@@ -2243,26 +2296,28 @@ mod tests {
             "instafy web search ramen && instafy web search noodles",
             "instafy web search ramen; instafy web search noodles",
             "for q in ramen noodles; do instafy web search \"$q\"; done",
-            // The exit is another command's.
+            // The exit may be another command's: one after the search (jq exits 3 when it can't
+            // read its filter, after a search that was sent and answered), or one beside it in
+            // a pipeline (with `set -o pipefail`, the last that failed).
             "instafy web search ramen | head -5",
             "instafy web search ramen; true",
             "instafy web search ramen || instafy web search ramen --chain reference-search",
+            "instafy web search \"standing desk reviews\" --json > /tmp/s.json && jq -r '.results[] | {url' /tmp/s.json",
+            "set -e; instafy web search ramen --json > r.json; python3 summarize.py r.json",
+            "set -euo pipefail; instafy web search ramen; jq . r.json",
+            "instafy web search ramen --json > r.json && [ -s r.json ]",
+            "instafy web search ramen && if grep -q ramen r.json; then exit 3; fi",
+            "bash -lc 'instafy web search ramen' && jq . r.json",
+            "set -o pipefail; printf ramen | instafy web search ramen",
             // It names something else too.
             "instafy web search ramen && instafy web read https://example.org/ramen",
             // Not a search.
             "instafy web read https://example.org/ramen",
             "instafy web search-key --json",
         ] {
-            let argv = json!(["/bin/bash", "-lc", other]);
-            let sent = label_command_with(&[], Some(&argv), other)
-                .is_some_and(|activity| search_command_sent_nothing(&activity, Some(3)));
-            assert!(!sent, "{other}");
+            assert!(!sent_nothing(other, Some(3)), "{other}");
+            assert!(!sent_nothing(other, Some(64)), "{other}");
         }
-        // The AI's own search is ended by its own events, never by an exit code.
-        assert!(!search_command_sent_nothing(
-            &web_search_activity(1).unwrap(),
-            None
-        ));
     }
 
     /// Every web search is one label, `instafy web search` and the AI's own search alike: Studio

@@ -23012,20 +23012,16 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .get("aggregated_output")
                             .cloned()
                             .unwrap_or(JsonValue::Null);
-                        // What the step is in plain words, from its argv only (never its output).
-                        let activity =
-                            activity_labels::command_activity(item.get("command_argv"), command);
                         // `instafy web search` that sent nothing (no search key in the space, the
                         // turn's searches used, or a call it refused) ends as the AI's own search
                         // that searched nothing does: Studio shows no step for it, where it read
                         // "Tried searching the web" for a search there was nothing to send to.
                         let status = if event_type == "item.completed"
-                            && activity.as_ref().is_some_and(|activity| {
-                                activity_labels::search_command_sent_nothing(
-                                    activity,
-                                    exit_code.as_i64(),
-                                )
-                            }) {
+                            && activity_labels::search_command_sent_nothing(
+                                item.get("command_argv"),
+                                command,
+                                exit_code.as_i64(),
+                            ) {
                             WEB_SEARCH_SEARCHED_NOTHING
                         } else {
                             status
@@ -23043,7 +23039,10 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                         if let Some(argv) = item.get("command_argv") {
                             metadata["commandArgv"] = argv.clone();
                         }
-                        if let Some(activity) = activity {
+                        // What the step is in plain words, from its argv only (never its output).
+                        if let Some(activity) =
+                            activity_labels::command_activity(item.get("command_argv"), command)
+                        {
                             metadata["activity"] = activity;
                         }
                         let key = format!("command::{item_id}::{status}::{event_type}::{command}");
@@ -43977,10 +43976,13 @@ mod tests {
             let end = ends(&step("call-3", script, status, json!(exit)));
             assert_eq!(end["status"], json!(status), "{exit}");
         }
-        // A step that also read a page, or whose exit is another command's, stays as it reads.
+        // A step that also read a page, or whose exit may be another command's, stays as it
+        // reads: jq exits 3 when it can't read its filter, after a search that was sent.
         for other in [
             "instafy web search ramen && instafy web read https://example.org/ramen",
             "instafy web search ramen | head -5",
+            "instafy web search ramen --json > r.json && jq -r '.results[] | {url' r.json",
+            "set -e; instafy web search ramen --json > r.json; python3 summarize.py r.json",
         ] {
             let messages = extract_codex_messages(&step("call-4", other, "failed", json!(3)));
             let end = messages[1].metadata.as_ref().expect("metadata");

@@ -628,8 +628,10 @@ describe("the person's own key (secret-request card)", () => {
   // Turns whose AI had its own web search ran this command first, read "This space has no search key. Go on without
   // it: …", and never used their own search: one found no price and said "search returned no results" where no web
   // search had run (a local test, Nov 20). The runtime marks the commands of a run that has the AI's own search, and
-  // there the answer points to that search, for what the web-research skill allows. It promises nothing of it: the
-  // message may have used its searches, or search may have been switched off while the turn ran, and then the way
+  // there the answer points to that search, as the web-research skill says. It names no cost or limit of it: those are
+  // the skill's, and hold only where the run's own instructions say each search costs the person credits (a person's
+  // own ChatGPT login searches on their own plan, and deeper research has more searches). It promises nothing of it:
+  // the message may have used its searches, or search may have been switched off while the turn ran, and then the way
   // on without a search is the same as before. Everywhere else the words are as they were, byte for byte.
   it("without a key, in a run that has the AI's own web search, points to that search and keeps the way on without one", async () => {
     const { requests, transport } = recorder(() => ({ status: 200, body: {} }));
@@ -642,10 +644,14 @@ describe("the person's own key (secret-request card)", () => {
     expect(marked.status).toBe("no_provider");
     expect(marked.tell).toBe(
       "This space has no search key, so this command searched nothing. This run has the AI's own web search: use that instead, as the web-research skill " +
-        "says under \"The AI's own web search\" (where each search costs the person credits, only for what is fresh or to find a page no source names, " +
-        `at most 2 a message). If it answers that it did not search, go on without it: ${without}`,
+        `says under "The AI's own web search". If it answers that it did not search, go on without it: ${without}`,
     );
     expect(marked.tell).not.toContain("no search key. Go on without it");
+    // When to search and how often is the skill's: the command's words state no cost and no limit, which would be
+    // untrue for a person's own ChatGPT login or for deeper research.
+    for (const word of ["credit", "cost", "fresh", "at most", "a message"]) {
+      expect(marked.tell, word).not.toContain(word);
+    }
     for (const card of ["request_secret", "BRAVE_SEARCH_API_KEY", "offer", "card", "set up search"]) {
       expect(JSON.stringify(marked), card).not.toContain(card);
     }

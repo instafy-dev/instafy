@@ -1083,7 +1083,7 @@ the last line of the text. Offline fixtures apply as for `instafy web read` (`vi
 |---|---|
 | 0 | `ok` |
 | 2 | `not_found` or `unavailable` |
-| 3 | Nothing was sent: `no_provider`, or `unavailable` with `turn_limit`. The room shows no search step for it, nor for a call that exits 64 |
+| 3 | Nothing was sent: `no_provider`, or `unavailable` with `turn_limit`. The room shows no search step for it, nor for a call that exits 64, when the call is the last command its step runs (docs/Chat-Activity.md) |
 | 64 | Bad options, a refused query, or not in Octo's turn |
 | 70 | The command itself failed (provider or link-only list, fixtures), so nothing was searched |
 

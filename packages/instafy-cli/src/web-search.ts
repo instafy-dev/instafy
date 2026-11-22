@@ -1038,17 +1038,18 @@ function runHasAiWebSearch(env: NodeJS.ProcessEnv): boolean {
 }
 /**
  * `no_provider` in a run that has the AI's own web search: this command searched nothing, and that search is the one
- * to use, for what the web-research skill allows. It may still answer that it did not search (the message has used
- * its searches, or search was switched off while the turn ran), so the words promise nothing of it and keep the way
- * on without a search.
+ * to use, as the web-research skill says. The words name no cost and no limit of it: when to search and how often is
+ * the skill's, whose limits hold only where the run's own instructions say each search costs the person credits (a
+ * person's own ChatGPT login searches on their own plan, and a message that asks for deeper research has more
+ * searches). It may still answer that it did not search (the message has used its searches, or search was switched off
+ * while the turn ran), so the words promise nothing of it and keep the way on without a search.
  */
 function ownSearchFirst(chain: string): string {
   const without = keyless(chain);
   return (
     "This space has no search key, so this command searched nothing. This run has the AI's own web search: use that " +
-    "instead, as the web-research skill says under \"The AI's own web search\" (where each search costs the person credits, " +
-    "only for what is fresh or to find a page no source names, at most 2 a message). If it answers that it did not " +
-    `search, ${without.charAt(0).toLowerCase()}${without.slice(1)}`
+    "instead, as the web-research skill says under \"The AI's own web search\". If it answers that it did not search, " +
+    `${without.charAt(0).toLowerCase()}${without.slice(1)}`
   );
 }
 function tellFor(status: SearchStatus, chain: string, ownSearch = false): string {
