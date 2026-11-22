@@ -1505,7 +1505,7 @@ fn texts_of(words: &[Word]) -> Vec<String> {
 /// tab", "the Laptops page's Laptop 12 link"), the name after "from" ("… linked from <page>"),
 /// and the name after "on" with a page word after it ("… on the News page"), past one word
 /// after "from" or "on" that is no name ("the"). A name is a run of names' words
-/// ([`Word::is_a_name`]), a name's "'s" inside it included ("Tom's Guide's site"); a page word at
+/// ([`Word::is_a_name`]), a name's "'s" inside it included ("Ann's Guide's site"); a page word at
 /// its end is none of it ("the Laptops page's"), and a name of single letters is none. "of" and
 /// "for" never name the page an entry is on: "independent reviews of <model>" is a wish.
 fn names_of_its_page(words: &[Word]) -> Vec<&[Word]> {
