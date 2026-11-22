@@ -78,8 +78,36 @@ export function resolveCredentialLabel(credential: ControllerCredentialListItem)
   return `Credential ${credential.id.slice(0, 8)}`;
 }
 
+/**
+ * The ChatGPT account a sign-in belongs to, as the end of its account id, so
+ * two sign-ins with the same label (each device sign-in is "ChatGPT") read
+ * differently wherever they are listed.
+ */
+function resolveCredentialAccountIdHint(
+  credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
+): string | null {
+  const metadata = credential.metadata as Record<string, unknown> | null | undefined;
+  const accountId = typeof metadata?.account_id === "string" ? metadata.account_id.trim() : "";
+  return credential.kind === "codex_auth_json" && accountId ? `acct …${accountId.slice(-6)}` : null;
+}
+
+/** What tells a credential apart in Your AI: its ChatGPT account, else for a sign-in its own id. */
+export function resolveCredentialAccountHint(
+  credential: Pick<ControllerCredentialListItem, "kind" | "id" | "metadata">,
+): string | null {
+  const accountHint = resolveCredentialAccountIdHint(credential);
+  if (accountHint) {
+    return accountHint;
+  }
+  if (credential.kind === "codex_auth_json") {
+    return `id …${credential.id.slice(0, 6)}`;
+  }
+  return null;
+}
+
 export function formatCredentialOptionLabel(credential: ControllerCredentialListItem): string {
   const label = resolveCredentialLabel(credential);
   const kind = formatCredentialKind(credential);
-  return `${label} · ${kind}`;
+  const accountHint = resolveCredentialAccountIdHint(credential);
+  return accountHint ? `${label} · ${kind} · ${accountHint}` : `${label} · ${kind}`;
 }
