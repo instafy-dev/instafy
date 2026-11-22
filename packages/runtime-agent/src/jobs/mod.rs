@@ -22917,9 +22917,10 @@ fn put_back_edit_messages(
         .collect()
 }
 
-/// The status that ends the step of a web search that searched nothing: it only opened or looked
-/// in a page, or every query it asked for was refused. Studio shows no step for it, as before it
-/// started (an older Studio a step that was tried, never one that searched).
+/// The status that ends the step of a web search that searched nothing: the AI's own search only
+/// opened or looked in a page, or every query it asked for was refused; or `instafy web search`
+/// sent nothing ([`activity_labels::search_command_sent_nothing`]). Studio shows no step for it,
+/// as before it started (an older Studio a step that was tried, never one that searched).
 const WEB_SEARCH_SEARCHED_NOTHING: &str = "declined";
 
 /// The message of a web search's step that names no words: its start, which shows "Searching the
@@ -23104,6 +23105,20 @@ fn extract_codex_messages(events: &[JsonValue]) -> Vec<JobMessage> {
                             .get("aggregated_output")
                             .cloned()
                             .unwrap_or(JsonValue::Null);
+                        // `instafy web search` that sent nothing (no search key in the space, the
+                        // turn's searches used, or a call it refused) ends as the AI's own search
+                        // that searched nothing does: Studio shows no step for it, where it read
+                        // "Tried searching the web" for a search there was nothing to send to.
+                        let status = if event_type == "item.completed"
+                            && activity_labels::search_command_sent_nothing(
+                                item.get("command_argv"),
+                                command,
+                                exit_code.as_i64(),
+                            ) {
+                            WEB_SEARCH_SEARCHED_NOTHING
+                        } else {
+                            status
+                        };
                         let mut metadata = json!({
                             "kind": "codex_command_execution",
                             "itemId": item_id,
@@ -43995,6 +44010,103 @@ mod tests {
                 assert!(!stored.contains(result_text), "{result_text} in {stored}");
             }
         }
+    }
+
+    /// `instafy web search` that sent nothing ends its step as the AI's own search that searched
+    /// nothing does (`declined`, which Studio shows as no step): with no search key in the space
+    /// or the turn's searches used up it exits 3, and a call it refused exits 64. Turns with no
+    /// key showed "Searching the web" and then "Tried searching the web" for a search there was
+    /// nothing to send to (a local test, Nov 20). A command Codex itself refused arrives
+    /// `declined` already. A search that was sent keeps its step, whatever it found, and no
+    /// command ever counts among the web searches a job is charged for.
+    #[test]
+    fn a_search_command_that_sent_nothing_ends_as_a_search_that_searched_nothing() {
+        use crate::managed_web_search::{SEARCHES_PER_MESSAGE, allowance_for_job};
+
+        let script = "instafy web search \"vacuum price today\" --json";
+        let step = |id: &str, script: &str, status: &str, exit: JsonValue| {
+            let argv = json!(["/bin/bash", "-lc", script]);
+            let started = json!({"type": "item.started", "item": {
+                "id": id, "type": "command_execution", "command": format!("/bin/bash -lc {script}"),
+                "command_argv": argv, "status": "in_progress", "aggregated_output": "",
+                "exit_code": JsonValue::Null,
+            }});
+            let mut completed = started.clone();
+            completed["type"] = json!("item.completed");
+            completed["item"]["status"] = json!(status);
+            completed["item"]["exit_code"] = exit;
+            completed["item"]["aggregated_output"] = json!(
+                "web search \"vacuum price today\" · no search key in this space\n(search results are not kept)"
+            );
+            [started, completed]
+        };
+        let ends = |events: &[JsonValue]| {
+            let messages = extract_codex_messages(events);
+            assert_eq!(messages.len(), 2, "{messages:?}");
+            let metadata = |index: usize| messages[index].metadata.clone().expect("metadata");
+            // It reads "Searching the web" while it runs, as any call of the command does.
+            assert_eq!(metadata(0)["status"], json!("in_progress"));
+            assert_eq!(metadata(0)["activity"]["key"], json!("instafy/web-search"));
+            for message in &messages {
+                assert_eq!(message.message_type.as_deref(), Some("command_execution"));
+            }
+            assert_eq!(metadata(1)["itemId"], metadata(0)["itemId"]);
+            assert_eq!(metadata(1)["activity"]["key"], json!("instafy/web-search"));
+            metadata(1)
+        };
+
+        // No search key (or the turn's searches used), and a call the command refused.
+        for exit in [3, 64] {
+            let end = ends(&step("call-1", script, "failed", json!(exit)));
+            assert_eq!(end["status"], json!(WEB_SEARCH_SEARCHED_NOTHING), "{exit}");
+            assert_eq!(end["exitCode"], json!(exit));
+        }
+        // A command Codex refused to run.
+        let refused = ends(&step("call-2", script, "declined", json!(-1)));
+        assert_eq!(refused["status"], json!(WEB_SEARCH_SEARCHED_NOTHING));
+        // A search that was sent: results, none, or no provider that answered.
+        for (status, exit) in [("completed", 0), ("failed", 2), ("failed", 70)] {
+            let end = ends(&step("call-3", script, status, json!(exit)));
+            assert_eq!(end["status"], json!(status), "{exit}");
+        }
+        // A step that also read a page, or whose exit may be another command's, stays as it
+        // reads: jq exits 3 when it can't read its filter, after a search that was sent.
+        for other in [
+            "instafy web search ramen && instafy web read https://example.org/ramen",
+            "instafy web search ramen | head -5",
+            "instafy web search ramen --json > r.json && jq -r '.results[] | {url' r.json",
+            "set -e; instafy web search ramen --json > r.json; python3 summarize.py r.json",
+        ] {
+            let messages = extract_codex_messages(&step("call-4", other, "failed", json!(3)));
+            let end = messages[1].metadata.as_ref().expect("metadata");
+            assert_eq!(end["status"], json!("failed"), "{other}");
+        }
+
+        // Nothing is charged for it: a job's "Web search" usage counts only what the AI's own
+        // search tool searched, and a command adds nothing to it.
+        let job = Uuid::new_v4();
+        let _allowance = allowance_for_job(job, None, SEARCHES_PER_MESSAGE);
+        let steps = extract_codex_messages(&step("call-5", script, "failed", json!(3)));
+        assert_eq!(steps.len(), 2);
+        let execution = JobExecution {
+            summary: "I couldn't check today's price.".to_string(),
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        let result = attach_job_receipts(Ok(execution), &TaskUsage::default(), job).unwrap();
+        assert!(
+            result
+                .artifacts
+                .iter()
+                .all(|artifact| artifact["kind"] != json!("ai/web-search-usage")),
+            "{:?}",
+            result.artifacts
+        );
     }
 
     /// A search the AI ran with its own web search is one search step in the room: "Searching the

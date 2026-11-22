@@ -395,6 +395,206 @@ test("card posts no card for a page that loads files from outside its folder, as
   }
 });
 
+// A failing check never holds the card back: it ends with the card's command, so a page with an item still to add is
+// one the person can open. Two findings are the exception, and their card waits. One is files loaded from outside the
+// page's folder (above). The other is a typed "checked <date>" or "seen <date>": a page to share went out saying a
+// journey planner nobody ran was "checked 20 Nov 2026", after its check had named that line twice and ended with the
+// card's command each time. Its fix is always to delete the words, so while they are there the check names no card
+// command, and the card step without the check posts none and answers with the check's own lines: a page written by
+// hand with no starter, which no check ran on, got its card from that step with "Specs are checked 20 Nov 2026 on …"
+// on it. Every other finding still ends with the card's command.
+test("typed \"checked <date>\" words hold the card: the check names no card command, the card step posts none, and any other finding still gets its command", () => {
+  const s = space();
+  try {
+    const typed = (said) => `(function () {
+  "use strict";
+  var planner = "https://transit.example/planner?from=Main%20station&to=Museum";
+  site.start({ data: null, render: function () {
+    site.head({ title: "A visit to the museum", lede: "Opening hours and how to get there." });
+    document.getElementById("list").replaceChildren(
+      site.h("h2", { text: "Opening hours" }),
+      site.h("p", { text: "Thursday: 10 am–8 pm" }),
+      site.h("footer", { "class": "notes" }, site.h("p", {}, "Route planner · ", site.link(planner, "City timetable"), "${said}"))
+    );
+  } });
+})();
+`;
+    const visit = path.join(s.project, "sites", "visit");
+    s.run(["init", "sites/visit", "--starter", "blank"]);
+    fs.writeFileSync(path.join(visit, "app.js"), typed(" · checked 20 Nov 2026; route details not confirmed"));
+    const expect = ["--expect", "Opening hours"];
+    const waits = "next: delete the typed words named above, then check again: the page's card waits until they are gone";
+    const line = '- app.js: delete "checked 20 Nov 2026", from "Route planner · City timetable · checked 20 Nov 2026; route details not confirmed".';
+    const rewording = "Rewording a line around those words never passes: only deleting them does.";
+    const hold = 'No card to post: it says "checked <date>" or "seen <date>" in typed words.';
+
+    const failed = s.run(["check", "sites/visit", ...expect]);
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.ok(failed.stdout.startsWith(`TYPED: 1 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:\n${line}\n`), failed.stdout);
+    assert.doesNotMatch(failed.stdout, /post its card|preview open/);
+    assert.ok(failed.stdout.includes(`\n${rewording}\n`), failed.stdout);
+    assert.equal(lastLine(failed.stdout), waits);
+    const json = JSON.parse(s.run(["check", "sites/visit", ...expect, "--json"]).stdout);
+    assert.deepEqual([json.ok, json.card, json.next, json.typed.length], [false, undefined, waits.slice("next: ".length), 1]);
+    // with nothing named to check, the same
+    const bare = s.run(["check", "sites/visit"]);
+    assert.equal(bare.status, 1, bare.stdout);
+    assert.doesNotMatch(bare.stdout, /post its card|preview open/);
+    assert.deepEqual(s.cards(), []);
+
+    // the card step without the check: no card, and the check's own lines
+    const held = s.run(["card", "sites/visit", "--json"]);
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.deepEqual(JSON.parse(held.stdout), { posted: false, reason: 'it says "checked <date>" or "seen <date>" in typed words',
+      typed: [{ file: "app.js", line: "Route planner · City timetable · checked 20 Nov 2026; route details not confirmed", words: ["checked 20 Nov 2026"] }] });
+    const words = s.run(["card", "sites/visit"]);
+    assert.equal(words.status, 2, words.stdout + words.stderr);
+    assert.deepEqual(words.stdout.trimEnd().split("\n"), [hold,
+      'TYPED: 1 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:', line, words.stdout.split("\n")[3],
+      rewording, waits]);
+    assert.match(words.stdout.split("\n")[3], /^Only site\.trust\(fact\) and site\.cite\(fact\) write those words, /);
+    assert.deepEqual(s.cards(), []);
+
+    // the words deleted, the planner linked by its name: the check passes and posts the card
+    fs.writeFileSync(path.join(visit, "app.js"), typed(" · not run"));
+    const passed = s.run(["check", "sites/visit", ...expect]);
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout, /TYPED/);
+    assert.deepEqual(s.cards(), [{ cwd: fs.realpathSync(visit), args: cardArgs("A visit to the museum") }]);
+
+    // a page written by hand, with no starter and no check: the card step reads it the same way
+    const hand = path.join(s.project, "sites", "tablets");
+    fs.mkdirSync(hand);
+    const page = (note) => `<!doctype html>\n<title>Two tablets compared</title>\n<main><h1>Two tablets compared</h1>\n<table><tr><th>Display</th><td>10.3-inch</td><td>7.3-inch</td></tr></table>\n<p class="note">${note}</p></main>\n`;
+    fs.writeFileSync(path.join(hand, "index.html"), page('Specs are checked 20 Nov 2026 on <a href="https://maker.example/compare">the maker\'s comparison</a>'));
+    const byHand = s.run(["card", "sites/tablets"]);
+    assert.equal(byHand.status, 2, byHand.stdout + byHand.stderr);
+    assert.deepEqual(byHand.stdout.split("\n").slice(0, 3), [hold,
+      'TYPED: 1 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:',
+      "- index.html: delete \"checked 20 Nov 2026\", from \"Specs are checked 20 Nov 2026 on the maker's comparison\"."]);
+    assert.doesNotMatch(byHand.stdout, /check before this one/);
+    assert.equal(s.cards().length, 1);
+    fs.writeFileSync(path.join(hand, "index.html"), page('Specs from <a href="https://maker.example/compare">the maker\'s comparison</a>'));
+    assert.equal(JSON.parse(s.run(["card", "sites/tablets", "--json"]).stdout).posted, true);
+    assert.deepEqual(s.cards().map((card) => card.cwd), [visit, hand].map((dir) => fs.realpathSync(dir)));
+
+    // any other finding still ends with the card's command: an item the page doesn't show, a source line that links
+    // nothing, both at once
+    const hours = path.join(s.project, "sites", "hours");
+    s.run(["init", "sites/hours", "--starter", "blank"]);
+    fs.writeFileSync(path.join(hours, "app.js"), typed(" · not run").replace('site.h("footer"', 'site.h("p", { "class": "trust" }, "Source: the museum\'s desk"),\n      site.h("footer"'));
+    const other = s.run(["check", "sites/hours", "--expect", "Opening hours, Night bus"]);
+    assert.equal(other.status, 1, other.stdout + other.stderr);
+    assert.match(other.stdout, /^MISSING: .*Night bus\.$/m);
+    assert.match(other.stdout, /^UNLINKED: 1 source line\(s\) link no page: "Source: the museum's desk" \(app\.js\)\.$/m);
+    assert.equal(lastLine(other.stdout), `next: post its card: (cd sites/hours && ${OPEN})`);
+    // and a value of a comparison with no page or day
+    const options = path.join(s.project, "sites", "options");
+    s.run(["init", "sites/options", "--starter", "compare"]);
+    const data = JSON.parse(fs.readFileSync(path.join(options, "data.json"), "utf8"));
+    const [name, facts] = [data.items[0].name, Object.keys(data.items[0].facts ?? {})];
+    assert.ok(facts.length, "the compare starter's first option has facts");
+    data.items[0].facts[facts[0]] = { v: "4.4 of 5" };
+    fs.writeFileSync(path.join(options, "data.json"), JSON.stringify(data, null, 2));
+    const values = s.run(["check", "sites/options", "--expect", name]);
+    assert.equal(values.status, 1, values.stdout + values.stderr);
+    assert.match(values.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
+    assert.doesNotMatch(values.stdout, /TYPED/);
+    assert.equal(lastLine(values.stdout), `next: post its card: (cd sites/options && ${OPEN})`);
+    assert.equal(JSON.parse(s.run(["check", "sites/options", "--expect", name, "--json"]).stdout).next, `post its card: (cd sites/options && ${OPEN})`);
+    assert.equal(s.cards().length, 2);
+  } finally {
+    s.done();
+  }
+});
+
+// A page whose only typed words were "seen 20 Nov" was held with the reason 'it says "checked <date>"', and the line
+// under the reply told its person of a line that says "checked", which the page doesn't have. The reason names both.
+test("a page held for a typed \"seen <date>\" is held for what it says: the reason names both words", () => {
+  const s = space();
+  try {
+    const prices = path.join(s.project, "sites", "prices");
+    fs.mkdirSync(prices, { recursive: true });
+    fs.writeFileSync(path.join(prices, "index.html"), "<!doctype html>\n<title>Two tablets</title>\n<main><h1>Two tablets</h1><p>€549 at Shop · seen 20 Nov</p></main>\n");
+    const held = s.run(["card", "sites/prices", "--json"]);
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.deepEqual(JSON.parse(held.stdout), { posted: false, reason: 'it says "checked <date>" or "seen <date>" in typed words',
+      typed: [{ file: "index.html", line: "€549 at Shop · seen 20 Nov", words: ["seen 20 Nov"] }] });
+    assert.equal(s.run(["card", "sites/prices"]).stdout.split("\n")[0], 'No card to post: it says "checked <date>" or "seen <date>" in typed words.');
+    assert.deepEqual(s.cards(), []);
+  } finally {
+    s.done();
+  }
+});
+
+// A page a turn made, as it was saved (tests/fixtures/typed-captions/app.js): its hours and its tip came from pages
+// that were read, and its route from a journey planner nobody ran, and each line had "checked 20 Nov 2026" typed after
+// it. Its check named those lines and ended with the card's command; the turn reworded them, then ran the check and the
+// card's command joined by ";", and the card went out. Now the check names the words to delete and no card command,
+// says on each run that rewording never passes, and the card step answers with the same lines. Drawn by the
+// starter's own site.cite and site.trust, with the planner linked by its name and "not run", the page passes and posts
+// its card.
+test("a saved page with typed \"checked\" captions fails its check with no card command, and passes once site.cite, site.trust and \"not run\" draw them", () => {
+  const s = space();
+  try {
+    const dir = path.join(s.project, "sites", "museum");
+    s.run(["init", "sites/museum", "--starter", "blank"]);
+    const saved = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "typed-captions", "app.js"), "utf8");
+    fs.writeFileSync(path.join(dir, "app.js"), saved);
+    const expect = ["--expect", "Opening hours, From the main station"];
+    const waits = "next: delete the typed words named above, then check again: the page's card waits until they are gone";
+    const again = "Rewording a line around those words never passes: only deleting them does.";
+    const named = (said = "") => [
+      'TYPED: 3 line(s) say "checked <date>" or "seen <date>" in typed words. Delete those words from each:',
+      '- app.js: delete "checked 20 Nov 2026 on museum.example", from "Tip: Choose Thursday for the latest regular closing time (8 pm). The museum · checked 20 Nov 2026 on museum.example".',
+      `- app.js: delete "checked 20 Nov 2026", from "Hours and distance · The museum on city.example · checked 20 Nov 2026${said}".`,
+      `- app.js: delete "checked 20 Nov 2026", from "Route planner · City timetable · checked 20 Nov 2026${said}; route details not confirmed".`,
+    ];
+
+    const failed = s.run(["check", "sites/museum", ...expect]);
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.deepEqual(failed.stdout.split("\n").slice(0, 4), named());
+    assert.match(failed.stdout, /^Only site\.trust\(fact\) and site\.cite\(fact\) write those words, .* says "not run", with no day\. /m);
+    // it names no card command, and quotes nothing the helpers draw
+    assert.doesNotMatch(failed.stdout, /post its card|preview open|maker\.com|↗ ·/);
+    assert.equal(lastLine(failed.stdout), waits);
+    const json = JSON.parse(s.run(["check", "sites/museum", ...expect, "--json"]).stdout);
+    assert.deepEqual([json.ok, json.card, json.next, json.typed.length], [false, undefined, waits.slice("next: ".length), 3]);
+    assert.deepEqual(s.cards(), []);
+
+    // reworded as that turn did: the same lines, and the second check says again that rewording never passes
+    fs.writeFileSync(path.join(dir, "app.js"), saved.replaceAll('" · checked 20 Nov 2026', '" · checked 20 Nov 2026 in the browser'));
+    const reworded = s.run(["check", "sites/museum", ...expect]);
+    assert.equal(reworded.status, 1, reworded.stdout + reworded.stderr);
+    assert.deepEqual(reworded.stdout.split("\n").slice(0, 4), named(" in the browser"));
+    assert.ok(reworded.stdout.includes(`\n${again}\n`), reworded.stdout);
+    assert.equal(lastLine(reworded.stdout), waits);
+    // the card's step without the check: no card, the same lines
+    const card = s.run(["card", "sites/museum"]);
+    assert.equal(card.status, 2, card.stdout + card.stderr);
+    assert.deepEqual(card.stdout.split("\n").slice(0, 5), ['No card to post: it says "checked <date>" or "seen <date>" in typed words.', ...named(" in the browser")]);
+    assert.equal(lastLine(card.stdout), waits);
+    assert.deepEqual(s.cards(), []);
+
+    // the starter's own helpers draw what was read, and the planner nobody ran is linked by its name, "not run"
+    const drawn = saved
+      .replace('site.link("https://museum.example/en/plan-your-visit/", "The museum · checked 20 Nov 2026 on museum.example")',
+        'site.cite({ src: "The museum", url: "https://museum.example/en/plan-your-visit/", date: "2026-11-20", viewer: "shared browser" })')
+      .replace('"Hours and distance · ", site.link("https://city.example/en/visit/culture/museum", "The museum on city.example"), " · checked 20 Nov 2026"',
+        '"Hours and distance · ", site.trust({ v: "Thursday until 8 pm", src: "The museum", url: "https://city.example/en/visit/culture/museum", date: "2026-11-20", viewer: "shared browser" })')
+      .replace('" · checked 20 Nov 2026; route details not confirmed"', '" · not run"');
+    assert.doesNotMatch(drawn, /checked 20 Nov/);
+    fs.writeFileSync(path.join(dir, "app.js"), drawn);
+    const passed = s.run(["check", "sites/museum", ...expect]);
+    assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout, /TYPED|UNLINKED|Rewording/);
+    assert.match(passed.stdout, /^Posted its card: ran \(cd sites\/museum && instafy preview open /m);
+    assert.deepEqual(s.cards().map((posted) => posted.cwd), [fs.realpathSync(dir)]);
+  } finally {
+    s.done();
+  }
+});
+
 test("a card's command that fails leaves the check passed, and names the command to run again", () => {
   const s = space();
   try {
