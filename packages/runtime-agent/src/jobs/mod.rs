@@ -18148,9 +18148,10 @@ struct UnreadPagesRead {
 /// needs that it didn't open (`browser_hand_back::UNREAD_LINE`). When it names any, the runtime
 /// runs the turn once more on its own thread, told only those pages, before the build, and adds
 /// what that second pass read to the turn's answer; the second pass's own unread line starts no
-/// third. Only for an entry a pass can open, one with its own address or a tab or link on a page
-/// the turn read: any other is a value the turn didn't find, which starts no pass and joins its
-/// missing line (`browser_hand_back::take_pages_to_read`). Never after a Stop, nor when the turn
+/// third. Only for an entry a pass can open, one with its own address or a page, tab or link it
+/// names with a page the turn read: any other is a value the turn didn't find, which starts no
+/// pass and joins its missing line, until a second pass's own missing line names what is still
+/// missing (`browser_hand_back::take_pages_to_read`). Never after a Stop, nor when the turn
 /// stopped for the person (a sign-in or cookie
 /// pause, a step's approval that ended it, a secret) or the browser refused one of its steps as
 /// theirs: the page needs the person. Nor when its answer, as the turn wrote it, holds no finding
@@ -18185,8 +18186,8 @@ async fn read_the_unread_pages(
         &turn.pages,
         &turn.tried,
     );
-    // Only the entries a pass can open: one with no address, and no tab or link on a page the
-    // turn read, is a value it didn't find, which its missing line now names. Without its
+    // Only the entries a pass can open: one with no address that names no page, tab or link with
+    // a page the turn read is a value it didn't find, which its missing line now names. Without its
     // finding lines nothing says which pages it read: the wrap-up pass asks for them and for
     // its unread line again, which is read here then, so this one is only taken out.
     let pages = if wrote_lines {

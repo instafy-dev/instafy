@@ -2080,8 +2080,9 @@ turn does, without the line, and one that read no page hands its build the
 message; that build makes the change from what was read and writes "not checked"
 in place of what it didn't find where only that step would give a value,
 without trying it again or getting its values another way, and the runtime
-ends the build's reply with the same line. Neither turn is asked to say which
-step didn't run: the line says it, once, the same every time. Every other end (a pause
+ends the build's reply with the same line. Neither turn is asked to say that
+the step wasn't done: each is told that Instafy says so under its reply, and
+the line says it once, the same every time. Every other end (a pause
 the person continues in the browser, a safety stop, the browser gone, and any
 end under an older controller, which would refuse the hand-back of a part that
 posted no words) replaces the turn's words with its line and holds the build
@@ -3599,12 +3600,20 @@ unless the policy is `"covered"`.
   below first, which also asks for its unread line, and the second pass then
   reads the pages that line names. A page its finding lines list already, read or
   stopped at, is never one the second pass is told to read. Nor is an entry
-  with no address that names no tab or link on a page the turn read (by that
-  page's title or site, as "<page>'s <link> link" or "linked from <page>"): it
-  is a value the turn didn't find, so it starts no pass and joins the turn's
-  missing line. Sent to the pass as pages to read, three such entries
-  ("independent reviews of <model>") had it open a search engine nobody named,
-  type the search and leave the person a prompt for it. The second pass's
+  with no address that doesn't name its page, tab or link with a page the turn
+  read: as "<page>'s <link> link", "… linked from <page>" or "… on the <page>
+  page", where the turn's lines list a page that goes by that name (words of
+  its title in a row, its site's name, or, for a page it lists, words of one
+  of its facts). Such an entry ("independent reviews of <model>", "review
+  links for <model>") is a value the turn didn't find, so it starts no pass
+  and joins the turn's missing line, cut after a whole word. Sent to the pass
+  as pages to read, three such entries had it open a search engine nobody
+  named, type the search and leave the person a prompt for it. Only when the
+  turn's lines list no page at all (its one line was an address the browser
+  refused it) does an entry that names its page that way go to the pass with
+  nothing to hold the name to. Passes told every entry went to pages turns
+  named in those shapes: a site's news releases by the site's name, a model's
+  tab by its one word or one digit, the other models a page lists. The second pass's
   own unread line starts no third pass, and it ends with its own missing line
   too, told to name each value still missing after both passes: when its
   findings join the turn's, that line replaces the first pass's, which stays

@@ -1313,13 +1313,16 @@ pub(super) fn take_unread_pages(summary: &mut String) -> Vec<String> {
 /// (`jobs::read_the_unread_pages`): [`take_unread_pages`], without each entry that is no page a
 /// pass can open ([`is_a_page_to_open`]). Such an entry is a value the turn didn't find, as its
 /// line says ([`UNREAD_LINE`]): it starts no pass, and the answer's missing line names it
-/// ([`name_missing`]). Every entry once went to the pass as a page to "read only": a fill-in
-/// whose only gap was reviews had its search address refused, ended as told, and named three
-/// wishes unread ("independent reviews of <model>"); its pass then opened a search engine nobody
-/// named by its home page, typed the search and left the person a prompt for it, which ran out
-/// (a local test, Nov 20).
+/// ([`name_missing`]). A second pass's own missing line replaces that line, as it replaces every
+/// name of the first's ([`add_the_second_pass`]): it runs on the turn's thread, its first answer
+/// in view. Every entry once went to the pass as a page to "read only": a fill-in whose only gap
+/// was reviews had its search address refused, ended as told, and named three wishes unread
+/// ("independent reviews of <model>"); its pass then opened a search engine nobody named by its
+/// home page, typed the search and left the person a prompt for it, which ran out (a local
+/// test, Nov 20).
 pub(super) fn take_pages_to_read(summary: &mut String) -> Vec<String> {
     put_on_own_lines(summary);
+    let listed = summary.lines().any(|line| finding_line(line).is_some());
     let read: Vec<PageRead> = summary
         .lines()
         .filter(|line| finding_line(line) == Some(true))
@@ -1328,25 +1331,43 @@ pub(super) fn take_pages_to_read(summary: &mut String) -> Vec<String> {
         .collect();
     let (pages, values): (Vec<String>, Vec<String>) = take_unread_pages(summary)
         .into_iter()
-        .partition(|entry| is_a_page_to_open(entry, &read));
+        .partition(|entry| is_a_page_to_open(entry, listed.then_some(read.as_slice())));
     name_missing(summary, &values);
     pages
 }
 
+/// What an unread entry names when it is a page a pass can open ([`is_a_page_to_open`]): a page,
+/// a tab, a link, a site or a section of one.
+const PAGE_WORDS: [&str; 14] = [
+    "page", "pages", "homepage", "tab", "tabs", "link", "links", "linked", "site", "sites",
+    "website", "websites", "section", "sections",
+];
+
 /// Whether an unread entry is a page a second pass can open, as the unread line asks of each
-/// ([`UNREAD_LINE`]): it carries its own address ([`carries_an_address`]), or it names a tab or
-/// link, in the line's own two words for one ("linked from <page>" too), on a page the turn's
-/// finding lines list as read ([`PageRead::named_in`]). The words are all the runtime has of it,
-/// so this reads the shape the line asks for ("<page>'s <link> link") and nothing of a topic.
-fn is_a_page_to_open(entry: &str, read: &[PageRead]) -> bool {
+/// ([`UNREAD_LINE`]): it carries its own address ([`carries_an_address`]), or it names a page, a
+/// tab or a link ([`PAGE_WORDS`]) with the name of the page or site it is on
+/// ([`names_of_its_page`]: "<page>'s <link> link", "… linked from <page>"), and a page the
+/// turn's finding lines list as read goes by that name ([`PageRead::goes_by`]). An entry that
+/// gives its page no name is a wish ("independent reviews of <model>", "review links for
+/// <model>"), and so is one that names no page the turn read, such as a page that stopped it.
+/// With no page in its finding lines at all (`read` None: its only line was an address the
+/// browser refused it), nothing holds a name to a page, and an entry that gives one goes to the
+/// pass as the turn named it, as any did before: the pages such a turn names are the ones it was
+/// kept from. The words are all the runtime has of an entry, so this reads the shape the line
+/// asks for and nothing of a topic. Passes told every entry went to the pages turns named this
+/// way: a site's news releases as "<site>'s individual news release pages for …", the specs of a
+/// model whose page they read as "<model>'s linked Technical Specifications tab", and the other
+/// models a page listed as "<maker>'s <model> camera product pages for the other two" (a local
+/// test, Nov 20).
+fn is_a_page_to_open(entry: &str, read: Option<&[PageRead]>) -> bool {
     if carries_an_address(entry) {
         return true;
     }
-    let words = words_of_a_name(entry);
-    words
-        .iter()
-        .any(|word| matches!(word.as_str(), "tab" | "tabs" | "link" | "links" | "linked"))
-        && read.iter().any(|page| page.named_in(&words))
+    let words = words_of(entry);
+    words.iter().any(Word::is_a_page_word)
+        && names_of_its_page(&words)
+            .into_iter()
+            .any(|name| read.is_none_or(|read| read.iter().any(|page| page.goes_by(name))))
 }
 
 /// Whether an unread entry carries an address: one of its words is an `http(s)` address, or a
@@ -1376,21 +1397,176 @@ fn carries_an_address(entry: &str) -> bool {
     })
 }
 
-/// The words of a page's or an entry's name, in lower case, without single letters (a
-/// possessive's "s").
-fn words_of_a_name(name: &str) -> Vec<String> {
-    name.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.chars().count() > 1)
-        .map(str::to_lowercase)
+/// A word of an unread entry, or of a page's title or facts, as [`is_a_page_to_open`] reads it.
+#[derive(Clone, Debug, PartialEq)]
+enum Word {
+    /// A run of letters and digits in lower case, and whether it is a name's: a capital or a digit
+    /// as the turn wrote it ("HERO", "Laptop", "12"), never "the", "page" or "reviews".
+    Text(String, bool),
+    /// The "'s" after a name ("Laptop 12's").
+    Of,
+    /// Punctuation that ends a phrase: a comma, a colon, a bracket, a quote, or a dash or a bar
+    /// on its own.
+    End,
+}
+
+impl Word {
+    fn is_a_name(&self) -> bool {
+        matches!(self, Word::Text(_, true))
+    }
+
+    fn is_a_page_word(&self) -> bool {
+        matches!(self, Word::Text(text, _) if PAGE_WORDS.contains(&text.as_str()))
+    }
+
+    /// The word as names are compared: its text in lower case, or "'s".
+    fn key(&self) -> &str {
+        match self {
+            Word::Text(text, _) => text,
+            Word::Of => "'s",
+            Word::End => "",
+        }
+    }
+}
+
+/// The words of `text`, in order ([`Word`]).
+fn words_of(text: &str) -> Vec<Word> {
+    let ends_a_phrase = |c: char| {
+        matches!(
+            c,
+            ',' | ';'
+                | ':'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '"'
+                | '\''
+                | '|'
+                | '-'
+                | '\u{00B7}'
+                | '\u{2013}'
+                | '\u{2014}'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '\u{201C}'
+                | '\u{201D}'
+        )
+    };
+    let mut words = Vec::new();
+    for raw in text.split_whitespace() {
+        let Some(start) = raw.find(char::is_alphanumeric) else {
+            if raw.chars().any(ends_a_phrase) {
+                words.push(Word::End);
+            }
+            continue;
+        };
+        let end = raw
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_alphanumeric())
+            .map_or(raw.len(), |(at, c)| at + c.len_utf8());
+        let core = &raw[start..end];
+        let name = ["'s", "'S", "\u{2019}s", "\u{2019}S"]
+            .iter()
+            .find_map(|mark| core.strip_suffix(*mark));
+        if raw[..start].chars().any(ends_a_phrase) {
+            words.push(Word::End);
+        }
+        for run in name.unwrap_or(core).split(|c: char| !c.is_alphanumeric()) {
+            if !run.is_empty() {
+                let is_a_name = run.chars().any(|c| c.is_uppercase() || c.is_numeric());
+                words.push(Word::Text(run.to_lowercase(), is_a_name));
+            }
+        }
+        if name.is_some() {
+            words.push(Word::Of);
+        }
+        if raw[end..].chars().any(ends_a_phrase) {
+            words.push(Word::End);
+        }
+    }
+    words
+}
+
+/// The words of `words` without "'s" and punctuation.
+fn texts_of(words: &[Word]) -> Vec<String> {
+    words
+        .iter()
+        .filter_map(|word| match word {
+            Word::Text(text, _) => Some(text.clone()),
+            _ => None,
+        })
         .collect()
 }
 
-/// A page a finding line lists as read, as an unread entry may name it ([`is_a_page_to_open`]):
-/// by its title, or the last part of its address when the line gives no title, each part between
-/// the title's separators ("Laptop 12 | Maker") as words; and by its site's own name.
+/// The names an unread entry gives the page or site it is on, as the unread line asks
+/// ([`UNREAD_LINE`]: "<page>'s <link> link"): the name before each "'s" ("Laptop 12's Specs
+/// tab", "the Laptops page's Laptop 12 link"), the name after "from" ("… linked from <page>"),
+/// and the name after "on" with a page word after it ("… on the News page"), past one word
+/// after "from" or "on" that is no name ("the"). A name is a run of names' words
+/// ([`Word::is_a_name`]), a name's "'s" inside it included ("Tom's Guide's site"); a page word at
+/// its end is none of it ("the Laptops page's"), and a name of single letters is none. "of" and
+/// "for" never name the page an entry is on: "independent reviews of <model>" is a wish.
+fn names_of_its_page(words: &[Word]) -> Vec<&[Word]> {
+    let mut names: Vec<&[Word]> = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        match word {
+            Word::Of => {
+                let mut end = at;
+                while end > 0 && words[end - 1].is_a_page_word() {
+                    end -= 1;
+                }
+                let mut start = end;
+                while start > 0
+                    && (words[start - 1].is_a_name()
+                        || (words[start - 1] == Word::Of
+                            && start > 1
+                            && words[start - 2].is_a_name()))
+                {
+                    start -= 1;
+                }
+                names.push(&words[start..end]);
+            }
+            Word::Text(text, false) if text == "from" || text == "on" => {
+                let mut start = at + 1;
+                if words.get(start).is_some_and(|next| {
+                    matches!(next, Word::Text(_, false)) && !next.is_a_page_word()
+                }) {
+                    start += 1;
+                }
+                let mut end = start;
+                while words
+                    .get(end)
+                    .is_some_and(|next| next.is_a_name() || *next == Word::Of)
+                {
+                    end += 1;
+                }
+                let then = words.get(end);
+                while end > start && words[end - 1] == Word::Of {
+                    end -= 1;
+                }
+                if text == "from" || then.is_some_and(Word::is_a_page_word) {
+                    names.push(&words[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    names.retain(|name| {
+        name.iter()
+            .any(|word| matches!(word, Word::Text(text, _) if text.chars().count() > 1))
+    });
+    names
+}
+
+/// A page a finding line lists as read, by what an unread entry may call it
+/// ([`PageRead::goes_by`]): the words of its title, or of the last part of its address when the
+/// line gives no title, in order; its site's own name; and the words of each of its facts.
 struct PageRead {
-    names: Vec<Vec<String>>,
+    title: Vec<String>,
     site: Vec<String>,
+    facts: Vec<Vec<String>>,
 }
 
 impl PageRead {
@@ -1402,51 +1578,72 @@ impl PageRead {
             .and_then(|url| url.path_segments()?.rfind(|part| !part.is_empty()))
             .unwrap_or_default();
         let title = text("title").trim();
-        // A separator stands alone between a title's parts ("|", "-", "·"), or ends one (":"). A
-        // word of one letter ("a") is no separator, though it is no word of the name either.
-        let mut names: Vec<Vec<String>> = vec![Vec::new()];
-        for word in (if title.is_empty() { last_part } else { title }).split_whitespace() {
-            let words = words_of_a_name(word);
-            let ends_a_part = !word.chars().any(char::is_alphanumeric) || word.ends_with(':');
-            if let Some(name) = names.last_mut() {
-                name.extend(words);
-            }
-            if ends_a_part {
-                names.push(Vec::new());
-            }
-        }
-        names.retain(|name| !name.is_empty());
-        // The site's own name: its host's parts but the last, without `www`.
+        let title = words_of(if title.is_empty() { last_part } else { title })
+            .iter()
+            .filter(|word| **word != Word::End)
+            .map(|word| word.key().to_string())
+            .collect();
+        // The site's own name: its host's parts but the last, without `www` or a hyphen.
         let host = url
             .as_ref()
             .and_then(|url| url.host_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let mut site: Vec<String> = host.split('.').map(str::to_string).collect();
+        let mut site: Vec<String> = host.split('.').map(|part| part.replace('-', "")).collect();
         site.pop();
         site.retain(|part| part.chars().count() > 2 && part != "www");
-        Self { names, site }
+        let facts = object
+            .get("facts")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .map(|fact| texts_of(&words_of(fact)))
+            .collect();
+        Self { title, site, facts }
     }
 
-    /// Whether an entry's words name this page: two words of one part of its name in a row, a
-    /// part that is one word (of three letters or more), or its site's name.
-    fn named_in(&self, words: &[String]) -> bool {
-        let in_a_row = |pair: &[String]| words.windows(2).any(|window| window == pair);
-        self.names.iter().any(|name| match name.as_slice() {
-            [one] => one.chars().count() > 2 && words.contains(one),
-            name => name.windows(2).any(in_a_row),
-        }) || self.site.iter().any(|part| words.contains(part))
+    /// Whether the page goes by `name`, a name an unread entry gives the page it is on
+    /// ([`names_of_its_page`]): its words are in a row in the page's title, one word or a model's
+    /// one digit included ("Kit" in "Maker Kit (our smallest camera)", "Phone 9" in "Maker Phone
+    /// 9 - Maker Store"), make up its site's name or start with it ("The Reviewer" for
+    /// thereviewer.example, "Maker Kit" for maker.example), or, two words or more, are all in
+    /// one of its facts, as a page it lists ("Laptop 16" in "Lists the Laptop 12, 13 and 16.").
+    fn goes_by(&self, name: &[Word]) -> bool {
+        let keys: Vec<&str> = name.iter().map(Word::key).collect();
+        let texts = texts_of(name);
+        (!keys.is_empty()
+            && self
+                .title
+                .windows(keys.len())
+                .any(|window| window.iter().map(String::as_str).eq(keys.iter().copied())))
+            || texts.first().is_some_and(|first| {
+                self.site
+                    .iter()
+                    .any(|site| *site == texts.concat() || site == first)
+            })
+            || (texts.len() > 1
+                && self
+                    .facts
+                    .iter()
+                    .any(|fact| texts.iter().all(|text| fact.contains(text))))
     }
 }
 
-/// Adds `values` to the names an answer's missing line gives ([`missing_names_in`]), in one
-/// missing line where its first stood, or after its last line when it wrote none. Bounded like
-/// any name of that line ([`missing_names`]).
+/// Adds `values`, unread entries that are no page a pass can open, to the names an answer's
+/// missing line gives ([`missing_names_in`]), in one missing line where its first stood, or
+/// after its last line when it wrote none. Bounded like any name of that line
+/// ([`missing_names`]), each cut after a whole word ([`cut_after_a_word`]): an entry runs to
+/// [`UNREAD_PAGE_MAX_CHARS`], and cut in a word, "I didn't find …" would end in half of it.
 fn name_missing(summary: &mut String, values: &[String]) {
     if values.is_empty() {
         return;
     }
     let mut names = missing_names_in(summary);
+    let values: Vec<String> = values
+        .iter()
+        .map(|value| cut_after_a_word(value, MISSING_NAME_MAX_CHARS))
+        .collect();
     for name in missing_names(&json!(values)) {
         if names.len() < MISSING_MAX && !names.contains(&name) {
             names.push(name);
@@ -1467,6 +1664,24 @@ fn name_missing(summary: &mut String, values: &[String]) {
         lines.push(&line);
     }
     *summary = lines.join("\n");
+}
+
+/// `text` on one line within `max` characters: whole when it fits, else up to its last whole
+/// word that fits, without the comma or colon after it; a word longer than `max` is cut.
+fn cut_after_a_word(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let head: String = text.chars().take(max + 1).collect();
+    let cut = match head.rfind(' ') {
+        Some(at) => &head[..at],
+        None => head
+            .char_indices()
+            .nth(max)
+            .map_or(head.as_str(), |(at, _)| &head[..at]),
+    };
+    cut.trim_end_matches([',', ';', ':', ' ']).to_string()
 }
 
 /// The most values a missing line names that reach the build, and the longest name of one: the
@@ -2569,12 +2784,13 @@ const STEP_NOT_DONE_RECORD_KEY: &str = "stepNotDone";
 /// [`NOT_FOUND_LINE`]'s words for it: told both, and to use those unless a page it read gives the
 /// value, a build could get it another way. That the step didn't run, and what the person does
 /// next, is the runtime's one line under the build's reply ([`step_not_done_code`]), the same
-/// after every such step: asked to say it in a line of its own, a build wrote that "the
-/// browser's form step wasn't completed because it received no answer" and left out that Octo
-/// can ask again (a local test, Nov 20).
+/// after every such step, and the build is told so, as the browser turn is by the step's own
+/// answer (`shared_browser::terminal_consent_call_result`): one voice says it. Asked to say it
+/// in a line of its own, a build wrote that "the browser's form step wasn't completed because it
+/// received no answer" and left out that Octo can ask again (a local test, Nov 20).
 pub(super) const STEP_NOT_DONE_LINE: &str = "`stepNotDone` is a step the browser didn't take, and why: the person said no to its prompt, \
 didn't answer it in time, or the page changed after their yes. Wherever a value only that step would give goes, write \"not checked\", \
-in place of `notFound`'s words for it. \
+in place of `notFound`'s words for it. Instafy tells the person under your reply that the step wasn't done and what they can do: your reply says neither. \
 Don't try it again, or get its values another way (another page, a search or a tool), in this turn.";
 
 /// The code of the person's answer that ended a step of the browser part before this build
