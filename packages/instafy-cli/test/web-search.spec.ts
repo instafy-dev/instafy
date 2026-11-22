@@ -11,10 +11,12 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  AI_WEB_SEARCH_ENV,
   BUNDLED_SEARCH_PROVIDERS,
   SEARCH_LIMITS,
   WEB_SEARCH_EXIT_INTERNAL,
   WEB_SEARCH_EXIT_NONE,
+  WEB_SEARCH_EXIT_NOT_SENT,
   WEB_SEARCH_EXIT_OK,
   WEB_SEARCH_EXIT_USAGE,
   liveTurn,
@@ -294,6 +296,10 @@ describe("searching with the space's own key (fixtures)", () => {
     const fifth = await webSearch({ query: "five" }, transportDeps(env, transport));
     expect(fifth).toMatchObject({ status: "unavailable", code: "turn_limit", budget: { searchesUsed: 4, searchesLeft: 0 } });
     expect(fifth.tell).toMatch(/^This turn has used its 4 searches\. .*Send page to Octo/);
+    expect(requests).toHaveLength(4);
+    // Nothing was sent, which the command's exit says: the runtime shows no search step for it.
+    const io = { out: () => {}, err: () => {} };
+    expect(await runWebSearchCli(["six"], { json: true }, io, transportDeps(env, transport))).toBe(WEB_SEARCH_EXIT_NOT_SENT);
     expect(requests).toHaveLength(4);
     // A new turn has its own four.
     expect((await webSearch({ query: "five" }, transportDeps(turnEnv(caseNo + 1, { BRAVE_SEARCH_API_KEY: BRAVE_KEY }), transport))).status).toBe("ok");
@@ -593,7 +599,9 @@ describe("the person's own key (secret-request card)", () => {
     const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
     const { requests, transport } = recorder(() => ({ status: 200, body: {} }));
     const code = await runWebSearchCli(["ramen"], { json: true }, io, transportDeps(turnEnv(caseNo), transport));
-    expect(code).toBe(WEB_SEARCH_EXIT_NONE);
+    // Its own exit, apart from a search that found nothing: nothing was sent, so the runtime shows no search step.
+    expect(code).toBe(WEB_SEARCH_EXIT_NOT_SENT);
+    expect(WEB_SEARCH_EXIT_NOT_SENT).not.toBe(WEB_SEARCH_EXIT_NONE);
     const json = out.pop()!;
     const first = JSON.parse(json) as WebSearchReport;
     expect(first.status).toBe("no_provider");
@@ -614,6 +622,54 @@ describe("the person's own key (secret-request card)", () => {
     for (const card of ["request_secret", "BRAVE_SEARCH_API_KEY", "offer", "card", "set up search"]) {
       expect(text, card).not.toContain(card);
     }
+    expect(requests).toHaveLength(0);
+  });
+
+  // Turns whose AI had its own web search ran this command first, read "This space has no search key. Go on without
+  // it: …", and never used their own search: one found no price and said "search returned no results" where no web
+  // search had run (a local test, Nov 20). The runtime marks the commands of a run that has the AI's own search, and
+  // there the answer points to that search, for what the web-research skill allows. It promises nothing of it: the
+  // message may have used its searches, or search may have been switched off while the turn ran, and then the way
+  // on without a search is the same as before. Everywhere else the words are as they were, byte for byte.
+  it("without a key, in a run that has the AI's own web search, points to that search and keeps the way on without one", async () => {
+    const { requests, transport } = recorder(() => ({ status: 200, body: {} }));
+    const without =
+      "find official sites with `instafy web search \"<name>\" --chain reference-search` (no key) and read them, " +
+      "and for reviews a reviewer's home page and the pages it links, with `instafy web read`. Then answer or build the page with what you read, each missing fact " +
+      "marked unknown with why. The person may send more pages with Send page to Octo.";
+    const asToday = `This space has no search key. Go on without it: ${without}`;
+    const marked = await webSearch({ query: "vacuum price today" }, transportDeps(turnEnv(caseNo, { [AI_WEB_SEARCH_ENV]: "1" }), transport));
+    expect(marked.status).toBe("no_provider");
+    expect(marked.tell).toBe(
+      "This space has no search key, so this command searched nothing. This run has the AI's own web search: use that instead, as the web-research skill " +
+        "says under \"The AI's own web search\" (where each search costs the person credits, only for what is fresh or to find a page no source names, " +
+        `at most 2 a message). If it answers that it did not search, go on without it: ${without}`,
+    );
+    expect(marked.tell).not.toContain("no search key. Go on without it");
+    for (const card of ["request_secret", "BRAVE_SEARCH_API_KEY", "offer", "card", "set up search"]) {
+      expect(JSON.stringify(marked), card).not.toContain(card);
+    }
+    // The text answer carries the same words, and the command's exit is the same with the mark.
+    const out: string[] = [];
+    const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+    expect(await runWebSearchCli(["vacuum", "review"], {}, io, transportDeps(turnEnv(caseNo + 1, { [AI_WEB_SEARCH_ENV]: "1" }), transport))).toBe(
+      WEB_SEARCH_EXIT_NOT_SENT,
+    );
+    expect(out.pop()!.split("\n")).toContain(marked.tell);
+    // Only the runtime's own mark counts: no mark, an empty one or another value reads as it did.
+    for (const [turn, value] of [undefined, "", " ", "0", "true", "yes"].entries()) {
+      const env = turnEnv(caseNo + 2 + turn, value === undefined ? {} : { [AI_WEB_SEARCH_ENV]: value });
+      expect((await webSearch({ query: "vacuum price today" }, transportDeps(env, transport))).tell, String(value)).toBe(asToday);
+    }
+    // The mark changes no other answer: a search that found nothing reads the same with it.
+    const found = recorder(() => ({ status: 200, body: braveAnswer([]) }));
+    const nothing = await Promise.all(
+      [{}, { [AI_WEB_SEARCH_ENV]: "1" }].map((mark, turn) =>
+        webSearch({ query: "zzzz nothing" }, transportDeps(turnEnv(caseNo + 10 + turn, { BRAVE_SEARCH_API_KEY: BRAVE_KEY, ...mark }), found.transport)),
+      ),
+    );
+    expect(nothing.map((report) => report.status)).toEqual(["not_found", "not_found"]);
+    expect(nothing[1]!.tell).toBe(nothing[0]!.tell);
     expect(requests).toHaveLength(0);
   });
 

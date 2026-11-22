@@ -1545,6 +1545,25 @@ pub fn command_activity(argv: Option<&JsonValue>, command: &str) -> Option<JsonV
     activity
 }
 
+/// What `instafy web search` exits with when it sent nothing to any search provider
+/// (`packages/instafy-cli/src/web-search.ts`): 3 with no search key in the space or the turn's
+/// searches used up, and 64 for a call it refused (bad options, a refused query, a link-only
+/// site). A search that was sent and found nothing, or that no provider answered, exits 2.
+const WEB_SEARCH_SENT_NOTHING_EXITS: [i64; 2] = [3, 64];
+
+/// Whether a command step ended as a web search that sent nothing: the one thing the runtime
+/// names in it is one `instafy web search`, the step's exit status is that command's, and it
+/// says nothing was sent. Read from the step's own label (its argv) and its exit code, never
+/// from its output. The step then ends as the AI's own search that searched nothing does, and
+/// Studio shows none: no "Searching the web" for a search there was nothing to send to.
+pub fn search_command_sent_nothing(activity: &JsonValue, exit_code: Option<i64>) -> bool {
+    activity["key"] == WEB_SEARCH.key
+        && activity["count"] == 1
+        && activity["also"].as_array().is_some_and(Vec::is_empty)
+        && activity.get("result").is_none()
+        && exit_code.is_some_and(|code| WEB_SEARCH_SENT_NOTHING_EXITS.contains(&code))
+}
+
 /// A search the AI ran with its own web search, labelled as `instafy web search` is: "searched the
 /// web", or "searched the web 3 times" for a step that ran `searches` searches at once.
 pub fn web_search_activity(searches: usize) -> Option<JsonValue> {
@@ -2188,6 +2207,62 @@ mod tests {
         // The command that gives the search key's card searches nothing, so it never reads as a search.
         let card = label(&[], "instafy web search-key --json");
         assert!(card.is_none_or(|activity| activity["key"] != json!("instafy/web-search")));
+    }
+
+    /// A step that ran one `instafy web search`, whose exit says nothing was sent, is a search
+    /// that searched nothing: no search key in the space or the turn's searches used (3), or a
+    /// call the command refused (64). Any other exit is a search that ran or was tried, and a
+    /// step that names anything else, or whose exit is not the search's, stays as it reads.
+    #[test]
+    fn a_search_command_that_sent_nothing_is_known_by_its_label_and_its_exit() {
+        let sent_nothing = |script: &str, exit: Option<i64>| {
+            let argv = json!(["/bin/bash", "-lc", script]);
+            let activity = label_command_with(&[], Some(&argv), script).expect("label");
+            search_command_sent_nothing(&activity, exit)
+        };
+        let search = "instafy web search \"city museum hours\" --json";
+        assert!(sent_nothing(search, Some(3)));
+        assert!(sent_nothing(search, Some(64)));
+        assert!(sent_nothing(
+            "cd /workspace && instafy web search ramen",
+            Some(3)
+        ));
+        // A turn's own first step (a local test, Nov 20): the budget names nothing, and the
+        // step's exit status is the search's.
+        assert!(sent_nothing(
+            "instafy web budget --json && instafy web search \"vacuum price today\" --json",
+            Some(3)
+        ));
+        // Found results, found none or no provider answered, the command itself failed, or it
+        // has not ended.
+        for exit in [Some(0), Some(2), Some(70), Some(1), Some(-1), None] {
+            assert!(!sent_nothing(search, exit), "{exit:?}");
+        }
+        for other in [
+            // Two searches: the first may have been sent.
+            "instafy web search ramen && instafy web search noodles",
+            "instafy web search ramen; instafy web search noodles",
+            "for q in ramen noodles; do instafy web search \"$q\"; done",
+            // The exit is another command's.
+            "instafy web search ramen | head -5",
+            "instafy web search ramen; true",
+            "instafy web search ramen || instafy web search ramen --chain reference-search",
+            // It names something else too.
+            "instafy web search ramen && instafy web read https://example.org/ramen",
+            // Not a search.
+            "instafy web read https://example.org/ramen",
+            "instafy web search-key --json",
+        ] {
+            let argv = json!(["/bin/bash", "-lc", other]);
+            let sent = label_command_with(&[], Some(&argv), other)
+                .is_some_and(|activity| search_command_sent_nothing(&activity, Some(3)));
+            assert!(!sent, "{other}");
+        }
+        // The AI's own search is ended by its own events, never by an exit code.
+        assert!(!search_command_sent_nothing(
+            &web_search_activity(1).unwrap(),
+            None
+        ));
     }
 
     /// Every web search is one label, `instafy web search` and the AI's own search alike: Studio

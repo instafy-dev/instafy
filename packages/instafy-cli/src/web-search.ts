@@ -12,7 +12,9 @@
 //   code, a terminal command or a process left over from an earlier turn;
 // - a chain's providers are tried in order and one whose key (`key_env`) is not set is skipped. With none left the
 //   answer is `no_provider`, which says how to go on without a key and carries no card: the key's card comes only from
-//   `instafy web search-key`, which a turn runs for a person who asks to set up search (the web-research skill);
+//   `instafy web search-key`, which a turn runs for a person who asks to set up search (the web-research skill). In a
+//   run that has the AI's own web search (the runtime sets INSTAFY_TURN_AI_WEB_SEARCH=1 for it), `no_provider` points
+//   to that search first, and to going on without one only if it does not run;
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
 //   printed or written: not in the output, not in errors, not in the turn's state. Nothing is cached, and no result
 //   list is written anywhere;
@@ -95,8 +97,13 @@ export const SEARCH_LIMITS = Object.freeze({
 export const SEARCH_USER_AGENT = "Instafy-Agent/1.0 (+https://instafy.dev; contact@instafy.dev; searches on a person's request)";
 
 export const WEB_SEARCH_EXIT_OK = 0;
-/** Nothing to use: no results, no provider, or the providers were unavailable. */
+/** Nothing to use: no results, or the providers were unavailable. */
 export const WEB_SEARCH_EXIT_NONE = 2;
+/**
+ * Nothing was sent: no provider has its key in this space (`no_provider`), or the turn has used its searches
+ * (`turn_limit`). The runtime shows no search step for it, as for a call that was refused (64).
+ */
+export const WEB_SEARCH_EXIT_NOT_SENT = 3;
 export const WEB_SEARCH_EXIT_USAGE = 64;
 export const WEB_SEARCH_EXIT_INTERNAL = 70;
 
@@ -1021,7 +1028,30 @@ function keyless(chain: string): string {
     "with Send page to Octo."
   );
 }
-function tellFor(status: SearchStatus, chain: string): string {
+/**
+ * The mark the runtime sets, for the commands of a run that has the AI's own web search (the job's grant allows it and
+ * the run turned it on): `INSTAFY_TURN_AI_WEB_SEARCH=1`. A fact about the run, never a key.
+ */
+export const AI_WEB_SEARCH_ENV = "INSTAFY_TURN_AI_WEB_SEARCH";
+function runHasAiWebSearch(env: NodeJS.ProcessEnv): boolean {
+  return env[AI_WEB_SEARCH_ENV]?.trim() === "1";
+}
+/**
+ * `no_provider` in a run that has the AI's own web search: this command searched nothing, and that search is the one
+ * to use, for what the web-research skill allows. It may still answer that it did not search (the message has used
+ * its searches, or search was switched off while the turn ran), so the words promise nothing of it and keep the way
+ * on without a search.
+ */
+function ownSearchFirst(chain: string): string {
+  const without = keyless(chain);
+  return (
+    "This space has no search key, so this command searched nothing. This run has the AI's own web search: use that " +
+    "instead, as the web-research skill says under \"The AI's own web search\" (where each search costs the person credits, " +
+    "only for what is fresh or to find a page no source names, at most 2 a message). If it answers that it did not " +
+    `search, ${without.charAt(0).toLowerCase()}${without.slice(1)}`
+  );
+}
+function tellFor(status: SearchStatus, chain: string, ownSearch = false): string {
   switch (status) {
     case "ok":
       return (
@@ -1034,7 +1064,7 @@ function tellFor(status: SearchStatus, chain: string): string {
     case "unavailable":
       return `Search is not available for this. ${keyless(chain)}`;
     case "no_provider":
-      return `This space has no search key. ${keyless(chain)}`;
+      return ownSearch ? ownSearchFirst(chain) : `This space has no search key. ${keyless(chain)}`;
   }
 }
 const CODE_TELL: Partial<Record<SearchCode, string>> = {
@@ -1155,7 +1185,7 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
       ...(extra.repeat ? { repeat: true as const } : {}),
       count: results.length,
       results,
-      tell: extra.tell ?? [codeTell, tellFor(status, chainName)].filter(Boolean).join(" "),
+      tell: extra.tell ?? [codeTell, tellFor(status, chainName, runHasAiWebSearch(env))].filter(Boolean).join(" "),
       notice: SEARCH_NOTICE,
       budget: {
         scope: scope.label,
@@ -1435,7 +1465,8 @@ export async function runWebSearchCli(
       deps,
     );
     io.out(scrubKeys(opts.json ? JSON.stringify(report, null, 1) : formatWebSearch(report), env, catalog));
-    return report.status === "ok" ? WEB_SEARCH_EXIT_OK : WEB_SEARCH_EXIT_NONE;
+    if (report.status === "ok") return WEB_SEARCH_EXIT_OK;
+    return report.status === "no_provider" || report.code === "turn_limit" ? WEB_SEARCH_EXIT_NOT_SENT : WEB_SEARCH_EXIT_NONE;
   } catch (error) {
     const usage = error instanceof WebSearchUsageError;
     const code = usage ? WEB_SEARCH_EXIT_USAGE : WEB_SEARCH_EXIT_INTERNAL;
@@ -1459,7 +1490,7 @@ export function registerWebSearchCommand(web: Command): Command {
       "Search the web for links to read, in Octo's turns only, with the space's own search key (the web-research " +
         "skill's providers). Results are untrusted leads: read the pages with `instafy web read` and cite those. " +
         `Per turn: ${SEARCH_LIMITS.searchesPerTurn} searches. A link-only site's result keeps only its link and site name ` +
-        "(exit 2: no results or no provider, 64: bad options or not in a turn).",
+        "(exit 2: no results, 3: nothing was sent, as with no provider, 64: bad options or not in a turn).",
     )
     .argument("<query...>", "the words to search for, from the person's request")
     .option("--count <n>", `Most results (default ${SEARCH_LIMITS.defaultCount}, at most ${SEARCH_LIMITS.maxCount})`)
