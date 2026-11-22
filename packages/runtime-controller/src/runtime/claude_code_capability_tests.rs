@@ -9,9 +9,15 @@
 //!   service-owned and unscoped runtimes;
 //! - the status route shows `claudeCode` only to the runtime's owner while the
 //!   switch covers them, and `claudeCodeLane` only to a viewer it covers;
-//! - a not-ready capability's `resetsAt`, when a Claude plan's limit resets
-//!   (11.11), is attested and shown only while not ready, as an RFC 3339 time
-//!   at most eight days ahead, in UTC to the second.
+//! - the capability is version 2 (11.19): the program once, and each Claude
+//!   Code login of the grant apart, by its id. Registration keeps only that
+//!   version, rebuilt from its known fields: a login's key must be a
+//!   canonical UUID, it must say whether it is `ready`, its `reason` must be
+//!   a known one, at most ten logins are kept, and a login is never ready
+//!   while the program is not. A version 1 capability is dropped;
+//! - a held login's `resetsAt`, when a Claude plan's limit resets (11.11), is
+//!   attested and shown only with `plan_limit`, as an RFC 3339 time at most
+//!   eight days ahead, in UTC to the second.
 //!
 //! Requires `TEST_DATABASE_URL` like the tests in `tests.rs`, apart from the
 //! plain `#[test]`s.
@@ -37,30 +43,37 @@ use crate::tokens::{decode_scoped_token, mint_scoped_token, ScopedTokenRequest};
 use crate::AppState;
 
 const SERVICE_ROLE: &str = "service-role-token";
+/// The Claude Code login every report here holds.
+const LOGIN: &str = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
 
-/// What runtime-agent reports for a ready lane, with a key it must never
-/// store: a path, which would reveal the OS user name.
+/// What runtime-agent reports for a ready lane on [`LOGIN`], with keys it
+/// must never store: paths, which would reveal the OS user name.
 fn ready_report() -> JsonValue {
     json!({
-        "version": 1,
+        "version": 2,
         "ready": true,
         "cli": "2.1.314",
         "verified": true,
-        "planSignIn": true,
         "partialMessages": true,
         "path": "/home/someone/.local/bin/claude",
+        "logins": { LOGIN: {
+            "ready": true,
+            "planSignIn": true,
+            "signedIn": true,
+            "configDir": "/home/someone/.claude-work",
+        } },
     })
 }
 
 /// [`ready_report`] as registration attests it.
 fn ready_attested() -> JsonValue {
     json!({
-        "version": 1,
+        "version": 2,
         "ready": true,
         "cli": "2.1.314",
         "verified": true,
-        "planSignIn": true,
         "partialMessages": true,
+        "logins": { LOGIN: { "ready": true, "planSignIn": true, "signedIn": true } },
     })
 }
 
@@ -185,7 +198,7 @@ impl Space {
                         "agent": true,
                         "origin": true,
                         "claudeCode": claude_code,
-                        "claude_code": { "version": 1, "ready": true },
+                        "claude_code": { "version": 2, "ready": true },
                     },
                 })),
             )
@@ -470,46 +483,53 @@ async fn registration_keeps_claude_code_only_for_its_persons_lane_scoped_runtime
             assert_eq!(renewed_claims.sub, owner_id);
 
             // Its renewal registers again with the scope it carried, and a
-            // not-ready report is kept, rebuilt.
+            // not-ready report is kept, rebuilt: its login is not ready
+            // either, for the program's reason.
             let (stored, renewed_again) = space
                 .register(
                     &renewed,
                     desktop,
                     "self-hosted",
                     json!({
-                        "version": 1,
+                        "version": 2,
                         "ready": false,
                         "reason": "unsupported_version",
                         "cli": "2.1.200",
                         "verified": true,
-                        "planSignIn": false,
                         "binary": "/home/someone/.local/bin/claude",
+                        "logins": { LOGIN: { "ready": true, "planSignIn": false } },
                     }),
                 )
                 .await?;
             assert_eq!(
                 stored["claudeCode"],
                 json!({
-                    "version": 1,
+                    "version": 2,
                     "ready": false,
                     "reason": "unsupported_version",
                     "cli": "2.1.200",
                     "verified": true,
-                    "planSignIn": false,
+                    "logins": { LOGIN: {
+                        "ready": false,
+                        "reason": "unsupported_version",
+                        "planSignIn": false,
+                    } },
                 })
             );
             assert!(holds_lane_scope(&space.signed_scopes(&renewed_again)?));
 
-            // A malformed report is no capability, even with the scope.
-            let (stored, _) = space
-                .register(
-                    &renewed_again,
-                    desktop,
-                    "self-hosted",
-                    json!({ "version": 2, "ready": true }),
-                )
-                .await?;
-            assert!(stored.get("claudeCode").is_none(), "{stored}");
+            // A malformed report is no capability, even with the scope, and
+            // neither is a version 1 one, from a runtime older than the
+            // logins.
+            for malformed in [
+                json!({ "version": 3, "ready": true, "logins": {} }),
+                json!({ "version": 1, "ready": true, "cli": "2.1.314", "planSignIn": true }),
+            ] {
+                let (stored, _) = space
+                    .register(&renewed_again, desktop, "self-hosted", malformed.clone())
+                    .await?;
+                assert!(stored.get("claudeCode").is_none(), "{malformed}: {stored}");
+            }
 
             // Unscoped: the same person's Desktop, minted without the flag.
             let (status, minted) = space.mint(&owner, json!({})).await?;
@@ -600,7 +620,7 @@ async fn seed_status_runtimes(space: &Space) -> anyhow::Result<(Uuid, Uuid, Uuid
         (
             teammate_desktop,
             space.people.teammate,
-            json!({ "version": 1, "ready": false, "reason": "binary_missing" }),
+            json!({ "version": 2, "ready": false, "reason": "binary_missing", "logins": {} }),
         ),
     ] {
         let mut capabilities = json!({ "agent": true, "origin": true, "claudeCode": claude_code });
@@ -645,13 +665,7 @@ async fn status_shows_claude_code_only_to_its_owner_with_the_switch_on() -> anyh
             assert_eq!(listed(&status), ids(&[owner_desktop, hosted]));
             assert_eq!(
                 entry(&status, owner_desktop).expect("owner's desktop")["claudeCode"],
-                json!({
-                    "ready": true,
-                    "reason": null,
-                    "cli": "2.1.314",
-                    "verified": true,
-                    "planSignIn": true,
-                })
+                ready_attested()
             );
             assert!(entry(&status, hosted)
                 .expect("hosted runtime")
@@ -714,13 +728,7 @@ async fn status_shows_claude_code_only_to_its_owner_with_the_switch_on() -> anyh
             assert!(entry(&status, owner_desktop).is_none());
             assert_eq!(
                 entry(&status, teammate_desktop).expect("teammate's desktop")["claudeCode"],
-                json!({
-                    "ready": false,
-                    "reason": "binary_missing",
-                    "cli": null,
-                    "verified": null,
-                    "planSignIn": false,
-                })
+                json!({ "version": 2, "ready": false, "reason": "binary_missing", "logins": {} })
             );
             assert!(entry(&status, hosted)
                 .expect("hosted runtime")
@@ -748,20 +756,240 @@ async fn status_shows_claude_code_only_to_its_owner_with_the_switch_on() -> anyh
     .await
 }
 
-/// A not-ready capability's `resetsAt` (docs/Local-Engine-Turns.md 11.11) is
-/// kept only as an RFC 3339 time at most eight days ahead, written again in
-/// UTC to the second; a ready capability keeps none, and anything else is
-/// left off while the rest of the capability stays.
+/// `logins` as registration attests a version 2 capability that is ready and
+/// holds them, or none when it is no capability.
+fn attested_logins(logins: JsonValue) -> Option<JsonValue> {
+    super::ClaudeCodeCapability::from_reported(&json!({
+        "version": 2,
+        "ready": true,
+        "logins": logins,
+    }))
+    .map(|capability| capability.to_json()["logins"].clone())
+}
+
+/// runtime-contracts' `capability` fixture, a version 2 capability with two
+/// logins, one held at its plan's limit, is what registration keeps of it,
+/// unchanged (claude_code_lane_fixtures.json).
 #[test]
-fn a_reset_time_is_kept_only_while_not_ready_and_at_most_eight_days_ahead() {
-    let reset_of = |ready: bool, resets_at: JsonValue| {
+fn the_shared_capability_fixture_is_kept_unchanged() {
+    let fixtures: JsonValue = serde_json::from_str(include_str!(
+        "../../../runtime-contracts/src/claude_code_lane_fixtures.json"
+    ))
+    .expect("the fixtures");
+    let capability = &fixtures["capability"];
+    assert_eq!(
+        capability["logins"].as_object().map(|logins| logins.len()),
+        Some(2)
+    );
+    let attested = super::ClaudeCodeCapability::from_reported(capability).expect("a capability");
+    assert_eq!(&attested.to_json(), capability);
+}
+
+/// A version 1 capability, from a runtime older than the logins, is no
+/// capability at all, ready or not: that runtime takes no lane turn.
+#[test]
+fn a_version_1_capability_is_dropped() {
+    for reported in [
+        json!({ "version": 1, "ready": true, "cli": "2.1.314", "planSignIn": true }),
+        json!({ "version": 1, "ready": false, "reason": "plan_limit",
+                "resetsAt": "2026-11-22T18:00:00Z" }),
+        json!({ "version": 1, "ready": true, "logins": { LOGIN: { "ready": true } } }),
+    ] {
+        assert_eq!(
+            super::ClaudeCodeCapability::from_reported(&reported),
+            None,
+            "{reported}"
+        );
+    }
+}
+
+/// A login's key is kept only as a canonical UUID, lowercase and
+/// hyphenated, as the controller writes a login's id; anything else is no
+/// login, and the rest stay.
+#[test]
+fn a_login_is_kept_only_under_its_canonical_id() {
+    let id = Uuid::parse_str(LOGIN).expect("a UUID");
+    let kept = attested_logins(json!({
+        LOGIN: { "ready": true },
+        LOGIN.to_uppercase(): { "ready": true },
+        id.simple().to_string(): { "ready": true },
+        format!("{{{LOGIN}}}"): { "ready": true },
+        id.urn().to_string(): { "ready": true },
+        format!(" {LOGIN}"): { "ready": true },
+        "work": { "ready": true },
+        "": { "ready": true },
+    }))
+    .expect("a capability");
+    assert_eq!(kept, json!({ LOGIN: { "ready": true } }));
+}
+
+/// A login that does not say whether it is ready, with a boolean, is no
+/// login; of the rest, only the known fields stay, each when well-formed.
+#[test]
+fn a_login_says_whether_it_is_ready() {
+    let others = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let kept = attested_logins(json!({
+        LOGIN: {
+            "ready": true,
+            "planSignIn": "yes",
+            "signedIn": 0,
+            "configDir": "/home/someone/.claude-work",
+            "email": "someone@example.com",
+        },
+        others[0].to_string(): { "ready": "true" },
+        others[1].to_string(): { "planSignIn": true },
+        others[2].to_string(): true,
+        others[3].to_string(): { "ready": false, "signedIn": false },
+    }))
+    .expect("a capability");
+    assert_eq!(
+        kept,
+        json!({
+            LOGIN: { "ready": true },
+            others[3].to_string(): { "ready": false, "signedIn": false },
+        })
+    );
+}
+
+/// At most ten logins are kept, as a grant carries at most ten.
+#[test]
+fn at_most_ten_logins_are_kept() {
+    let logins: serde_json::Map<String, JsonValue> = (0..12)
+        .map(|_| (Uuid::new_v4().to_string(), json!({ "ready": true })))
+        .collect();
+    let capability = super::ClaudeCodeCapability::from_reported(&json!({
+        "version": 2,
+        "ready": true,
+        "logins": logins.clone(),
+    }))
+    .expect("a capability");
+    assert_eq!(capability.logins.len(), 10);
+    assert_eq!(
+        capability.to_json()["logins"]
+            .as_object()
+            .map(|kept| kept.len()),
+        Some(10)
+    );
+    for (id, _) in &capability.logins {
+        assert!(logins.contains_key(&id.to_string()), "{id}");
+    }
+    // Ten, the most, are all kept.
+    let ten: serde_json::Map<String, JsonValue> = logins.into_iter().take(10).collect();
+    assert_eq!(
+        attested_logins(JsonValue::Object(ten.clone())),
+        Some(JsonValue::Object(ten))
+    );
+}
+
+/// A login's reason is kept only while it is not ready, and only as one of
+/// runtime-contracts' reasons; the program's only as one of the program's.
+#[test]
+fn an_unknown_reason_is_left_off() {
+    let other = Uuid::new_v4().to_string();
+    assert_eq!(
+        attested_logins(json!({
+            LOGIN: { "ready": false, "reason": "signed_out" },
+            other.clone(): { "ready": true, "reason": "binary_unsafe" },
+        })),
+        Some(json!({ LOGIN: { "ready": false }, other: { "ready": true } }))
+    );
+    let program = |reason: &str| {
+        super::ClaudeCodeCapability::from_reported(
+            &json!({ "version": 2, "ready": false, "reason": reason, "logins": {} }),
+        )
+        .expect("a capability")
+        .to_json()
+    };
+    assert_eq!(
+        program("probe_failed"),
+        json!({ "version": 2, "ready": false, "reason": "probe_failed", "logins": {} })
+    );
+    // A plan's limit belongs to a login, never the program.
+    for unknown in ["plan_limit", "not_signed_in", "Binary_Missing"] {
+        assert_eq!(
+            program(unknown),
+            json!({ "version": 2, "ready": false, "logins": {} }),
+            "{unknown}"
+        );
+    }
+}
+
+/// A login is never ready while the program is not: it takes the program's
+/// reason, and no reset time of its own.
+#[test]
+fn a_login_is_never_ready_while_the_program_is_not() {
+    let in_an_hour = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    let other = Uuid::new_v4().to_string();
+    let attested = |reason: JsonValue| {
         super::ClaudeCodeCapability::from_reported(&json!({
-            "version": 1,
-            "ready": ready,
-            "resetsAt": resets_at,
+            "version": 2,
+            "ready": false,
+            "reason": reason,
+            "logins": {
+                LOGIN: { "ready": true, "planSignIn": true, "signedIn": true },
+                other.clone(): {
+                    "ready": false,
+                    "reason": "plan_limit",
+                    "resetsAt": in_an_hour,
+                    "signedIn": true,
+                },
+            },
         }))
         .expect("a capability")
-        .resets_at
+        .to_json()
+    };
+    assert_eq!(
+        attested(json!("binary_missing")),
+        json!({
+            "version": 2,
+            "ready": false,
+            "reason": "binary_missing",
+            "logins": {
+                LOGIN: {
+                    "ready": false,
+                    "reason": "binary_missing",
+                    "planSignIn": true,
+                    "signedIn": true,
+                },
+                other.clone(): { "ready": false, "reason": "binary_missing", "signedIn": true },
+            },
+        })
+    );
+    // With no reason the program's list knows, its logins name none either.
+    assert_eq!(
+        attested(json!("launch_the_rockets")),
+        json!({
+            "version": 2,
+            "ready": false,
+            "logins": {
+                LOGIN: { "ready": false, "planSignIn": true, "signedIn": true },
+                other.clone(): { "ready": false, "signedIn": true },
+            },
+        })
+    );
+}
+
+/// A held login's `resetsAt` (docs/Local-Engine-Turns.md 11.11) is kept only
+/// with `plan_limit`, and only as an RFC 3339 time at most eight days ahead,
+/// written again in UTC to the second; a ready login, or one not ready for
+/// another reason, keeps none, and anything else is left off while the rest
+/// of the login stays.
+#[test]
+fn a_reset_time_is_kept_only_with_a_plan_limit_and_at_most_eight_days_ahead() {
+    let reset_of = |ready: bool, reason: &str, resets_at: JsonValue| {
+        let capability = super::ClaudeCodeCapability::from_reported(&json!({
+            "version": 2,
+            "ready": true,
+            "logins": { LOGIN: { "ready": ready, "reason": reason, "resetsAt": resets_at } },
+        }))
+        .expect("a capability");
+        assert_eq!(capability.logins.len(), 1, "{resets_at}");
+        capability.logins[0].1.resets_at.clone()
     };
     let in_two_hours = Utc::now() + Duration::hours(2);
     let utc = in_two_hours.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -771,16 +999,22 @@ fn a_reset_time_is_kept_only_while_not_ready_and_at_most_eight_days_ahead() {
         .to_rfc3339_opts(SecondsFormat::Millis, false);
     for written in [elsewhere, utc.clone(), format!(" {utc} ")] {
         assert_eq!(
-            reset_of(false, json!(written)),
+            reset_of(false, "plan_limit", json!(written)),
             Some(utc.clone()),
             "{written}"
         );
     }
     let in_a_week = (Utc::now() + Duration::days(7) + Duration::hours(23))
         .to_rfc3339_opts(SecondsFormat::Secs, true);
-    assert_eq!(reset_of(false, json!(in_a_week)), Some(in_a_week.clone()));
-    // A ready capability keeps none.
-    assert_eq!(reset_of(true, json!(utc)), None);
+    assert_eq!(
+        reset_of(false, "plan_limit", json!(in_a_week)),
+        Some(in_a_week.clone())
+    );
+    // A ready login keeps none, nor one not ready for another reason.
+    assert_eq!(reset_of(true, "plan_limit", json!(utc)), None);
+    for reason in ["binary_unsafe", "probe_failed", "not_a_reason"] {
+        assert_eq!(reset_of(false, reason, json!(utc)), None, "{reason}");
+    }
     // Too far ahead, or no RFC 3339 time.
     for resets_at in [
         json!((Utc::now() + Duration::days(8) + Duration::minutes(5)).to_rfc3339()),
@@ -791,29 +1025,32 @@ fn a_reset_time_is_kept_only_while_not_ready_and_at_most_eight_days_ahead() {
         json!({ "at": utc }),
         JsonValue::Null,
     ] {
-        assert_eq!(reset_of(false, resets_at.clone()), None, "{resets_at}");
+        assert_eq!(
+            reset_of(false, "plan_limit", resets_at.clone()),
+            None,
+            "{resets_at}"
+        );
     }
-    let capability = super::ClaudeCodeCapability::from_reported(&json!({
-        "version": 1,
+    let login = attested_logins(json!({ LOGIN: {
         "ready": false,
-        "reason": "probe_failed",
+        "reason": "plan_limit",
         "resetsAt": "tomorrow",
-    }))
-    .expect("a capability without its reset time");
+        "planSignIn": true,
+    } }))
+    .expect("a capability");
     assert_eq!(
-        (capability.ready, capability.reason, capability.resets_at),
-        (false, Some("probe_failed"), None)
+        login,
+        json!({ LOGIN: { "ready": false, "reason": "plan_limit", "planSignIn": true } })
     );
 }
 
-/// Registration attests a not-ready capability's `resetsAt` beside its other
-/// fields, in UTC to the second, and the owner's status entry shows it
-/// (docs/Local-Engine-Turns.md 11.11). Once the runtime reports ready again,
-/// neither keeps one, whatever its report still says, and the status entry
-/// has no `resetsAt`.
+/// Registration attests a held login's `resetsAt` beside its other fields,
+/// in UTC to the second, and the owner's status entry shows it
+/// (docs/Local-Engine-Turns.md 11.11, 11.19). Once the runtime reports the
+/// login ready again, neither keeps one, whatever its report still says.
 #[tokio::test]
-async fn a_plan_limits_reset_time_is_attested_and_shown_only_while_not_ready() -> anyhow::Result<()>
-{
+async fn a_plan_limits_reset_time_is_attested_and_shown_only_while_its_login_is_held(
+) -> anyhow::Result<()> {
     with_space(
         "claude-code-resets-at",
         |config, people| {
@@ -838,44 +1075,43 @@ async fn a_plan_limits_reset_time_is_attested_and_shown_only_while_not_ready() -
                     desktop,
                     "self-hosted",
                     json!({
-                        "version": 1,
-                        "ready": false,
+                        "version": 2,
+                        "ready": true,
                         "cli": "2.1.314",
                         "verified": true,
-                        "planSignIn": true,
-                        "resetsAt": reset
-                            .with_timezone(&FixedOffset::west_opt(5 * 3600).expect("an offset"))
-                            .to_rfc3339(),
+                        "logins": { LOGIN: {
+                            "ready": false,
+                            "reason": "plan_limit",
+                            "planSignIn": true,
+                            "resetsAt": reset
+                                .with_timezone(&FixedOffset::west_opt(5 * 3600).expect("an offset"))
+                                .to_rfc3339(),
+                        } },
                     }),
                 )
                 .await?;
-            assert_eq!(
-                stored["claudeCode"],
-                json!({
-                    "version": 1,
+            let held = json!({
+                "version": 2,
+                "ready": true,
+                "cli": "2.1.314",
+                "verified": true,
+                "logins": { LOGIN: {
                     "ready": false,
-                    "cli": "2.1.314",
-                    "verified": true,
-                    "planSignIn": true,
+                    "reason": "plan_limit",
                     "resetsAt": attested_reset,
-                })
-            );
+                    "planSignIn": true,
+                } },
+            });
+            assert_eq!(stored["claudeCode"], held);
             let status = space.status(&owner).await?;
             assert_eq!(
                 entry(&status, desktop).expect("the owner's desktop")["claudeCode"],
-                json!({
-                    "ready": false,
-                    "reason": null,
-                    "cli": "2.1.314",
-                    "verified": true,
-                    "planSignIn": true,
-                    "resetsAt": attested_reset,
-                })
+                held
             );
 
             // Ready again, though its report still names a reset time.
             let mut report = ready_report();
-            report["resetsAt"] = json!(attested_reset);
+            report["logins"][LOGIN]["resetsAt"] = json!(attested_reset);
             let (stored, _) = space
                 .register(&renewed, desktop, "self-hosted", report)
                 .await?;
@@ -883,13 +1119,7 @@ async fn a_plan_limits_reset_time_is_attested_and_shown_only_while_not_ready() -
             let status = space.status(&owner).await?;
             assert_eq!(
                 entry(&status, desktop).expect("the owner's desktop")["claudeCode"],
-                json!({
-                    "ready": true,
-                    "reason": null,
-                    "cli": "2.1.314",
-                    "verified": true,
-                    "planSignIn": true,
-                })
+                ready_attested()
             );
             Ok(())
         },

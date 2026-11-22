@@ -4404,10 +4404,10 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
     map.insert("prompt_metadata".to_string(), prompt_metadata);
     crate::job_trigger::stamp_message(&mut map, request.trigger.as_ref());
     // A send whose every target is a Claude Code agent: the controller's
-    // stamps, where clients read a message's AI access
-    // (crate::claude_code_lane).
-    if request.claude_code_lane.is_some() {
-        crate::claude_code_lane::stamp(&mut map);
+    // stamps, where clients read a message's AI access, with the first
+    // Claude Code login its targets share (crate::claude_code_lane).
+    if let Some(lane) = request.claude_code_lane {
+        crate::claude_code_lane::stamp(&mut map, lane.login_id);
     }
     // Prompt metadata is otherwise nested for the runtime. Persist the validated
     // human identities at the same canonical message key as record-only sends.

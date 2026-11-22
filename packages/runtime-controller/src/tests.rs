@@ -1914,6 +1914,11 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
     client
         .batch_execute(
             "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS agent_role text;
+            CREATE TEMP TABLE claude_code_logins (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,
                 cooldown_until timestamptz,
@@ -13639,7 +13644,9 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -13764,7 +13771,14 @@ async fn a_job_a_stop_cancels_while_a_lease_waits_is_not_leased() -> anyhow::Res
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
                 agent_role text,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
+            );
+            CREATE TABLE claude_code_logins (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now()
             );
             CREATE TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,
@@ -13934,7 +13948,9 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -14046,7 +14062,9 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -14157,7 +14175,9 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -14266,7 +14286,9 @@ async fn lease_next_agent_job_isolates_personal_browser_runtimes_and_jobs() -> a
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -14557,7 +14579,9 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -14669,9 +14693,16 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );
             ALTER TABLE agent_jobs ADD COLUMN agent_role text;
+            CREATE TEMP TABLE claude_code_logins (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
             CREATE TEMP TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,
                 cooldown_until timestamptz,
@@ -14839,7 +14870,9 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -15014,7 +15047,9 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -15157,7 +15192,9 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -15243,7 +15280,9 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -25149,7 +25188,9 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 updated_at timestamptz NOT NULL DEFAULT now(),
                 trigger_received_at timestamptz,
                 grant_ids uuid[],
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );
             CREATE TEMP TABLE agent_job_inputs (
                 id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -28517,7 +28558,9 @@ async fn persist_run_completion_metadata_merges_provider_summary_and_task_usage(
                 id uuid PRIMARY KEY,
                 run_id uuid NOT NULL,
                 proxy_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -28626,7 +28669,9 @@ async fn create_provider_state_test_tables(client: &tokio_postgres::Client) -> a
                 credential_id uuid,
                 status text NOT NULL,
                 proxy_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );
             CREATE TEMP TABLE ai_usage_jobs (
                 job_id uuid PRIMARY KEY,
@@ -29091,7 +29136,9 @@ async fn load_conversation_history_for_agent_limit_skips_progress_rows() -> anyh
                 run_id uuid,
                 conversation_id uuid,
                 payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -29216,7 +29263,9 @@ async fn load_conversation_history_for_agent_keeps_browser_findings_notes() -> a
                 run_id uuid,
                 conversation_id uuid,
                 payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;
@@ -29411,7 +29460,9 @@ async fn load_conversation_history_for_agent_drops_dispatch_alerts_and_labels_fa
                 run_id uuid,
                 conversation_id uuid,
                 payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-                engine text
+                engine text,
+                claude_code_login_ids uuid[],
+                claude_code_login_id uuid
             );",
         )
         .await?;

@@ -95,6 +95,7 @@ const {
   desktopRuntimeLaunchGrantsEqual,
   desktopRuntimeLaunchGrantsForStart,
   desktopRuntimeLaunchGrantsHeld,
+  hasNonJoinerFormatCharacter,
   invokeDesktopExtensionWithLaunchGrants,
   normalizeDesktopExtensionConsentData,
   restoreDesktopExtensionConsents,
@@ -125,6 +126,7 @@ function hostFor({ userId = USER_A, controllerOrigin = CONTROLLER, consents = me
     dialogs: {
       showMessageBox: async () => 1,
       pickFile: async () => null,
+      pickFolder: async () => null,
     },
     desktopOwnedPaths: ["/fixture/workspace"],
   };
@@ -201,6 +203,140 @@ test("a method gets the host context, never identity from its payload", async ()
   const bare = await registry.invoke("fixture-engine", "context", { x: 1 });
   assert.equal(bare.session, null);
   assert.equal(bare.hasConsentStore, false);
+});
+
+test("a session email with an invisible format character reaches no method, though the session does", async () => {
+  const registry = createDesktopExtensionRegistry([createEngineModule()]);
+  const sessionSeen = async (email) =>
+    (await registry.invoke("fixture-engine", "context", {}, { ...hostFor(), session: { userId: USER_A, email } }))
+      .session;
+  for (const email of [
+    "\u{202e}tset.elpmaxe@nosrep",
+    "per\u{200b}son@example.test",
+    "person@exam\u{2066}ple.test",
+    "person@example.test\u{200f}",
+    "person@exa\u{feff}mple.test",
+  ]) {
+    assert.equal(hasNonJoinerFormatCharacter(email), true, JSON.stringify(email));
+    assert.deepEqual(await sessionSeen(email), { userId: USER_A, email: null }, JSON.stringify(email));
+  }
+  // The joiners, which some scripts need, and plain addresses pass.
+  for (const email of ["person@example.test", "per\u{200d}son@example.test", "per\u{200c}son@example.test"]) {
+    assert.equal(hasNonJoinerFormatCharacter(email), false, JSON.stringify(email));
+    assert.deepEqual(await sessionSeen(email), { userId: USER_A, email }, JSON.stringify(email));
+  }
+});
+
+// A neutral module whose `change` waits for the test, as a method waits for
+// a native dialog, before it writes its record and answers.
+function createQueuedEngineModule(name, gates) {
+  return {
+    apiVersion: 1,
+    id: `test.${name}`,
+    desktopExtensions: [
+      {
+        id: name,
+        methods: {
+          change: async (payload, host) => {
+            await new Promise((resolve) => gates.push(resolve));
+            if (payload?.refuse) {
+              throw new Error("refused");
+            }
+            host.consentStore.write({ bin: payload.bin });
+            return payload.bin;
+          },
+          read: (_payload, host) => host.consentStore.read(),
+        },
+        readOnlyMethods: ["read"],
+      },
+    ],
+    desktopRuntimeLaunchGrants: [
+      {
+        id: name,
+        protectedEnvKeys: [`INSTAFY_${name.toUpperCase().replace(/-/g, "_")}_BIN`],
+        resolve: () => null,
+      },
+    ],
+  };
+}
+
+test("a module's consent changes run one at a time, end to end, and neither a read nor another module waits for them", async () => {
+  const gates = [];
+  const otherGates = [];
+  const registry = createDesktopExtensionRegistry([
+    createQueuedEngineModule("queued-engine", gates),
+    createQueuedEngineModule("other-engine", otherGates),
+  ]);
+  const consents = memoryConsents();
+  const call = (extensionId, methodId, payload) =>
+    invokeDesktopExtensionWithLaunchGrants({
+      registry,
+      extensionId,
+      methodId,
+      payload,
+      host: hostFor({ consents }),
+      withRuntimeLock: async (operation) => await operation(),
+      runningRuntime: () => null,
+      replaceRuntime: async () => "replaced",
+    });
+  const aWhile = async () => {
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  const first = call("queued-engine", "change", { bin: "/a" });
+  const second = call("queued-engine", "change", { bin: "/b" });
+  await aWhile();
+  // Only the first has started; a read answers at once, and so does another module.
+  assert.equal(gates.length, 1);
+  assert.equal(await call("queued-engine", "read"), null);
+  const other = call("other-engine", "change", { bin: "/other" });
+  await aWhile();
+  otherGates.shift()();
+  assert.equal(await other, "/other");
+
+  gates.shift()();
+  assert.equal(await first, "/a");
+  await aWhile();
+  assert.equal(gates.length, 1, "the second starts once the first has settled");
+  assert.deepEqual(await call("queued-engine", "read"), { bin: "/a" });
+  gates.shift()();
+  assert.equal(await second, "/b");
+
+  // A change that fails does not hold up the next one.
+  const refused = call("queued-engine", "change", { refuse: true });
+  const after = call("queued-engine", "change", { bin: "/c" });
+  await aWhile();
+  assert.equal(gates.length, 1);
+  gates.shift()();
+  await assert.rejects(refused, /refused/);
+  await aWhile();
+  gates.shift()();
+  assert.equal(await after, "/c");
+  assert.deepEqual(await call("queued-engine", "read"), { bin: "/c" });
+});
+
+test("a call without a host gets no native dialog of any kind", async () => {
+  const registry = createDesktopExtensionRegistry([
+    createFixtureModule({
+      desktopExtensions: [
+        {
+          id: "weather",
+          methods: {
+            ask: (_payload, host) => host.dialogs.showMessageBox({ message: "?", buttons: ["OK"] }),
+            pickFile: (_payload, host) => host.dialogs.pickFile({}),
+            pickFolder: (_payload, host) => host.dialogs.pickFolder({}),
+          },
+        },
+      ],
+    }),
+  ]);
+  for (const method of ["ask", "pickFile", "pickFolder"]) {
+    await assert.rejects(registry.invoke("weather", method, {}), /Desktop dialogs are unavailable for this call\./, method);
+  }
+  // With a host, the shell's own dialogs answer.
+  assert.equal(await registry.invoke("weather", "pickFolder", {}, hostFor()), null);
 });
 
 test("consent records are kept per module, controller origin and user", async () => {

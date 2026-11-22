@@ -1,6 +1,7 @@
-//! A local-engine turn (docs/Local-Engine-Turns.md 3.1, 11.12): the person's own Claude Code,
-//! signed in on this computer, carries out one turn of their agent, in the space's folder, and the
-//! turn saves what it changed, unless it only plans (`plan_only`). In order:
+//! A local-engine turn (docs/Local-Engine-Turns.md 3.1, 11.12, 11.19): the person's own Claude
+//! Code, signed in on this computer in the folder of the login the turn's lease took, carries out
+//! one turn of their agent, in the space's folder, and the turn saves what it changed, unless it
+//! only plans (`plan_only`). In order:
 //!
 //! 1. The job's process-environment lock, then whether its lease still holds.
 //! 2. The workspace token, verified: the end-of-turn save needs it, and a lane job has no
@@ -10,11 +11,13 @@
 //! 4. The pre-flight of 3.9 (`claude_code::preflight`), which a Stop ends.
 //! 5. The starting point: the folder's `git status` (without one the turn ends here), the record a
 //!    Stop reports from, and the pages of other chats the turn holds.
-//! 6. The per-turn probe, which decides, and which a plan limit's hold fails (11.11); then whether
-//!    the lease still holds, as the last step before the spawn.
-//! 7. `claude`, run and stopped by `claude_code::supervise`, its steps and reply draft streamed
-//!    through the handler every turn shares. It resumes the lane's session whichever computer saved
-//!    it; when this one does not have it, `claude` starts once more in a new session (11.9).
+//! 6. The per-turn probe of the program and the turn's login, which decides, and which a plan
+//!    limit's hold of that login fails (11.11); then whether the lease still holds, as the last
+//!    step before the spawn.
+//! 7. `claude`, with the login's `CLAUDE_CONFIG_DIR` (none for Claude Code's usual folder), run and
+//!    stopped by `claude_code::supervise`, its steps and reply draft streamed through the handler
+//!    every turn shares. It resumes the lane's session whichever computer saved it; when this one
+//!    does not have it, `claude` starts once more in a new session (11.9).
 //! 8. The save of a successful run that applies its changes, through the lane filter
 //!    (`claude_code::saves`), and the turn's [`JobExecution`]: provider `claude-code`, the lane's
 //!    conversation state, `apply/files`, `origin/apply`, `claude-code/usage` and
@@ -22,10 +25,11 @@
 //!
 //! However `claude` ended, what it changed under another chat's page is put back first. A failure
 //! saves nothing and fails the job with its `claude-code/failure` code; one at the Claude plan's
-//! limit also holds the lane until the limit resets (11.11). A save that fails after a run that
-//! went well fails nothing: the reply is delivered, with a note that the changes stayed on this
-//! computer (D-C/D-V). A Stop ends as a lost lease, and the executor reports what the turn
-//! changed. While the runtime shuts down, the turn reports nothing.
+//! limit also holds the turn's login until the limit resets, while the person's other logins keep
+//! taking turns (11.11, 11.19). A save that fails after a run that went well fails nothing: the
+//! reply is delivered, with a note that the changes stayed on this computer (D-C/D-V). A Stop ends
+//! as a lost lease, and the executor reports what the turn changed. While the runtime shuts down,
+//! the turn reports nothing.
 //!
 //! Every status step the turn sends as a note (what stayed on this computer, what was not saved,
 //! permission denials, programs stopped) carries `presentation.placement: "reply_note"`: Studio
@@ -127,6 +131,7 @@ impl JobProcessor {
         let lane_job =
             LaneJob::of(job, lane.grant()).map_err(|failure| lane_error(failure, Vec::new()))?;
         let mode = lane_job.mode();
+        let login = lane_job.login();
 
         // 1. One turn's process environment at a time, as for every turn.
         let _job_process_env_guard = JOB_PROCESS_ENV_LOCK.lock().await;
@@ -232,14 +237,15 @@ impl JobProcessor {
             Some(&git_status_before),
         );
 
-        // 6. The per-turn probe decides. One that disagrees with the registered capability
-        // publishes the new value, and the registration loop registers again (3.2). While a plan
-        // limit holds the lane, a turn that was leased all the same fails as `plan_limit`
-        // (11.11).
-        let probe = lane.probe_and_publish().await;
+        // 6. The per-turn probe of the program and the turn's login decides. One that disagrees
+        // with the registered capability publishes the new value, and the registration loop
+        // registers again (3.2). While a plan limit holds the login, a turn that was leased on it
+        // all the same fails as `plan_limit` (11.11, 11.19).
+        let probe = lane.probe_and_publish(login).await;
         if probe.capability_changed {
             tracing::info!(
                 job_id = %job.id,
+                %login,
                 ready = probe.readiness.is_ready(),
                 "the Claude Code capability changed at a turn's probe; this runtime registers again"
             );
@@ -255,9 +261,9 @@ impl JobProcessor {
         };
         confirm_lease_held(cancel_signal.as_ref(), "before Claude Code started").await?;
 
-        // 7. `claude`, supervised. It resumes the lane's session whichever computer saved it; when
-        // this one does not have it, the turn starts `claude` once more without `--resume`, in a
-        // new session (11.9).
+        // 7. `claude`, supervised, with the environment of the login the probe checked. It
+        // resumes the lane's session whichever computer saved it; when this one does not have it,
+        // the turn starts `claude` once more without `--resume`, in a new session (11.9).
         let resume = resume_session(job.payload.get("provider_conversation_state"));
         let mcp_config = McpConfigFile::create(lane.grant()).map_err(|error| {
             lane_error(
@@ -288,6 +294,7 @@ impl JobProcessor {
         let limits = self.claude_code_turn_limits();
         tracing::info!(
             job_id = %job.id,
+            %login,
             cli = %ready.cli(),
             mode = mode.as_str(),
             resumed = resume.is_some(),
@@ -358,10 +365,11 @@ impl JobProcessor {
                     code = ?failure.code,
                     "Claude Code's turn failed; nothing is saved"
                 );
-                // The person's other waiting turns wait for the plan's limit to reset, instead of
-                // each starting and failing in turn (11.11).
+                // The person's other waiting turns on this login wait for its plan's limit to
+                // reset, instead of each starting and failing in turn; their other logins keep
+                // taking turns (11.11, 11.19).
                 if failure.code == Some(FailureCode::PlanLimit) {
-                    lane.hold_for_plan_limit(failure.resets_at);
+                    lane.hold_for_plan_limit(login, failure.resets_at);
                 }
                 return Err(lane_error(failure, artifacts));
             }

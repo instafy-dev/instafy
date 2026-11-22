@@ -1,6 +1,7 @@
 //! The local-engine lane before a turn runs (docs/Local-Engine-Turns.md, section 8): the capture
-//! of Desktop's launch grant, the probe of the granted `claude`, the capability and the plan
-//! limit's hold of it (11.11), and the exact command and environment the child gets.
+//! of Desktop's launch grant, the probe of the granted `claude` and of each of the person's Claude
+//! Code logins (11.19), the capability and the plan limit's hold of a login (11.11), and the exact
+//! command and environment each login's child gets.
 //!
 //! Hermetic: temporary folders and tests/fixtures/fake-claude, started through a wrapper each
 //! test writes. Nothing runs a real `claude` or looks one up on PATH. The process-wide capture
@@ -20,8 +21,8 @@ use runtime_agent::claude_code::command::{
 };
 use runtime_agent::claude_code::{
     self, BIN_ENV, CapturedGrant, Confinement, ENV_JSON_ENV, ExecutionMode, LAUNCH_GRANT_ENV_KEYS,
-    Lane, LaunchEnvSnapshot, LaunchGrant, NotReadyReason, PATH_ENV, RawLaunchGrant, Readiness,
-    Trust, USER_ID_ENV,
+    LOGINS_JSON_ENV, Lane, LaunchEnvSnapshot, LaunchGrant, NotReadyReason, PATH_ENV,
+    RawLaunchGrant, Readiness, Trust, USER_ID_ENV,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -32,6 +33,17 @@ const FIXTURES: &str = concat!(
     "/tests/fixtures/fake-claude-fixtures"
 );
 const USER_ID: &str = "6f1c2f6e-9d8a-4f7b-8f61-3c1f0a2b4d5e";
+/// The person's login in a folder of its own, `home/.claude-work`, the first the grant names.
+/// Its id and [`USUAL`]'s are the ones runtime-contracts' `capability` fixture lists.
+const WORK: &str = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+/// The person's login in Claude Code's usual folder: its child gets no `CLAUDE_CONFIG_DIR`.
+const USUAL: &str = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+/// A third login, in `home/.claude-personal`, for the tests that need two folders of their own.
+const PERSONAL: &str = "3c9d7e15-2a4b-4e8f-9c6d-1b2a3f4e5d06";
+
+fn id(login: &str) -> Uuid {
+    Uuid::parse_str(login).unwrap()
+}
 
 fn folder(path: &Path, mode: u32) -> PathBuf {
     std::fs::create_dir_all(path).unwrap();
@@ -48,6 +60,13 @@ fn quote(value: impl AsRef<std::ffi::OsStr>) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+fn fixtures() -> Value {
+    serde_json::from_str(include_str!(
+        "../../runtime-contracts/src/claude_code_lane_fixtures.json"
+    ))
+    .expect("the lane fixtures are JSON")
+}
+
 /// One call of the fake, as it recorded it.
 #[derive(Debug)]
 struct Call {
@@ -57,13 +76,21 @@ struct Call {
     stdin: Vec<u8>,
 }
 
+impl Call {
+    /// The `CLAUDE_CONFIG_DIR` the call ran with: its login's folder, none for the usual folder.
+    fn config_dir(&self) -> Option<&str> {
+        self.env.get("CLAUDE_CONFIG_DIR").map(String::as_str)
+    }
+}
+
 /// What `/bin/sh` itself exports, and the wrapper's settings for the fake.
 fn is_shell_or_fake_setting(name: &str) -> bool {
     matches!(name, "PWD" | "OLDPWD" | "SHLVL" | "_") || name.starts_with("FAKE_CLAUDE_")
 }
 
 /// A temporary computer: the granted `claude` (a wrapper that sets the fake's settings and execs
-/// it), a workspace, a home, a temporary folder, and the record of the fake's calls.
+/// it), a workspace, a home with the folder of the person's work login, a temporary folder, and
+/// the record of the fake's calls.
 struct Machine {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -78,6 +105,7 @@ impl Machine {
             ("workspace", 0o755),
             ("workspace/space", 0o755),
             ("home", 0o700),
+            ("home/.claude-work", 0o700),
             ("tmp", 0o700),
             ("record", 0o700),
         ] {
@@ -97,6 +125,11 @@ impl Machine {
         self.root.join("workspace")
     }
 
+    /// The folder of the [`WORK`] login.
+    fn work_folder(&self) -> PathBuf {
+        self.root.join("home/.claude-work")
+    }
+
     /// The fake's answers for the next calls, as `FAKE_CLAUDE_<name>` values.
     fn settings(&self, settings: &[(&str, &str)]) {
         let mut text = format!(
@@ -108,6 +141,12 @@ impl Machine {
             text.push_str(&format!("FAKE_CLAUDE_{name}={}\n", quote(value)));
         }
         std::fs::write(self.root.join("fake-claude.env"), text).unwrap();
+    }
+
+    /// The `auth status` answer of the login whose folder is `folder` (the fake's
+    /// `fake-claude-auth`), in place of `FAKE_CLAUDE_AUTH`.
+    fn answer_for(&self, folder: &Path, answer: &str) {
+        std::fs::write(folder.join("fake-claude-auth"), answer).unwrap();
     }
 
     /// Writes a wrapper at `path`, replacing any by a rename, so nothing ever executes a file
@@ -143,12 +182,23 @@ impl Machine {
         })
     }
 
+    /// `INSTAFY_CLAUDE_CODE_LOGINS_JSON` with the [`WORK`] login, then the [`USUAL`] one.
+    fn logins_json(&self) -> OsString {
+        json!([
+            { "id": WORK, "configDir": self.work_folder() },
+            { "id": USUAL, "configDir": null },
+        ])
+        .to_string()
+        .into()
+    }
+
     fn raw(&self) -> RawLaunchGrant {
         RawLaunchGrant {
             bin: Some(self.bin().into_os_string()),
             path: None,
             user_id: Some(USER_ID.into()),
             env_json: None,
+            logins_json: Some(self.logins_json()),
         }
     }
 
@@ -231,33 +281,77 @@ fn args(list: &[&[&str]]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The capability of a machine's grant whose program and two logins are ready, each signed in
+/// with a Claude plan (the fake's default answer).
+fn ready_capability() -> Value {
+    json!({
+        "version": 2,
+        "ready": true,
+        "cli": "2.1.325",
+        "verified": true,
+        "partialMessages": true,
+        "logins": {
+            WORK: { "ready": true, "planSignIn": true, "signedIn": true },
+            USUAL: { "ready": true, "planSignIn": true, "signedIn": true },
+        },
+    })
+}
+
+/// The capability of a machine's grant whose program is not ready for `reason` before any login's
+/// `auth status` ran: each login carries the program's reason.
+fn not_ready_capability(reason: &str) -> Value {
+    json!({
+        "version": 2,
+        "ready": false,
+        "reason": reason,
+        "logins": {
+            WORK: { "ready": false, "reason": reason, "planSignIn": false },
+            USUAL: { "ready": false, "reason": reason, "planSignIn": false },
+        },
+    })
+}
+
+/// The startup and timed probe (3.2, 11.19): `--version` and `--help` once for the program, in
+/// the first login's environment, then `auth status` once for each login, at the same time, each
+/// with its own `CLAUDE_CONFIG_DIR` and nothing else changed; and the version 2 capability they
+/// give.
 #[tokio::test]
-async fn a_supported_claude_gives_the_ready_capability_from_its_three_probe_calls() {
+async fn a_supported_claude_gives_the_ready_capability_from_one_program_probe_and_each_logins_sign_in()
+ {
     let machine = Machine::new();
     let lane = machine.lane();
-    let probe = lane.probe_and_publish().await;
-    assert!(probe.capability_changed);
-    assert_eq!(
-        lane.capability(),
-        Some(json!({
-            "version": 1,
-            "ready": true,
-            "cli": "2.1.325",
-            "verified": true,
-            "planSignIn": true,
-            "partialMessages": true,
-        }))
-    );
+    assert!(lane.probe_and_publish_all().await);
+    assert_eq!(lane.capability(), Some(ready_capability()));
     let calls = machine.calls();
     assert_eq!(
         calls
             .iter()
             .map(|call| call.argv.clone())
             .collect::<Vec<_>>(),
-        args(&[&["--version"], &["--help"], &["auth", "status"]])
+        args(&[
+            &["--version"],
+            &["--help"],
+            &["auth", "status"],
+            &["auth", "status"]
+        ])
     );
+    let work = machine.work_folder().display().to_string();
+    for call in &calls[..2] {
+        assert_eq!(call.config_dir(), Some(work.as_str()), "{:?}", call.argv);
+    }
+    let mut folders: Vec<Option<&str>> = calls[2..].iter().map(Call::config_dir).collect();
+    folders.sort();
+    assert_eq!(folders, [None, Some(work.as_str())]);
+    let without_folder = |call: &Call| {
+        let mut env = call.env.clone();
+        env.remove("CLAUDE_CONFIG_DIR");
+        env
+    };
+    for call in &calls[1..] {
+        assert_eq!(without_folder(call), without_folder(&calls[0]));
+    }
     let tmp = machine.root.join("tmp");
-    let mut folders = BTreeSet::new();
+    let mut cwds = BTreeSet::new();
     for call in &calls {
         // stdin from null, and a fresh runtime-owned folder outside the workspace, removed after.
         assert!(call.stdin.is_empty());
@@ -269,9 +363,9 @@ async fn a_supported_claude_gives_the_ready_capability_from_its_three_probe_call
                 .is_some_and(|name| name.starts_with("instafy-claude-code-probe-"))
         );
         assert!(!call.cwd.exists());
-        folders.insert(call.cwd.clone());
+        cwds.insert(call.cwd.clone());
     }
-    assert_eq!(folders.len(), calls.len());
+    assert_eq!(cwds.len(), calls.len());
     assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
 }
 
@@ -296,12 +390,16 @@ async fn each_reason_is_produced() {
     ] {
         machine.settings(settings);
         let lane = machine.lane();
-        let probe = lane.probe_and_publish().await;
-        assert_eq!(probe.readiness.reason(), Some(reason), "{settings:?}");
+        assert!(lane.probe_and_publish_all().await);
         assert_eq!(
             lane.capability(),
-            Some(json!({ "version": 1, "ready": false, "reason": reason.as_str() }))
+            Some(not_ready_capability(reason.as_str())),
+            "{settings:?}"
         );
+        // A turn's probe on either login says the program's reason.
+        for login in [WORK, USUAL] {
+            assert_eq!(lane.probe(id(login)).await.reason(), Some(reason));
+        }
     }
 
     // A probe command that outlives its limit is killed, and the probe fails.
@@ -312,7 +410,7 @@ async fn each_reason_is_produced() {
             .with_probe_timeout(Duration::from_millis(300));
         let started = std::time::Instant::now();
         assert_eq!(
-            lane.probe().await.reason(),
+            lane.probe(id(WORK)).await.reason(),
             Some(NotReadyReason::ProbeFailed)
         );
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -328,62 +426,93 @@ async fn each_reason_is_produced() {
         Trust::current(),
     );
     assert_eq!(
-        Lane::new(grant).probe().await.reason(),
+        Lane::new(grant).probe(id(WORK)).await.reason(),
         Some(NotReadyReason::BinaryMissing)
     );
 
     chmod(&machine.bin(), 0o757);
+    let lane = machine.lane();
     assert_eq!(
-        machine.lane().probe().await.reason(),
+        lane.probe(id(USUAL)).await.reason(),
         Some(NotReadyReason::BinaryUnsafe)
     );
+    assert!(lane.probe_and_publish_all().await);
+    assert_eq!(
+        lane.capability(),
+        Some(not_ready_capability("binary_unsafe"))
+    );
     chmod(&machine.bin(), 0o755);
-    assert!(machine.lane().probe().await.is_ready());
+    assert!(machine.lane().probe(id(WORK)).await.is_ready());
 }
 
 #[tokio::test]
 async fn a_flag_missing_from_help_is_logged_and_does_not_fail_the_probe() {
     let machine = Machine::new();
     machine.settings(&[("HELP", "missing-flags")]);
-    let readiness = machine.lane().probe().await;
+    let readiness = machine.lane().probe(id(WORK)).await;
     assert_eq!(
         ready(&readiness).help().missing_flags(),
         ["--permission-prompts", "--include-partial-messages"]
     );
 }
 
+/// Each login has its own sign-in (3.2, 11.19): `planSignIn` only for a Claude plan sign-in, and
+/// `signedIn` by how `auth status` exited, true for 0, false for 1, and absent when the probe
+/// could not tell. Neither ever makes a login not ready.
 #[tokio::test]
-async fn plan_sign_in_is_true_only_for_a_claude_plan_sign_in() {
+async fn plan_sign_in_and_signed_in_are_each_logins_own() {
     let machine = Machine::new();
-    for (auth, plan) in [
-        ("claude-ai", true),
-        ("oauth-token", true),
-        ("api-key", false),
-        ("signed-out", false),
+    for (auth, plan, signed_in) in [
+        ("claude-ai", true, Some(true)),
+        ("oauth-token", true, Some(true)),
+        ("api-key", false, Some(true)),
+        ("signed-out", false, Some(false)),
+        ("unreadable", false, None),
     ] {
-        machine.settings(&[("AUTH", auth)]);
-        let readiness = machine.lane().probe().await;
+        machine.answer_for(&machine.work_folder(), auth);
+        let lane = machine.lane();
+        let readiness = lane.probe(id(WORK)).await;
         assert_eq!(ready(&readiness).plan_sign_in(), plan, "{auth}");
-        assert_eq!(readiness.capability()["planSignIn"], json!(plan), "{auth}");
+        assert_eq!(ready(&readiness).signed_in(), signed_in, "{auth}");
     }
-    // A sign-in check that cannot finish says nothing about a plan; the lane stays ready.
-    machine.settings(&[("AUTH", "hang")]);
+
+    // One login signed out and the other signed in with a Claude plan, in one probe.
+    machine.answer_for(&machine.work_folder(), "signed-out");
+    let lane = machine.lane();
+    assert!(lane.probe_and_publish_all().await);
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true);
+    assert_eq!(
+        capability["logins"][WORK],
+        json!({ "ready": true, "planSignIn": false, "signedIn": false })
+    );
+    assert_eq!(
+        capability["logins"][USUAL],
+        json!({ "ready": true, "planSignIn": true, "signedIn": true })
+    );
+
+    // A sign-in check that cannot finish says nothing about a plan or a sign-in; the login stays
+    // ready.
+    machine.answer_for(&machine.work_folder(), "hang");
     let lane = machine
         .lane()
         .with_probe_timeout(Duration::from_millis(300));
-    assert!(!ready(&lane.probe().await).plan_sign_in());
+    let readiness = lane.probe(id(WORK)).await;
+    assert!(!ready(&readiness).plan_sign_in());
+    assert_eq!(ready(&readiness).signed_in(), None);
 }
 
 #[tokio::test]
 async fn verified_holds_only_up_to_the_contract_constant() {
     let machine = Machine::new();
-    let supported = machine.lane().probe().await;
+    let supported = machine.lane().probe(id(WORK)).await;
     assert!(ready(&supported).verified());
     machine.settings(&[("VERSION", "newer")]);
-    let newer = machine.lane().probe().await;
+    let lane = machine.lane();
+    let newer = lane.probe_and_publish(id(WORK)).await.readiness;
     assert_eq!(ready(&newer).cli().to_string(), "2.1.400");
     assert!(!ready(&newer).verified());
-    assert_eq!(newer.capability()["verified"], json!(false));
+    assert_eq!(lane.capability().unwrap()["verified"], json!(false));
 }
 
 #[tokio::test]
@@ -397,11 +526,12 @@ async fn help_runs_again_only_when_the_version_or_the_binary_changes() {
             .count()
     };
 
-    assert!(lane.probe().await.is_ready());
+    assert!(lane.probe(id(WORK)).await.is_ready());
     assert_eq!(help_calls(&machine.calls_since(0)), 1);
 
+    // Another login's probe reads the same help: it belongs to the program.
     let before = machine.calls().len();
-    assert!(lane.probe().await.is_ready());
+    assert!(lane.probe(id(USUAL)).await.is_ready());
     assert_eq!(
         machine.calls_since(before),
         args(&[&["--version"], &["auth", "status"]])
@@ -410,16 +540,16 @@ async fn help_runs_again_only_when_the_version_or_the_binary_changes() {
     // Another version.
     machine.settings(&[("VERSION", "newer")]);
     let before = machine.calls().len();
-    assert!(lane.probe().await.is_ready());
+    assert!(lane.probe(id(WORK)).await.is_ready());
     assert_eq!(help_calls(&machine.calls_since(before)), 1);
     let before = machine.calls().len();
-    lane.probe().await;
+    lane.probe(id(WORK)).await;
     assert_eq!(help_calls(&machine.calls_since(before)), 0);
 
     // The same version from a binary of another size.
     machine.install_wrapper(&machine.bin(), "an update");
     let before = machine.calls().len();
-    assert!(lane.probe().await.is_ready());
+    assert!(lane.probe(id(WORK)).await.is_ready());
     assert_eq!(help_calls(&machine.calls_since(before)), 1);
 
     // The same size, modified again.
@@ -432,7 +562,7 @@ async fn help_runs_again_only_when_the_version_or_the_binary_changes() {
         .set_modified(modified + Duration::from_secs(10))
         .unwrap();
     let before = machine.calls().len();
-    assert!(lane.probe().await.is_ready());
+    assert!(lane.probe(id(WORK)).await.is_ready());
     assert_eq!(help_calls(&machine.calls_since(before)), 1);
 
     // Another target behind the same granted link.
@@ -446,47 +576,52 @@ async fn help_runs_again_only_when_the_version_or_the_binary_changes() {
         },
         Trust::current(),
     ));
-    let first = linked.probe().await;
+    let first = linked.probe(id(WORK)).await;
     assert_eq!(ready(&first).launch().program(), machine.bin());
     let second_target = machine.root.join("bin/claude-2");
     machine.install_wrapper(&second_target, "");
     std::fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(&second_target, &link).unwrap();
     let before = machine.calls().len();
-    let second = linked.probe().await;
+    let second = linked.probe(id(WORK)).await;
     assert_eq!(ready(&second).launch().program(), second_target);
     assert_eq!(help_calls(&machine.calls_since(before)), 1);
 }
 
+/// A turn's probe covers the program and its own login (3.2, 11.19): one that disagrees with the
+/// capability publishes it to register again. The person's other login keeps what it had.
 #[tokio::test]
 async fn a_per_turn_probe_that_disagrees_publishes_the_capability_to_register_again() {
     let machine = Machine::new();
     let lane = machine.lane();
     let mut updates = lane.subscribe();
-    assert!(lane.probe_and_publish().await.capability_changed);
+    assert!(lane.probe_and_publish(id(WORK)).await.capability_changed);
     assert_eq!(
-        updates.borrow_and_update().as_ref().unwrap()["planSignIn"],
+        updates.borrow_and_update().as_ref().unwrap()["logins"][WORK]["planSignIn"],
         json!(true)
     );
 
     // A turn's probe that agrees changes nothing.
-    assert!(!lane.probe_and_publish().await.capability_changed);
+    assert!(!lane.probe_and_publish(id(WORK)).await.capability_changed);
     assert!(!updates.has_changed().unwrap());
 
-    // The person signed out of Claude Code since the runtime registered.
-    machine.settings(&[("AUTH", "signed-out")]);
-    let probe = lane.probe_and_publish().await;
+    // The person signed out of that login since the runtime registered.
+    machine.answer_for(&machine.work_folder(), "signed-out");
+    let probe = lane.probe_and_publish(id(WORK)).await;
     assert!(probe.readiness.is_ready());
     assert!(probe.capability_changed);
     assert!(updates.has_changed().unwrap());
+    let logins = updates.borrow_and_update().as_ref().unwrap()["logins"].clone();
     assert_eq!(
-        updates.borrow_and_update().as_ref().unwrap()["planSignIn"],
-        json!(false)
+        logins[WORK],
+        json!({ "ready": true, "planSignIn": false, "signedIn": false })
     );
+    // No probe asked the other login's `auth status` yet.
+    assert_eq!(logins[USUAL], json!({ "ready": true, "planSignIn": false }));
 
-    // Claude Code was replaced by a version the lane does not run.
+    // Claude Code was replaced by a version the lane does not run: neither login is ready.
     machine.settings(&[("VERSION", "old")]);
-    let probe = lane.probe_and_publish().await;
+    let probe = lane.probe_and_publish(id(USUAL)).await;
     assert_eq!(
         probe.readiness.reason(),
         Some(NotReadyReason::UnsupportedVersion)
@@ -494,7 +629,20 @@ async fn a_per_turn_probe_that_disagrees_publishes_the_capability_to_register_ag
     assert!(probe.capability_changed);
     assert_eq!(
         lane.capability(),
-        Some(json!({ "version": 1, "ready": false, "reason": "unsupported_version" }))
+        Some(json!({
+            "version": 2,
+            "ready": false,
+            "reason": "unsupported_version",
+            "logins": {
+                WORK: {
+                    "ready": false,
+                    "reason": "unsupported_version",
+                    "planSignIn": false,
+                    "signedIn": false,
+                },
+                USUAL: { "ready": false, "reason": "unsupported_version", "planSignIn": false },
+            },
+        }))
     );
 }
 
@@ -503,7 +651,7 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
     let machine = Machine::new();
     machine.settings(&[("VERSION", "old")]);
     let lane = Arc::new(machine.lane());
-    assert!(!lane.probe_and_publish().await.readiness.is_ready());
+    assert!(lane.probe_and_publish_all().await);
     let mut updates = lane.subscribe();
     updates.borrow_and_update();
     let reprobes = tokio::spawn({
@@ -526,8 +674,8 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
         .expect("a timed probe published the change")
         .unwrap();
     assert_eq!(
-        updates.borrow_and_update().as_ref().unwrap()["ready"],
-        json!(true)
+        updates.borrow_and_update().clone(),
+        Some(ready_capability())
     );
 
     // Once ready, the timer leaves the probing to the turns.
@@ -538,17 +686,164 @@ async fn while_not_ready_a_timed_probe_publishes_once_the_result_changes() {
     reprobes.abort();
 }
 
-/// After a turn failed at the Claude plan's limit, the lane holds until the limit resets (11.11):
-/// its capability says not ready, as `plan_limit` with the reset time, which registers again; a
-/// probe meanwhile runs nothing and says so; and at the reset time the timed probe probes again
-/// and publishes what it finds, here ready, which registers again. A hold that starts while the
-/// timed probe waits wakes it, however long its interval.
+/// A login whose folder fails its checks is not ready, as `binary_unsafe`, and only it (11.19):
+/// the program and the other login stay ready, and nothing runs with that folder. When every
+/// login's folder fails, nothing runs at all.
 #[tokio::test]
-async fn a_plan_limit_holds_the_lane_until_its_reset_time() {
+async fn a_login_whose_folder_fails_its_checks_is_the_only_one_not_ready() {
+    let machine = Machine::new();
+    chmod(&machine.work_folder(), 0o770);
+    let lane = machine.lane();
+    assert!(lane.probe_and_publish_all().await);
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true, "{capability}");
+    assert_eq!(capability["cli"], "2.1.325");
+    assert_eq!(
+        capability["logins"][WORK],
+        json!({ "ready": false, "reason": "binary_unsafe", "planSignIn": false })
+    );
+    assert_eq!(
+        capability["logins"][USUAL],
+        json!({ "ready": true, "planSignIn": true, "signedIn": true })
+    );
+    // The program's commands ran in the other login's environment, and nothing in this one's.
+    let calls = machine.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.argv.clone())
+            .collect::<Vec<_>>(),
+        args(&[&["--version"], &["--help"], &["auth", "status"]])
+    );
+    assert!(calls.iter().all(|call| call.config_dir().is_none()));
+    // A turn's probe on it fails before anything runs.
+    let before = machine.calls().len();
+    assert_eq!(
+        lane.probe(id(WORK)).await.reason(),
+        Some(NotReadyReason::BinaryUnsafe)
+    );
+    assert_eq!(machine.calls().len(), before);
+
+    // A grant whose every login's folder fails its checks runs nothing, and the program is not
+    // ready either.
+    chmod(&machine.work_folder(), 0o770);
+    let only_work = Lane::new(
+        machine.grant_from(
+            RawLaunchGrant {
+                logins_json: Some(
+                    json!([{ "id": WORK, "configDir": machine.work_folder() }])
+                        .to_string()
+                        .into(),
+                ),
+                ..machine.raw()
+            },
+            Trust::current(),
+        ),
+    );
+    let before = machine.calls().len();
+    assert!(only_work.probe_and_publish_all().await);
+    assert_eq!(
+        only_work.capability(),
+        Some(json!({
+            "version": 2,
+            "ready": false,
+            "reason": "binary_unsafe",
+            "logins": {
+                WORK: { "ready": false, "reason": "binary_unsafe", "planSignIn": false },
+            },
+        }))
+    );
+    assert_eq!(machine.calls().len(), before, "nothing ran");
+    chmod(&machine.work_folder(), 0o700);
+}
+
+/// A login whose folder fails its checks, here one that was deleted, is looked at again on the
+/// timer alone (3.2, 11.19): each interval runs that folder's checks, which start nothing, and
+/// neither the program's commands nor the other login's `auth status` run again, however long it
+/// stays granted, and nothing is published. Once the person puts the folder back, the timer
+/// probes that login alone, publishes it ready, and then leaves the probing to the turns.
+#[tokio::test]
+async fn the_timed_probe_checks_a_failing_folder_alone_until_it_passes_and_probes_only_its_login() {
+    let machine = Machine::new();
+    std::fs::remove_dir(machine.work_folder()).unwrap();
+    let lane = Arc::new(machine.lane());
+    assert!(lane.probe_and_publish_all().await);
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true, "{capability}");
+    assert_eq!(capability["logins"][WORK]["reason"], "binary_unsafe");
+    assert_eq!(capability["logins"][USUAL]["ready"], true);
+    let mut updates = lane.subscribe();
+    updates.borrow_and_update();
+    let started = machine.calls().len();
+    let reprobes = tokio::spawn({
+        let lane = lane.clone();
+        async move {
+            lane.reprobe_while_not_ready(Duration::from_millis(50))
+                .await
+        }
+    });
+
+    // A dozen intervals: nothing runs, and nothing is published.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let calls = machine.calls();
+    let usual_sign_ins = |calls: &[Call]| {
+        calls
+            .iter()
+            .filter(|call| call.argv == ["auth", "status"] && call.config_dir().is_none())
+            .count()
+    };
+    assert_eq!(usual_sign_ins(&calls), 1, "only the first probe's");
+    assert_eq!(calls.len(), started, "{:?}", &calls[started..]);
+    assert!(!updates.has_changed().unwrap());
+
+    // The folder is back: that login alone is probed, and published ready.
+    folder(&machine.work_folder(), 0o700);
+    tokio::time::timeout(Duration::from_secs(10), updates.changed())
+        .await
+        .expect("the timer published the folder that passes again")
+        .unwrap();
+    assert_eq!(
+        updates.borrow_and_update().clone(),
+        Some(ready_capability())
+    );
+    let work = machine.work_folder().display().to_string();
+    let probed = &machine.calls()[started..];
+    assert_eq!(
+        probed
+            .iter()
+            .map(|call| call.argv.clone())
+            .collect::<Vec<_>>(),
+        args(&[&["--version"], &["auth", "status"]]),
+        "{probed:?}"
+    );
+    assert!(
+        probed
+            .iter()
+            .all(|call| call.config_dir() == Some(work.as_str())),
+        "{probed:?}"
+    );
+
+    // Then the timer leaves the probing to the turns.
+    let settled = machine.calls().len();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(machine.calls().len(), settled);
+    reprobes.abort();
+}
+
+/// After a turn on a login failed at its Claude plan's limit, that login holds until the limit
+/// resets (11.11, 11.19): the capability says it is not ready, as `plan_limit` with the reset
+/// time, which registers again; a probe of it meanwhile runs nothing and says so, while the
+/// person's other login stays ready and its turns' probes run; and at the reset time the timed
+/// probe probes that login again, and only it, and publishes what it finds, here ready, which
+/// registers again. A hold that starts while the timed probe waits wakes it, however long its
+/// interval.
+#[tokio::test]
+async fn a_plan_limit_holds_its_login_until_its_reset_time_and_the_other_login_runs_on() {
     let machine = Machine::new();
     let lane = Arc::new(machine.lane());
-    assert!(lane.probe_and_publish().await.readiness.is_ready());
+    assert!(lane.probe_and_publish_all().await);
     let ready = lane.capability().unwrap();
+    assert_eq!(ready, ready_capability());
     let mut updates = lane.subscribe();
     updates.borrow_and_update();
     let reprobes = tokio::spawn({
@@ -558,100 +853,190 @@ async fn a_plan_limit_holds_the_lane_until_its_reset_time() {
 
     // A reset time two seconds ahead.
     let resets_at = chrono::Utc::now().timestamp() + 2;
-    let hold = lane.hold_for_plan_limit(Some(resets_at)).expect("a hold");
+    let hold = lane
+        .hold_for_plan_limit(id(WORK), Some(resets_at))
+        .expect("a hold");
     assert_eq!(hold.resets_at().timestamp(), resets_at);
     assert!(updates.has_changed().unwrap());
     let held = updates.borrow_and_update().clone().unwrap();
-    assert_eq!(
-        held,
-        json!({
-            "version": 1,
-            "ready": false,
-            "reason": "plan_limit",
-            "resetsAt": hold.resets_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        })
+    let mut expected = ready.clone();
+    expected["logins"][WORK] = json!({
+        "ready": false,
+        "reason": "plan_limit",
+        "resetsAt": hold.resets_at().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "planSignIn": true,
+        "signedIn": true,
+    });
+    assert_eq!(held, expected);
+    assert!(
+        held["logins"][WORK]["resetsAt"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
     );
-    assert!(held["resetsAt"].as_str().unwrap().ends_with('Z'));
-    assert_eq!(lane.plan_limit_hold(), Some(hold));
+    assert_eq!(lane.plan_limit_hold(id(WORK)), Some(hold));
+    assert_eq!(lane.plan_limit_hold(id(USUAL)), None);
 
-    // Meanwhile a turn's probe runs nothing, says the limit holds, and changes nothing.
+    // Meanwhile a turn's probe of that login runs nothing, says the limit holds, and changes
+    // nothing.
     let before = machine.calls().len();
-    let probe = lane.probe_and_publish().await;
+    let probe = lane.probe_and_publish(id(WORK)).await;
     assert!(matches!(probe.readiness, Readiness::Held(found) if found == hold));
     assert_eq!(probe.readiness.reason(), Some(NotReadyReason::PlanLimit));
     assert!(!probe.capability_changed);
     assert_eq!(machine.calls().len(), before, "nothing was probed");
+    // The person's other login is ready, and its turns' probes run.
+    let probe = lane.probe_and_publish(id(USUAL)).await;
+    assert!(probe.readiness.is_ready());
+    assert!(!probe.capability_changed);
+    let after_usual = machine.calls().len();
+    assert!(after_usual > before, "the other login's probe ran");
 
-    // At the reset time the timed probe probes again, long before its interval.
+    // At the reset time the timed probe probes that login again, long before its interval.
     tokio::time::timeout(Duration::from_secs(20), updates.changed())
         .await
-        .expect("the lane probed again at the reset time")
+        .expect("the login was probed again at the reset time")
         .unwrap();
     assert!(chrono::Utc::now().timestamp() >= resets_at);
     assert_eq!(updates.borrow_and_update().clone(), Some(ready));
-    assert_eq!(lane.plan_limit_hold(), None);
-    assert!(machine.calls().len() > before, "the probe ran");
+    assert_eq!(lane.plan_limit_hold(id(WORK)), None);
+    let reprobed = &machine.calls()[after_usual..];
+    let work = machine.work_folder().display().to_string();
+    assert!(
+        reprobed
+            .iter()
+            .any(|call| call.argv == ["auth", "status"] && call.config_dir() == Some(work.as_str())),
+        "{reprobed:?}"
+    );
+    assert!(
+        reprobed
+            .iter()
+            .all(|call| call.config_dir() == Some(work.as_str())),
+        "only that login was probed: {reprobed:?}"
+    );
 
     // A reset time that has passed holds nothing, and publishes nothing.
-    assert_eq!(lane.hold_for_plan_limit(Some(resets_at - 60)), None);
+    assert_eq!(
+        lane.hold_for_plan_limit(id(WORK), Some(resets_at - 60)),
+        None
+    );
     assert!(!updates.has_changed().unwrap());
     // Without a reset time, the hold is an hour; one further ahead than a week is a week.
     let now = chrono::Utc::now().timestamp();
-    let hour = lane.hold_for_plan_limit(None).expect("a hold");
+    let hour = lane.hold_for_plan_limit(id(USUAL), None).expect("a hold");
     assert!((now + 3_600..=now + 3_602).contains(&hour.resets_at().timestamp()));
     let week = lane
-        .hold_for_plan_limit(Some(now + 30 * 24 * 3_600))
+        .hold_for_plan_limit(id(USUAL), Some(now + 30 * 24 * 3_600))
         .expect("a hold");
     assert!(
         (now + 7 * 24 * 3_600..=now + 7 * 24 * 3_600 + 2).contains(&week.resets_at().timestamp())
     );
-    assert_eq!(lane.plan_limit_hold(), Some(week));
-    assert_eq!(lane.capability().unwrap()["reason"], "plan_limit");
+    assert_eq!(lane.plan_limit_hold(id(USUAL)), Some(week));
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["logins"][USUAL]["reason"], "plan_limit");
+    assert_eq!(capability["logins"][WORK]["ready"], true);
     reprobes.abort();
 }
 
-/// The runtime registers, and so takes any turn, Codex's too, only once the startup probe ended:
-/// its three commands share one limit, the limit of one command, and a probe that runs out of it
-/// is `probe_failed`, which the timed re-probe corrects (3.2). A turn's probe keeps a limit for
-/// each command.
+/// A runtime with two logins, one held by its plan's limit, reports the capability runtime-contracts
+/// records (11.19), with that hold's own reset time.
 #[tokio::test]
-async fn the_startup_probe_has_one_limit_for_its_three_commands() {
+async fn two_logins_one_held_give_the_capability_runtime_contracts_records() {
+    let machine = Machine::new();
+    let lane = machine.lane();
+    assert!(lane.probe_and_publish_all().await);
+    let hold = lane
+        .hold_for_plan_limit(id(USUAL), Some(chrono::Utc::now().timestamp() + 3_600))
+        .expect("a hold");
+    let mut capability = fixtures()["capability"].clone();
+    capability["logins"][USUAL]["resetsAt"] = json!(hold.resets_at_rfc3339());
+    assert_eq!(lane.capability(), Some(capability));
+}
+
+/// The runtime registers, and so takes any turn, Codex's too, only once the startup probe ended:
+/// its commands share one limit, the limit of one command, and a probe that runs out of it is
+/// `probe_failed`, which the timed re-probe corrects (3.2). A turn's probe keeps a limit for each
+/// command.
+#[tokio::test]
+async fn the_startup_probe_has_one_limit_for_all_its_commands() {
     let machine = Machine::new();
     let limit = Duration::from_secs(3);
     // The limit, the last command's kill and a busy machine's slack.
     let at_most = limit + Duration::from_secs(3);
-    let probe_failed = json!({ "version": 1, "ready": false, "reason": "probe_failed" });
 
     // A sign-in check that never finishes.
     machine.settings(&[("AUTH", "hang")]);
     let lane = machine.lane().with_probe_timeout(limit);
     let started = std::time::Instant::now();
-    let probe = lane.probe_and_publish_at_startup().await;
+    assert!(lane.probe_and_publish_at_startup().await);
     assert!(started.elapsed() < at_most, "{:?}", started.elapsed());
-    assert_eq!(probe.readiness.reason(), Some(NotReadyReason::ProbeFailed));
-    assert_eq!(lane.capability(), Some(probe_failed.clone()));
-    // A turn's probe waits out the sign-in check alone, and finds the lane ready.
-    assert!(!ready(&lane.probe().await).plan_sign_in());
+    assert_eq!(
+        lane.capability(),
+        Some(not_ready_capability("probe_failed"))
+    );
+    // A turn's probe waits out the sign-in check alone, and finds its login ready.
+    let readiness = lane.probe(id(WORK)).await;
+    assert!(!ready(&readiness).plan_sign_in());
 
-    // Commands that each finish within the limit, but not all three within it.
+    // Commands that each finish within the limit, but not all within it.
     machine.settings(&[("PROBE_DELAY", "1")]);
     let lane = machine.lane().with_probe_timeout(limit);
     let started = std::time::Instant::now();
-    let probe = lane.probe_and_publish_at_startup().await;
+    assert!(lane.probe_and_publish_at_startup().await);
     assert!(started.elapsed() < at_most, "{:?}", started.elapsed());
-    assert_eq!(probe.readiness.reason(), Some(NotReadyReason::ProbeFailed));
-    assert_eq!(lane.capability(), Some(probe_failed));
-    assert!(lane.probe_and_publish().await.readiness.is_ready());
+    assert_eq!(
+        lane.capability(),
+        Some(not_ready_capability("probe_failed"))
+    );
+    assert!(lane.probe_and_publish_all().await);
+    assert_eq!(lane.capability().unwrap()["ready"], true);
 
     // A claude that answers in time is ready at startup.
     machine.settings(&[]);
     let lane = machine.lane().with_probe_timeout(limit);
-    assert!(
-        lane.probe_and_publish_at_startup()
-            .await
-            .readiness
-            .is_ready()
-    );
+    assert!(lane.probe_and_publish_at_startup().await);
+    assert_eq!(lane.capability(), Some(ready_capability()));
+}
+
+/// The logins' sign-in checks run side by side within the startup probe's one limit (11.19): two
+/// that each take most of it end within it together, where one after the other they would not.
+#[tokio::test]
+async fn the_startup_probe_runs_each_logins_sign_in_check_side_by_side() {
+    let machine = Machine::new();
+    let personal = folder(&machine.root.join("home/.claude-personal"), 0o700);
+    for login_folder in [machine.work_folder(), personal.clone()] {
+        std::fs::write(login_folder.join("fake-claude-auth-delay"), "3").unwrap();
+    }
+    let lane = Lane::new(
+        machine.grant_from(
+            RawLaunchGrant {
+                logins_json: Some(
+                    json!([
+                        { "id": WORK, "configDir": machine.work_folder() },
+                        { "id": PERSONAL, "configDir": personal },
+                    ])
+                    .to_string()
+                    .into(),
+                ),
+                ..machine.raw()
+            },
+            Trust::current(),
+        ),
+    )
+    .with_probe_timeout(Duration::from_secs(5));
+    let started = std::time::Instant::now();
+    assert!(lane.probe_and_publish_at_startup().await);
+    let elapsed = started.elapsed();
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true, "{capability} after {elapsed:?}");
+    for login in [WORK, PERSONAL] {
+        assert_eq!(
+            capability["logins"][login],
+            json!({ "ready": true, "planSignIn": true, "signedIn": true }),
+            "{elapsed:?}"
+        );
+    }
+    assert!(elapsed >= Duration::from_secs(3), "{elapsed:?}");
 }
 
 #[test]
@@ -790,10 +1175,14 @@ fn the_capture_refuses_what_others_can_write_or_the_workspace_holds() {
     }
 }
 
+/// A granted CA file that fails its checks makes the program unsafe, every login with it; a
+/// login's folder gets the checks a granted `CLAUDE_CONFIG_DIR` got (D26), and one that fails
+/// them makes only its own login not ready (11.19). A `CLAUDE_CONFIG_DIR` in
+/// `INSTAFY_CLAUDE_CODE_ENV_JSON` is ignored: never checked, never passed.
 #[tokio::test]
-async fn a_granted_config_dir_or_ca_file_that_fails_its_checks_makes_the_lane_unsafe() {
+async fn a_ca_file_that_fails_its_checks_makes_the_program_unsafe_and_a_folder_only_its_login() {
     let machine = Machine::new();
-    let config_dir = folder(&machine.root.join("home/.claude-work"), 0o700);
+    let config_dir = machine.work_folder();
     let ca_file = machine.root.join("home/corporate-ca.pem");
     std::fs::write(&ca_file, "-----BEGIN CERTIFICATE-----\n").unwrap();
     chmod(&ca_file, 0o644);
@@ -810,11 +1199,12 @@ async fn a_granted_config_dir_or_ca_file_that_fails_its_checks_makes_the_lane_un
         env_json: Some(env.to_string().into()),
         ..machine.raw()
     };
+    let in_workspace = folder(&machine.root.join("workspace/space/.claude"), 0o700);
     let granted = json!({
-        "CLAUDE_CONFIG_DIR": config_dir,
         "NODE_EXTRA_CA_CERTS": ca_file,
         "HTTPS_PROXY": "http://proxy.example:3128",
         "ANTHROPIC_BASE_URL": "http://gateway.example",
+        "CLAUDE_CONFIG_DIR": in_workspace,
     });
     let launch = machine
         .grant_from(with_env(granted.clone()), trust)
@@ -823,48 +1213,91 @@ async fn a_granted_config_dir_or_ca_file_that_fails_its_checks_makes_the_lane_un
     assert_eq!(
         launch.granted_env(),
         [
-            ("CLAUDE_CONFIG_DIR", config_dir.clone().into_os_string()),
             ("HTTPS_PROXY", OsString::from("http://proxy.example:3128")),
             ("NODE_EXTRA_CA_CERTS", ca_file.clone().into_os_string()),
         ]
     );
 
-    let unsafe_check = |env: Value| machine.grant_from(with_env(env), trust).check().err();
-    chmod(&config_dir, 0o770);
-    assert_eq!(
-        unsafe_check(granted.clone()),
-        Some(NotReadyReason::BinaryUnsafe)
-    );
-    chmod(&config_dir, 0o700);
+    let program_check = |env: Value| machine.grant_from(with_env(env), trust).check().err();
     chmod(&ca_file, 0o664);
     assert_eq!(
-        unsafe_check(granted.clone()),
+        program_check(granted.clone()),
         Some(NotReadyReason::BinaryUnsafe)
     );
     chmod(&ca_file, 0o644);
-    let in_workspace = folder(&machine.root.join("workspace/space/.claude"), 0o700);
-    let not_there = machine.root.join("home/.claude-gone");
     for env in [
-        json!({ "CLAUDE_CONFIG_DIR": in_workspace }),
-        json!({ "CLAUDE_CONFIG_DIR": not_there }),
-        json!({ "CLAUDE_CONFIG_DIR": ca_file }),
         json!({ "NODE_EXTRA_CA_CERTS": config_dir }),
         json!({ "NODE_EXTRA_CA_CERTS": machine.root.join("workspace/space/ca.pem") }),
     ] {
         assert_eq!(
-            unsafe_check(env.clone()),
+            program_check(env.clone()),
             Some(NotReadyReason::BinaryUnsafe),
             "{env}"
         );
     }
-    // Through the probe: the lane is not ready, and `claude` never ran.
-    let lane =
-        Lane::new(machine.grant_from(with_env(json!({ "CLAUDE_CONFIG_DIR": not_there })), trust));
+
+    // A login's folder.
+    let with_work_folder = |work_folder: &Path| RawLaunchGrant {
+        logins_json: Some(
+            json!([
+                { "id": WORK, "configDir": work_folder },
+                { "id": USUAL, "configDir": null },
+            ])
+            .to_string()
+            .into(),
+        ),
+        ..machine.raw()
+    };
+    let login_check = |work_folder: &Path, login: &str| {
+        let grant = machine.grant_from(with_work_folder(work_folder), trust);
+        assert!(grant.check().is_ok(), "the program passes");
+        grant
+            .check_login(grant.login(id(login)).unwrap())
+            .map(|login| login.config_dir().map(Path::to_path_buf))
+    };
+    assert_eq!(login_check(&config_dir, WORK), Ok(Some(config_dir.clone())));
+    assert_eq!(login_check(&config_dir, USUAL), Ok(None));
+    chmod(&config_dir, 0o770);
     assert_eq!(
-        lane.probe().await.reason(),
+        login_check(&config_dir, WORK),
+        Err(NotReadyReason::BinaryUnsafe)
+    );
+    chmod(&config_dir, 0o700);
+    let not_there = machine.root.join("home/.claude-gone");
+    let links = folder(&machine.root.join("links"), 0o755);
+    std::os::unix::fs::symlink(&in_workspace, links.join("into-workspace")).unwrap();
+    for work_folder in [
+        in_workspace.clone(),
+        not_there.clone(),
+        ca_file.clone(),
+        links.join("into-workspace"),
+    ] {
+        assert_eq!(
+            login_check(&work_folder, WORK),
+            Err(NotReadyReason::BinaryUnsafe),
+            "{work_folder:?}"
+        );
+        assert_eq!(login_check(&work_folder, USUAL), Ok(None));
+    }
+
+    // Through the probe: that login alone is not ready, and nothing ran with its folder.
+    let lane = Lane::new(machine.grant_from(with_work_folder(&not_there), Trust::current()));
+    assert!(lane.probe_and_publish_all().await);
+    let capability = lane.capability().unwrap();
+    assert_eq!(capability["ready"], true, "{capability}");
+    assert_eq!(capability["logins"][WORK]["reason"], "binary_unsafe");
+    assert_eq!(capability["logins"][USUAL]["ready"], true);
+    assert_eq!(
+        lane.probe(id(WORK)).await.reason(),
         Some(NotReadyReason::BinaryUnsafe)
     );
-    assert!(machine.calls().is_empty());
+    let not_there = not_there.display().to_string();
+    assert!(
+        machine
+            .calls()
+            .iter()
+            .all(|call| call.config_dir() != Some(not_there.as_str()))
+    );
 }
 
 #[test]
@@ -904,76 +1337,95 @@ fn path_entries_come_in_order_once_and_only_when_they_pass_the_checks() {
     );
 }
 
-/// The exact command of a turn in either mode (3.3, 11.12): a `plan_only` turn passes
-/// `--permission-mode plan` where a turn that applies its changes passes `acceptEdits`, and
-/// nothing else differs.
+/// The exact command of a turn in either mode, on either login (3.3, 11.12, 11.19): a
+/// `plan_only` turn passes `--permission-mode plan` where a turn that applies its changes passes
+/// `acceptEdits`, and nothing else differs; the logins' turns differ only in `CLAUDE_CONFIG_DIR`,
+/// the work login's folder or none at all for the usual one.
 #[tokio::test]
-async fn the_turn_command_is_exact_in_either_mode_and_no_bare_is_passed_only_when_listed() {
+async fn the_turn_command_is_exact_in_either_mode_on_either_login_and_no_bare_is_passed_only_when_listed()
+ {
     let machine = Machine::new();
     let prompt = "Rename the `--help` flag in README.md\n\nnaïve résumé 🎉 $HOME \"quotes\" -p\r\n\ttrailing white space  \n";
     let space = machine.root.join("workspace/space");
+    let work = machine.work_folder().display().to_string();
     for (help, no_bare) in [("full", false), ("bare-will-become-default", true)] {
         machine.settings(&[("SCENARIO", "record-only"), ("HELP", help)]);
         let lane = machine.lane();
-        let readiness = lane.probe().await;
-        let ready = ready(&readiness);
-        assert_eq!(ready.help().lists_no_bare(), no_bare);
-        let mcp_config = McpConfigFile::create(lane.grant()).unwrap();
-        let session = Uuid::new_v4();
-        for (mode, permission_mode, resume) in [
-            (ExecutionMode::Apply, "acceptEdits", None),
-            (ExecutionMode::Apply, "acceptEdits", Some(session)),
-            (ExecutionMode::PlanOnly, "plan", None),
-            (ExecutionMode::PlanOnly, "plan", Some(session)),
-        ] {
-            let before = machine.calls().len();
-            let mut child = turn_command(lane.grant(), ready, &mcp_config, mode, resume, &space)
-                .spawn()
-                .unwrap();
-            write_prompt(child.stdin.take().unwrap(), prompt)
-                .await
-                .unwrap();
-            assert!(child.wait().await.unwrap().success());
-            let calls = machine.calls();
-            assert_eq!(calls.len(), before + 1);
-            let call = &calls[before];
-            let mut expected: Vec<String> = [
-                "--print",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-mode",
-                permission_mode,
-                "--permission-prompts",
-                "none",
-                "--setting-sources",
-                "user",
-                "--strict-mcp-config",
-                "--mcp-config",
-            ]
-            .map(String::from)
-            .to_vec();
-            expected.push(mcp_config.path().to_str().unwrap().to_string());
-            expected.push("--include-partial-messages".into());
-            if no_bare {
-                expected.push("--no-bare".into());
+        let mut environments: Vec<BTreeMap<String, String>> = Vec::new();
+        for (login, config_dir) in [(WORK, Some(work.as_str())), (USUAL, None)] {
+            let readiness = lane.probe(id(login)).await;
+            let ready = ready(&readiness);
+            assert_eq!(ready.login().id(), id(login));
+            assert_eq!(ready.help().lists_no_bare(), no_bare);
+            let mcp_config = McpConfigFile::create(lane.grant()).unwrap();
+            let session = Uuid::new_v4();
+            for (mode, permission_mode, resume) in [
+                (ExecutionMode::Apply, "acceptEdits", None),
+                (ExecutionMode::Apply, "acceptEdits", Some(session)),
+                (ExecutionMode::PlanOnly, "plan", None),
+                (ExecutionMode::PlanOnly, "plan", Some(session)),
+            ] {
+                let before = machine.calls().len();
+                let mut child =
+                    turn_command(lane.grant(), ready, &mcp_config, mode, resume, &space)
+                        .spawn()
+                        .unwrap();
+                write_prompt(child.stdin.take().unwrap(), prompt)
+                    .await
+                    .unwrap();
+                assert!(child.wait().await.unwrap().success());
+                let calls = machine.calls();
+                assert_eq!(calls.len(), before + 1);
+                let call = &calls[before];
+                let mut expected: Vec<String> = [
+                    "--print",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-mode",
+                    permission_mode,
+                    "--permission-prompts",
+                    "none",
+                    "--setting-sources",
+                    "user",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                ]
+                .map(String::from)
+                .to_vec();
+                expected.push(mcp_config.path().to_str().unwrap().to_string());
+                expected.push("--include-partial-messages".into());
+                if no_bare {
+                    expected.push("--no-bare".into());
+                }
+                if let Some(session) = resume {
+                    expected.push("--resume".into());
+                    expected.push(session.to_string());
+                }
+                assert_eq!(call.argv, expected);
+                assert_eq!(call.stdin, prompt.as_bytes());
+                assert_eq!(call.cwd, space);
+                let environment: BTreeMap<String, String> =
+                    lane_environment(lane.grant(), ready.launch(), ready.login())
+                        .into_iter()
+                        .map(|(name, value)| {
+                            (name.into_string().unwrap(), value.into_string().unwrap())
+                        })
+                        .collect();
+                assert_eq!(call.env, environment);
+                assert_eq!(call.config_dir(), config_dir, "{login}");
             }
-            if let Some(session) = resume {
-                expected.push("--resume".into());
-                expected.push(session.to_string());
-            }
-            assert_eq!(call.argv, expected);
-            assert_eq!(call.stdin, prompt.as_bytes());
-            assert_eq!(call.cwd, space);
-            let environment: BTreeMap<String, String> =
-                lane_environment(lane.grant(), ready.launch())
+            environments.push(
+                lane_environment(lane.grant(), ready.launch(), ready.login())
                     .into_iter()
+                    .filter(|(name, _)| name != "CLAUDE_CONFIG_DIR")
                     .map(|(name, value)| {
                         (name.into_string().unwrap(), value.into_string().unwrap())
                     })
-                    .collect();
-            assert_eq!(call.env, environment);
+                    .collect(),
+            );
         }
+        assert_eq!(environments[0], environments[1], "only the folder differs");
     }
 }
 
@@ -982,12 +1434,13 @@ async fn the_turn_command_is_exact_in_either_mode_and_no_bare_is_passed_only_whe
 const CHILD: &str = "INSTAFY_CLAUDE_CODE_LANE_TEST_CHILD";
 const CHILD_ROOT: &str = "INSTAFY_CLAUDE_CODE_LANE_TEST_ROOT";
 
-/// The launch environment of a Desktop runtime with a grant, and the poison the lane must keep
-/// from its child: Anthropic and Claude sign-ins in shell variables, another
-/// `CLAUDE_CONFIG_DIR` and proxy, the proxy key, Instafy's tokens, a project secret, and more.
+/// The launch environment of a Desktop runtime with a grant of two logins, and the poison the
+/// lane must keep from its child: Anthropic and Claude sign-ins in shell variables, another
+/// `CLAUDE_CONFIG_DIR` (in the process environment, and in `INSTAFY_CLAUDE_CODE_ENV_JSON`, which
+/// no longer grants one) and proxy, the proxy key, Instafy's tokens, a project secret, and more.
 fn launch_environment(machine: &Machine) -> Vec<(String, OsString)> {
     let root = &machine.root;
-    let config_dir = folder(&root.join("home/.claude"), 0o700);
+    let elsewhere = folder(&root.join("home/.claude-elsewhere"), 0o700);
     let project = folder(&root.join("project"), 0o755);
     folder(&project.join("bin"), 0o755);
     folder(&root.join("workspace/tools"), 0o755);
@@ -998,7 +1451,7 @@ fn launch_environment(machine: &Machine) -> Vec<(String, OsString)> {
     ])
     .unwrap();
     let env_json = json!({
-        "CLAUDE_CONFIG_DIR": config_dir,
+        "CLAUDE_CONFIG_DIR": elsewhere,
         "HTTPS_PROXY": "http://proxy.example:3128",
         "ANTHROPIC_BASE_URL": "http://gateway.example",
         "CLAUDE_CODE_OAUTH_TOKEN": "not-a-real-token",
@@ -1010,6 +1463,7 @@ fn launch_environment(machine: &Machine) -> Vec<(String, OsString)> {
         (PATH_ENV.into(), path),
         (USER_ID_ENV.into(), USER_ID.into()),
         (ENV_JSON_ENV.into(), env_json.to_string().into()),
+        (LOGINS_JSON_ENV.into(), machine.logins_json()),
         ("WORKSPACE_DIR".into(), machine.workspace().into_os_string()),
         ("WORKSPACE_PROJECT_DIR".into(), project.into_os_string()),
         ("HOME".into(), root.join("home").into_os_string()),
@@ -1091,6 +1545,7 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
 
     // SAFETY: this child process runs only this test, so no other thread uses the environment.
     unsafe { claude_code::capture_and_scrub_launch_grant() };
+    assert!(LAUNCH_GRANT_ENV_KEYS.contains(&LOGINS_JSON_ENV));
     for key in LAUNCH_GRANT_ENV_KEYS {
         assert!(
             std::env::var_os(key).is_none(),
@@ -1105,22 +1560,24 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
         lane.grant().confinement().roots(),
         [root.join("workspace"), root.join("project")]
     );
+    assert_eq!(
+        lane.grant()
+            .logins()
+            .iter()
+            .map(|login| (login.id(), login.config_dir().map(Path::to_path_buf)))
+            .collect::<Vec<_>>(),
+        [
+            (id(WORK), Some(root.join("home/.claude-work"))),
+            (id(USUAL), None),
+        ]
+    );
 
     // The capability exists only on macOS (D18), and never holds a path. A leased lane job runs
     // on the captured lane there, and elsewhere fails as `binary_missing`.
     let capability = claude_code::registration_capability();
     if cfg!(target_os = "macos") {
-        assert_eq!(
-            capability,
-            Some(json!({
-                "version": 1,
-                "ready": true,
-                "cli": "2.1.325",
-                "verified": true,
-                "planSignIn": true,
-                "partialMessages": true,
-            }))
-        );
+        assert_eq!(capability, Some(ready_capability()));
+        assert!(!capability.unwrap().to_string().contains('/'));
         assert!(claude_code::lane().is_some());
         assert!(
             matches!(claude_code::lane_for_jobs(), Ok(lane) if std::ptr::eq(lane, captured_lane()))
@@ -1138,12 +1595,18 @@ fn the_capture_scrubs_the_grant_and_reports_the_capability_only_on_macos() {
     // SAFETY: as above.
     unsafe {
         std::env::set_var(BIN_ENV, "/elsewhere/claude");
+        std::env::set_var(LOGINS_JSON_ENV, "[]");
         claude_code::capture_and_scrub_launch_grant();
     }
     assert!(std::env::var_os(BIN_ENV).is_none());
+    assert!(std::env::var_os(LOGINS_JSON_ENV).is_none());
     assert_eq!(captured_lane().grant().binary(), root.join("bin/claude"));
+    assert_eq!(captured_lane().grant().logins().len(), 2);
 }
 
+/// Each login's child gets exactly the allowlist, with that login's own `CLAUDE_CONFIG_DIR` or
+/// none at all for the usual folder (3.4, 11.19), whatever the process environment holds by then
+/// and whatever `INSTAFY_CLAUDE_CODE_ENV_JSON` named.
 #[test]
 fn the_child_gets_only_the_allowlist_whatever_the_process_environment_holds() {
     const TEST: &str = "the_child_gets_only_the_allowlist_whatever_the_process_environment_holds";
@@ -1168,27 +1631,29 @@ fn the_child_gets_only_the_allowlist_whatever_the_process_environment_holds() {
         std::env::set_var("CONTROLLER_ACCESS_TOKEN", "controller-token");
         std::env::set_var("DATABASE_URL", "project-secret");
     }
-    let expected: BTreeMap<String, String> = [
-        ("HOME", root.join("home").display().to_string()),
-        ("USER", "person".to_string()),
-        ("LOGNAME", "person".to_string()),
-        ("SHELL", "/bin/zsh".to_string()),
-        ("TMPDIR", root.join("tmp").display().to_string()),
-        ("LANG", "en_US.UTF-8".to_string()),
-        (
-            "CLAUDE_CONFIG_DIR",
-            root.join("home/.claude").display().to_string(),
-        ),
-        ("HTTPS_PROXY", "http://proxy.example:3128".to_string()),
-        (
-            "PATH",
-            format!("{}:/usr/bin:/bin", root.join("bin").display()),
-        ),
-        ("ENABLE_CLAUDEAI_MCP_SERVERS", "false".to_string()),
-    ]
-    .into_iter()
-    .map(|(name, value)| (name.to_string(), value))
-    .collect();
+    let expected = |config_dir: Option<PathBuf>| -> BTreeMap<String, String> {
+        let mut expected: BTreeMap<String, String> = [
+            ("HOME", root.join("home").display().to_string()),
+            ("USER", "person".to_string()),
+            ("LOGNAME", "person".to_string()),
+            ("SHELL", "/bin/zsh".to_string()),
+            ("TMPDIR", root.join("tmp").display().to_string()),
+            ("LANG", "en_US.UTF-8".to_string()),
+            ("HTTPS_PROXY", "http://proxy.example:3128".to_string()),
+            (
+                "PATH",
+                format!("{}:/usr/bin:/bin", root.join("bin").display()),
+            ),
+            ("ENABLE_CLAUDEAI_MCP_SERVERS", "false".to_string()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+        if let Some(folder) = config_dir {
+            expected.insert("CLAUDE_CONFIG_DIR".into(), folder.display().to_string());
+        }
+        expected
+    };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1196,43 +1661,49 @@ fn the_child_gets_only_the_allowlist_whatever_the_process_environment_holds() {
         .unwrap();
     runtime.block_on(async {
         let lane = captured_lane();
-        let readiness = lane.probe().await;
-        let ready = ready(&readiness);
-        let probe_calls = recorded_calls(&root);
-        assert_eq!(probe_calls.len(), 3);
-        for call in &probe_calls {
-            assert_eq!(call.env, expected, "{:?}", call.argv);
-        }
+        for (login, config_dir, probe_calls) in [
+            (WORK, Some(root.join("home/.claude-work")), 3),
+            (USUAL, None, 2),
+        ] {
+            let before = recorded_calls(&root).len();
+            let readiness = lane.probe(id(login)).await;
+            let ready = ready(&readiness);
+            let calls = recorded_calls(&root);
+            assert_eq!(calls.len(), before + probe_calls, "{login}");
+            for call in &calls[before..] {
+                assert_eq!(call.env, expected(config_dir.clone()), "{:?}", call.argv);
+            }
 
-        let mcp_config = McpConfigFile::create(lane.grant()).unwrap();
-        let space = root.join("workspace/space");
-        let session = Uuid::new_v4();
-        let prompt = "Fix the failing test\n";
-        let mut child = turn_command(
-            lane.grant(),
-            ready,
-            &mcp_config,
-            ExecutionMode::Apply,
-            Some(session),
-            &space,
-        )
-        .spawn()
-        .unwrap();
-        write_prompt(child.stdin.take().unwrap(), prompt)
-            .await
+            let mcp_config = McpConfigFile::create(lane.grant()).unwrap();
+            let space = root.join("workspace/space");
+            let session = Uuid::new_v4();
+            let prompt = "Fix the failing test\n";
+            let mut child = turn_command(
+                lane.grant(),
+                ready,
+                &mcp_config,
+                ExecutionMode::Apply,
+                Some(session),
+                &space,
+            )
+            .spawn()
             .unwrap();
-        assert!(child.wait().await.unwrap().success());
-        let calls = recorded_calls(&root);
-        let turn = calls.last().unwrap();
-        assert_eq!(turn.argv[0], "--print");
-        assert_eq!(
-            turn.argv[turn.argv.len() - 2..],
-            ["--resume".to_string(), session.to_string()]
-        );
-        assert_eq!(turn.stdin, prompt.as_bytes());
-        assert_eq!(turn.cwd, space);
-        assert_eq!(turn.env, expected);
-        assert!(mcp_config.path().starts_with(root.join("tmp")));
+            write_prompt(child.stdin.take().unwrap(), prompt)
+                .await
+                .unwrap();
+            assert!(child.wait().await.unwrap().success());
+            let calls = recorded_calls(&root);
+            let turn = calls.last().unwrap();
+            assert_eq!(turn.argv[0], "--print");
+            assert_eq!(
+                turn.argv[turn.argv.len() - 2..],
+                ["--resume".to_string(), session.to_string()]
+            );
+            assert_eq!(turn.stdin, prompt.as_bytes());
+            assert_eq!(turn.cwd, space);
+            assert_eq!(turn.env, expected(config_dir), "{login}");
+            assert!(mcp_config.path().starts_with(root.join("tmp")));
+        }
     });
 }
 
@@ -1287,21 +1758,19 @@ fn a_personal_browser_runtime_reports_no_capability() {
     ));
 }
 
-/// A malformed grant (a binary path that is not absolute) is no lane: where the lane is offered,
-/// the capability and a leased lane job say why; elsewhere there is no capability, and a lane job
-/// fails as `binary_missing`.
-#[test]
-fn a_malformed_grant_gives_its_reason_where_the_lane_is_offered() {
-    const TEST: &str = "a_malformed_grant_gives_its_reason_where_the_lane_is_offered";
+/// A malformed grant is no lane: where the lane is offered, the capability says why, with no
+/// login, and so does a leased lane job; elsewhere there is no capability, and a lane job fails as
+/// `binary_missing`. Run for a binary path that is not absolute, and for a list of logins that
+/// names one login twice (11.19).
+fn a_malformed_grant_gives_its_reason_where_the_lane_is_offered(
+    test: &str,
+    malformed: impl FnOnce(&Machine, &mut Vec<(String, OsString)>),
+) {
     if child_root().is_none() {
         let machine = Machine::new();
         let mut environment = launch_environment(&machine);
-        for (name, value) in &mut environment {
-            if name.as_str() == BIN_ENV {
-                *value = OsString::from("bin/claude");
-            }
-        }
-        in_child(TEST, environment);
+        malformed(&machine, &mut environment);
+        in_child(test, environment);
         return;
     }
 
@@ -1321,7 +1790,7 @@ fn a_malformed_grant_gives_its_reason_where_the_lane_is_offered() {
     if cfg!(target_os = "macos") {
         assert_eq!(
             claude_code::registration_capability(),
-            Some(json!({ "version": 1, "ready": false, "reason": "binary_unsafe" }))
+            Some(json!({ "version": 2, "ready": false, "reason": "binary_unsafe", "logins": {} }))
         );
         assert!(matches!(
             claude_code::lane_for_jobs(),
@@ -1334,6 +1803,46 @@ fn a_malformed_grant_gives_its_reason_where_the_lane_is_offered() {
             Err(NotReadyReason::BinaryMissing)
         ));
     }
+    // Nothing ran: no probe of what the grant named.
+    assert!(recorded_calls(&child_root().unwrap()).is_empty());
+}
+
+fn replace(environment: &mut [(String, OsString)], key: &str, value: OsString) {
+    for (name, current) in environment.iter_mut() {
+        if name.as_str() == key {
+            *current = value.clone();
+        }
+    }
+}
+
+#[test]
+fn a_binary_path_that_is_not_absolute_makes_the_grant_malformed() {
+    a_malformed_grant_gives_its_reason_where_the_lane_is_offered(
+        "a_binary_path_that_is_not_absolute_makes_the_grant_malformed",
+        |_, environment| replace(environment, BIN_ENV, OsString::from("bin/claude")),
+    );
+}
+
+#[test]
+fn a_login_named_twice_makes_the_grant_malformed() {
+    a_malformed_grant_gives_its_reason_where_the_lane_is_offered(
+        "a_login_named_twice_makes_the_grant_malformed",
+        |machine, environment| {
+            let twice = json!([
+                { "id": WORK, "configDir": machine.work_folder() },
+                { "id": WORK.to_uppercase(), "configDir": null },
+            ]);
+            replace(environment, LOGINS_JSON_ENV, twice.to_string().into());
+        },
+    );
+}
+
+#[test]
+fn a_grant_without_its_logins_is_malformed() {
+    a_malformed_grant_gives_its_reason_where_the_lane_is_offered(
+        "a_grant_without_its_logins_is_malformed",
+        |_, environment| environment.retain(|(name, _)| name.as_str() != LOGINS_JSON_ENV),
+    );
 }
 
 /// Desktop granted nothing: no capability, no lane, and a lane job leased anyway fails as

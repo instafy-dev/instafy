@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { Check, NavArrowDown, NavArrowRight } from "iconoir-react";
@@ -106,14 +107,24 @@ export function useTurnEngineSpeakerLine(
   message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> | null,
 ): string | null {
   const retryContext = useRunFailureRetry();
-  if (!message || hasFailedRunMetadata(message.metadata)) {
-    return null;
-  }
-  const stamped = readControllerStampedTurnEngine(message.metadata);
-  if (!stamped) {
-    return null;
-  }
-  return stamped.presentation.describeSpeaker(retryContext?.turnEngineOwnerOf?.(message) ?? null);
+  const stamped = message && !hasFailedRunMetadata(message.metadata)
+    ? readControllerStampedTurnEngine(message.metadata)
+    : null;
+  const presentation = stamped?.presentation ?? null;
+  // The engine's line may name what it loads for the viewer, such as their
+  // own sign-ins: it reads again when the engine says that changed.
+  const subscribe = useCallback(
+    (onChange: () => void) => presentation?.subscribe?.(onChange) ?? (() => {}),
+    [presentation],
+  );
+  const readLine = () =>
+    presentation && message
+      ? presentation.describeSpeaker(
+          retryContext?.turnEngineOwnerOf?.(message) ?? null,
+          message.metadata as Record<string, unknown>,
+        )
+      : null;
+  return useSyncExternalStore(subscribe, readLine, readLine);
 }
 
 /** Where focus goes once a pressed control leaves the card's actions row. */

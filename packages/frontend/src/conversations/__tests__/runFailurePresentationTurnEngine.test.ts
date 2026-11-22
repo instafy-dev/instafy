@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 // builds its feature composition at startup (features/turnEngineRegistry.ts).
 import "../../features/applicationFrontendFeatureComposition";
 import type { ChatMessage } from "../../screens/studio/types";
-import type { ControllerRuntimeStatusEntry } from "../../services/runtimeController/runtimes";
+import type {
+  ControllerRuntimeClaudeCode,
+  ControllerRuntimeClaudeCodeLogin,
+  ControllerRuntimeStatusEntry,
+} from "../../services/runtimeController/runtimes";
 import {
   describeTurnEngineSendRefusal,
   describeTurnEngineSteerRefusal,
@@ -37,6 +41,16 @@ function laneFailure(code: string | null, extra: Record<string, unknown> = {}) {
   };
 }
 
+// Two of the person's Claude Code logins (docs/Local-Engine-Turns.md 11.19).
+const WORK_LOGIN = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+const OTHER_LOGIN = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+
+/** One of the person's computers here, its program ready, with these logins. */
+function computerWith(logins: Record<string, ControllerRuntimeClaudeCodeLogin>): ControllerRuntimeStatusEntry {
+  const claudeCode: ControllerRuntimeClaudeCode = { ready: true, reason: null, cli: "2.1.325", verified: true, logins };
+  return { runtimeId: "runtime-1", claudeCode } as ControllerRuntimeStatusEntry;
+}
+
 const NOT_SIGNED_IN =
   "Claude Code isn't signed in on this computer. Open a terminal, run claude and sign in, then send your message again.";
 
@@ -65,7 +79,7 @@ describe("a failed turn-engine turn", () => {
     const presentation = resolveRunFailurePresentation({ metadata: laneFailure("not_signed_in"), content: "x" });
     const runtime = {
       runtimeId: "runtime-1",
-      claudeCode: { ready: true, reason: null, cli: "2.2.0", verified: false, planSignIn: true, resetsAt: null },
+      claudeCode: { ready: true, reason: null, cli: "2.2.0", verified: false, logins: {} },
     } as ControllerRuntimeStatusEntry;
     expect(presentation?.turnEngine?.authorText(runtime)).toBe(
       `${NOT_SIGNED_IN} If you're signed in, this newer Claude Code may no longer let other apps use your sign-in.`,
@@ -317,10 +331,14 @@ describe("a turn-engine turn's start", () => {
 
   it("waits for its person's Claude plan's limit while one of their computers holds it", () => {
     const resetsAt = new Date(Date.now() + 2 * 60 * 60_000);
-    const holding = {
-      runtimeId: "runtime-1",
-      claudeCode: { ready: false, reason: null, cli: "2.1.325", verified: true, planSignIn: true, resetsAt: resetsAt.toISOString() },
-    } as ControllerRuntimeStatusEntry;
+    const held: ControllerRuntimeClaudeCodeLogin = {
+      ready: false,
+      reason: "plan_limit",
+      resetsAt: resetsAt.toISOString(),
+      planSignIn: true,
+      signedIn: true,
+    };
+    const holding = computerWith({ [WORK_LOGIN]: held });
     const line = turnEngineStartingLine({
       runMetadata: { ...STAMP, jobId: "job-1" },
       runStatus: "queued",
@@ -329,6 +347,36 @@ describe("a turn-engine turn's start", () => {
     });
     expect(line).toMatch(/^Waiting for your Claude plan's limit to reset at .+…$/u);
     expect(line).toContain(new Intl.DateTimeFormat(undefined, { minute: "2-digit" }).format(resetsAt));
+  });
+
+  // docs/Local-Engine-Turns.md 11.19: the line reads by the login the run's
+  // stamp names, or until the page has the run, the prompt's.
+  it("waits for the limit of the login the turn's stamp names", () => {
+    const resetsAt = new Date(Date.now() + 2 * 60 * 60_000);
+    const held: ControllerRuntimeClaudeCodeLogin = {
+      ready: false,
+      reason: "plan_limit",
+      resetsAt: resetsAt.toISOString(),
+      planSignIn: true,
+      signedIn: true,
+    };
+    const ready: ControllerRuntimeClaudeCodeLogin = { ready: true, reason: null, resetsAt: null, planSignIn: true, signedIn: true };
+    const laptop = computerWith({ [WORK_LOGIN]: held, [OTHER_LOGIN]: ready });
+    const stamped = (loginId: string) => ({ ...STAMP, claudeCode: { version: 1, loginId } });
+    const waiting = (turn: { runMetadata?: unknown; promptMetadata?: unknown }) =>
+      turnEngineStartingLine({ ...turn, runStatus: "queued", owner: PERSON, runtimes: [laptop] });
+    expect(waiting({ runMetadata: { ...stamped(WORK_LOGIN), jobId: "job-1" } })).toMatch(
+      /^Waiting for your Claude plan's limit to reset at .+…$/u,
+    );
+    expect(waiting({ runMetadata: { ...stamped(OTHER_LOGIN), jobId: "job-1" } })).toBe("Waiting for your computer…");
+    // Until the page has the run's metadata, the prompt's stamp names the login.
+    expect(waiting({ runMetadata: { jobId: "job-1" }, promptMetadata: stamped(WORK_LOGIN) })).toMatch(
+      /^Waiting for your Claude plan's limit to reset at .+…$/u,
+    );
+    // The run's own stamp wins over its prompt's.
+    expect(
+      waiting({ runMetadata: { ...stamped(OTHER_LOGIN), jobId: "job-1" }, promptMetadata: stamped(WORK_LOGIN) }),
+    ).toBe("Waiting for your computer…");
   });
 
   it("is worded by its prompt until the page has the run's metadata", () => {

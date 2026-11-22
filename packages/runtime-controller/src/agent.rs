@@ -245,6 +245,12 @@ pub(crate) struct AgentJob {
     /// never leases such a job, since it never advertises the capability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) engine: Option<String>,
+    /// The Claude Code login a local-engine turn's lease took
+    /// (`agent_jobs.claude_code_login_id`, docs/Local-Engine-Turns.md 11.19):
+    /// its runtime runs the turn with that login's folder, and refuses a turn
+    /// on a login its grant does not hold. Absent for every other job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claude_code_login_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,11 +1495,15 @@ struct LeasingRuntime {
 ///   (`device_grants::run_once_job_cannot_start`), and of those only one that
 ///   targets this runtime, targets none, or carries runtime routing metadata
 ///   (a spread job may run on a runtime it does not target). A local-engine
-///   turn counts only for a runtime its person owns with Claude Code ready, as
-///   the lease clause reads them, since it waits unpinned for its person's
-///   computer, possibly for days, and must not keep every other runtime of the
-///   space from this read meanwhile. This read counts every other such job,
-///   whatever the lease query's other filters would say about it.
+///   turn counts only when this runtime could lease it now, by the lease
+///   clause's own lane conditions (`claude_code_lane::lane_turn_runs_on`):
+///   its person's runtime with Claude Code ready on the turn's login, a login
+///   no other turn holds, while this runtime runs no lane turn. Such a turn
+///   waits unpinned for its person's computer, possibly for days, held at a
+///   plan's limit or for a login set up on another computer, and must not
+///   keep this runtime, or any other of the space, from this read meanwhile.
+///   This read counts every other such job, whatever the lease query's other
+///   filters would say about it.
 ///
 /// Anything else, a failed check or a failed read included, takes the leasing
 /// transaction. Every lease and every refusal therefore still happens under
@@ -1524,6 +1534,9 @@ async fn idle_lease_poll_finds_no_work(
                     exists (
                         select 1
                         from agent_jobs aj
+                        ",
+                crate::claude_code_lane::lane_job_login!(),
+                "
                         where aj.project_id = r.project_id
                           and aj.status = 'queued'
                           and not ",
@@ -1537,11 +1550,9 @@ async fn idle_lease_poll_finds_no_work(
                           )
                           and (
                               aj.engine is null
-                              or (
-                                  r.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
-                                      = aj.payload #>> '{user_id}'
-                                  and r.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
-                              )
+                              or ",
+                crate::claude_code_lane::lane_turn_runs_on!("r"),
+                "
                           )
                     ) as has_queued_work
              from runtimes r
@@ -3314,7 +3325,8 @@ const AGENT_COMPLETE_JOB_UPDATE_SQL: &str = "update agent_jobs
            completed_at,
            lease_attempts,
            grant_ids,
-           engine";
+           engine,
+           claude_code_login_id";
 
 /// Logs a completion that matched no job its runtime holds, with the job's
 /// status now. One back in the queue after a lease (`queued`, with
@@ -3518,8 +3530,13 @@ pub(crate) async fn agent_complete(
         return Err(not_found("agent job not found or already completed"));
     };
     // A local-engine turn (crate::claude_code_lane): its completion keeps only
-    // what the lane writes, and bills nothing.
+    // what the lane writes, and bills nothing. Its Claude Code login is the
+    // one its lease took (docs/Local-Engine-Turns.md 11.19), never one its
+    // runtime reports.
     let lane = row.get::<_, Option<String>>("engine").is_some();
+    let lane_login: Option<Uuid> = row
+        .get::<_, Option<Uuid>>("claude_code_login_id")
+        .filter(|_| lane);
     let mut artifacts_value = artifacts_value;
     let mut artifacts_count = artifacts_count;
     // A Codex run log is the only artifact billing reads, and no lane turn
@@ -3795,6 +3812,7 @@ pub(crate) async fn agent_complete(
             lane,
             extract_provider_conversation_state(&proxy_metadata),
             leased_runtime_id,
+            lane_login,
         )
         .filter(|_| !granted);
         if let Err(error) = persist_run_completion_metadata(
@@ -3991,6 +4009,7 @@ pub(crate) async fn agent_complete(
                         &job_payload,
                     ),
                     &job_payload,
+                    lane_login,
                 ),
                 Some(&lease_metrics),
             );
@@ -4003,7 +4022,7 @@ pub(crate) async fn agent_complete(
                     crate::claude_code_lane::reported_failure_code(&artifacts_value),
                     message_metadata.as_object_mut(),
                 ) {
-                    crate::claude_code_lane::stamp_failure(map, code);
+                    crate::claude_code_lane::stamp_failure(map, code, lane_login);
                 }
             }
             // The turn's steps go with its reply, so its done line reads the
@@ -4956,6 +4975,7 @@ pub(crate) async fn enqueue_agent_job_record(
     prompt_id: &Uuid,
     target_runtime_id: Option<Uuid>,
     credential_id: Option<Uuid>,
+    claude_code_login_ids: &[Uuid],
     provider_conversation_state: Option<&JsonValue>,
     research_parent_job_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {
@@ -4986,6 +5006,10 @@ pub(crate) async fn enqueue_agent_job_record(
     let engine = request
         .claude_code_lane
         .map(|_| crate::claude_code_lane::ENGINE);
+    // The Claude Code logins such a turn may run on, in order, as dispatch
+    // resolved them for its agent (docs/Local-Engine-Turns.md 11.19); none
+    // for any other job.
+    let claude_code_login_ids = engine.map(|_| claude_code_login_ids);
 
     let row = transaction
         .query_typed_opt(
@@ -5006,11 +5030,12 @@ pub(crate) async fn enqueue_agent_job_record(
                  agent_role,
                  trigger_received_at,
                  grant_ids,
-                 engine
+                 engine,
+                 claude_code_login_ids
              ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
                  (select parent.id from agent_jobs parent
                   where parent.id = $12 and parent.project_id = $1),
-                 $13, $14, coalesce($15, now()), nullif($16::uuid[], '{}'), $17)
+                 $13, $14, coalesce($15, now()), nullif($16::uuid[], '{}'), $17, $18)
              returning id",
             typed![
                 &project.id,
@@ -5030,6 +5055,7 @@ pub(crate) async fn enqueue_agent_job_record(
                 &trigger.and_then(|trigger| trigger.received_at),
                 &request.grant_ids,
                 &engine,
+                &claude_code_login_ids,
             ],
         )
         .await
@@ -5121,8 +5147,12 @@ pub(crate) async fn lease_next_agent_job(
                            'null'::jsonb
                        ) as owned_paths_json,
                        nullif(aj.payload #>> '{metadata,multiAgentPlan,groupId}', '') as multi_agent_group_id,
-                       nullif(aj.payload #>> '{metadata,multiAgentPlan,parentRuntimeId}', '') as multi_agent_parent_runtime_id
+                       nullif(aj.payload #>> '{metadata,multiAgentPlan,parentRuntimeId}', '') as multi_agent_parent_runtime_id,
+                       job_login.lane_login_id
                 from agent_jobs aj
+                -- The Claude Code login a local-engine turn takes, as
+                -- job_login.lane_login_id (`claude_code_lane::lane_job_login`).
+                ", crate::claude_code_lane::lane_job_login!(), "
                 where aj.project_id = $1
                   and status = 'queued'
                   -- A job holding device grants is leased once, only within
@@ -5141,32 +5171,23 @@ pub(crate) async fn lease_next_agent_job(
                   )
                   -- A local-engine turn runs only on a runtime of its person's
                   -- own in its space: a private runtime the controller
-                  -- attested as theirs, with the `claudeCode` capability
-                  -- registration attested as ready. It waits, queued, until
-                  -- one is, and while another turn of theirs runs: one runs
-                  -- at a time for each person (`claude_code_lane.rs`,
-                  -- docs/Local-Engine-Turns.md 11.7). A hosted runtime has no
-                  -- owner filter below, so this is what keeps it out.
+                  -- attested as theirs, with the `claudeCode` capability of
+                  -- version 2 registration attested as ready on the turn's
+                  -- Claude Code login. It waits, queued, until one is, while
+                  -- another turn runs on that login, and while this runtime
+                  -- runs another: one runs at a time on each login and on
+                  -- each computer, and turns on a person's other logins run
+                  -- meanwhile on their other computers
+                  -- (`claude_code_lane::lane_turn_runs_on`,
+                  -- docs/Local-Engine-Turns.md 11.7, 11.19). A hosted runtime
+                  -- has no owner filter below, so this is what keeps it out.
                   and (
                         aj.engine is null
-                        or (
-                            exists (
-                                select 1 from runtimes lane_runtime
-                                 where lane_runtime.id = $2
-                                   and lane_runtime.project_id = $1
-                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
-                                   and lane_runtime.capabilities #>> '{_instafySelfHostedAccess,ownerUserId}'
-                                       = aj.payload #>> '{user_id}'
-                                   and lane_runtime.capabilities #> '{claudeCode,version}' = '1'::jsonb
-                                   and lane_runtime.capabilities #> '{claudeCode,ready}' = 'true'::jsonb
-                            )
-                            and not exists (
-                                select 1 from agent_jobs running_lane_turn
-                                 where running_lane_turn.engine = 'claude-code'
-                                   and running_lane_turn.status = 'leased'
-                                   and (running_lane_turn.payload ->> 'user_id')
-                                       = (aj.payload ->> 'user_id')
-                            )
+                        or exists (
+                            select 1 from runtimes lane_runtime
+                             where lane_runtime.id = $2
+                               and lane_runtime.project_id = $1
+                               and ", crate::claude_code_lane::lane_turn_runs_on!("lane_runtime"), "
                         )
                   )
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
@@ -5218,7 +5239,7 @@ pub(crate) async fn lease_next_agent_job(
                   )
              ),
              candidate as (
-                select id
+                select id, lane_login_id
                 from eligible_jobs
                 where true
                   and (
@@ -5404,7 +5425,11 @@ pub(crate) async fn lease_next_agent_job(
                  active_input_ready_expires_at = null,
                  active_input_ready_turn_id = null,
                  heartbeat_at = statement_timestamp(),
-                 payload = aj.payload - 'requeuedAt' - 'requeuedReason'
+                 payload = aj.payload - 'requeuedAt' - 'requeuedReason',
+                 -- The login a local-engine turn runs on, which
+                 -- agent_jobs_one_running_claude_code_login_turn_idx holds to
+                 -- one turn at a time; none for any other job.
+                 claude_code_login_id = candidate.lane_login_id
              from candidate
              where aj.id = candidate.id
                -- The candidate came from this statement's snapshot, and its
@@ -5434,13 +5459,14 @@ pub(crate) async fn lease_next_agent_job(
         )
         .await
         .map_err(|error| {
-            // Two of a person's computers leased their waiting local-engine
-            // turns at once, and the one-running-turn index refused the
-            // second (crate::claude_code_lane). The lease's transaction is
-            // spent, so this poll fails and the runtime polls again.
+            // Two computers leased waiting local-engine turns on the same
+            // Claude Code login at once, and the one-running-turn index
+            // refused the second (crate::claude_code_lane). The lease's
+            // transaction is spent, so this poll takes nothing and fails,
+            // and the runtime polls again.
             if crate::claude_code_lane::is_second_running_turn(&error) {
                 return internal_error(
-                    "another Claude Code turn of this person's started meanwhile",
+                    "another Claude Code turn on this login started meanwhile",
                 );
             }
             internal_error(format!("failed to lease job: {error:?}"))
@@ -5658,6 +5684,7 @@ pub(crate) async fn lease_next_agent_job(
         grants,
         grant_token: None,
         engine,
+        claude_code_login_id: row.get("claude_code_login_id"),
     };
 
     Ok(Some(job))
@@ -6670,10 +6697,13 @@ pub(crate) fn build_agent_job_payload(
 /// person's own Claude Code ran) from the job onto its final message. The
 /// Studio words a provider limit on Instafy's account differently from one on
 /// the person's own. A lane turn's message also gets the controller's
-/// `claudeCode` stamp and `managedAiUsed: false` (crate::claude_code_lane).
+/// `claudeCode` stamp, naming `lane_login`, the Claude Code login its lease
+/// took, and `managedAiUsed: false` (crate::claude_code_lane,
+/// docs/Local-Engine-Turns.md 11.19).
 pub(crate) fn stamp_ai_access_mode_from_job_payload(
     metadata: JsonValue,
     job_payload: &JsonValue,
+    lane_login: Option<Uuid>,
 ) -> JsonValue {
     let mode = job_payload
         .get("metadata")
@@ -6686,7 +6716,7 @@ pub(crate) fn stamp_ai_access_mode_from_job_payload(
         (JsonValue::Object(mut map), Some(mode))
             if mode == crate::claude_code_lane::AI_ACCESS_MODE =>
         {
-            crate::claude_code_lane::stamp(&mut map);
+            crate::claude_code_lane::stamp(&mut map, lane_login);
             JsonValue::Object(map)
         }
         (JsonValue::Object(mut map), Some(mode)) => {
@@ -7192,24 +7222,40 @@ mod tests {
         let managed = stamp_ai_access_mode_from_job_payload(
             message.clone(),
             &json!({"metadata": {"aiAccessMode": "managed", "managedAiUsed": false}}),
+            None,
         );
         assert_eq!(managed["aiAccessMode"], "managed");
         let byoc = stamp_ai_access_mode_from_job_payload(
             message.clone(),
             &json!({"metadata": {"aiAccessMode": "byoc"}}),
+            None,
         );
         assert_eq!(byoc["aiAccessMode"], "byoc");
         assert_eq!(
-            stamp_ai_access_mode_from_job_payload(message.clone(), &json!({"metadata": {}})),
+            stamp_ai_access_mode_from_job_payload(message.clone(), &json!({"metadata": {}}), None),
             message
         );
         assert_eq!(
             stamp_ai_access_mode_from_job_payload(
                 message.clone(),
-                &json!({"metadata": {"aiAccessMode": "<script>"}})
+                &json!({"metadata": {"aiAccessMode": "<script>"}}),
+                None,
             ),
             message
         );
+        // A lane turn's reply names the Claude Code login its lease took.
+        let login = Uuid::new_v4();
+        let lane = stamp_ai_access_mode_from_job_payload(
+            message.clone(),
+            &json!({"metadata": {"aiAccessMode": "claude-code"}}),
+            Some(login),
+        );
+        assert_eq!(
+            lane["claudeCode"],
+            json!({ "version": 1, "loginId": login.to_string() })
+        );
+        assert_eq!(lane["aiAccessMode"], "claude-code");
+        assert_eq!(lane["managedAiUsed"], false);
     }
 
     #[test]
@@ -8800,6 +8846,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         };
 
         assert_eq!(
@@ -8919,6 +8966,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), Some(user_id));
@@ -8970,6 +9018,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         };
 
         assert_eq!(extract_controller_subject_user_id(&job), None);
@@ -9033,6 +9082,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         };
 
         let mut legacy_jobs = vec![build_job()];
@@ -9378,6 +9428,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         }];
 
         attach_controller_tokens(

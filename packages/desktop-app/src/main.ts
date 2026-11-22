@@ -64,6 +64,7 @@ import {
   desktopRuntimeLaunchGrantsEqual,
   desktopRuntimeLaunchGrantsForStart,
   desktopRuntimeLaunchGrantsHeld,
+  hasNonJoinerFormatCharacter,
   invokeDesktopExtensionWithLaunchGrants,
   type DesktopExtensionConsentBackend,
   type DesktopExtensionDialogs,
@@ -2100,6 +2101,11 @@ function normalizeDesktopSessionEmail(value: unknown): string | null {
       return null;
     }
   }
+  // An invisible format character, such as a text-direction mark, names no
+  // account: a consent dialog naming this email would read as other words.
+  if (hasNonJoinerFormatCharacter(email)) {
+    return null;
+  }
   return email;
 }
 
@@ -2155,6 +2161,23 @@ function createDesktopExtensionDialogs(window: BrowserWindow | null): DesktopExt
         // A chosen symlink comes back as itself, not its target, so an
         // update that moves the target keeps working.
         properties: ["openFile", "showHiddenFiles", "noResolveAliases"],
+      };
+      const parent = owner();
+      const result = parent
+        ? await dialog.showOpenDialog(parent, openDialogOptions)
+        : await dialog.showOpenDialog(openDialogOptions);
+      return result.canceled ? null : (result.filePaths[0] ?? null);
+    },
+    async pickFolder(options) {
+      const openDialogOptions: Electron.OpenDialogOptions = {
+        title: options.title,
+        message: options.message,
+        buttonLabel: options.buttonLabel,
+        defaultPath: options.defaultPath,
+        // Configuration folders are usually hidden. A chosen symlink comes
+        // back as itself, as a picked file does; the caller checks each
+        // link on the way.
+        properties: ["openDirectory", "showHiddenFiles", "noResolveAliases"],
       };
       const parent = owner();
       const result = parent

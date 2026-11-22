@@ -4,7 +4,7 @@ import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavig
 import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
@@ -71,7 +71,11 @@ import { CredentialNameField } from "./CredentialNameField";
 import { isExpiredCredentialProxyError } from "./proxyError";
 import { canChooseManagedAi, describeManagedAiUnavailable } from "./managedAiAllowance";
 import { APPLICATION_FRONTEND_FEATURES } from "../../../features/applicationFrontendFeatureComposition";
-import type { FrontendTurnEngineAgentAi } from "../../../features/frontendFeatureModule";
+import {
+  turnEngineAgentAiRequestFields,
+  type FrontendTurnEngineAgentAi,
+  type TurnEngineAgentAiRequestFields,
+} from "../../../features/frontendFeatureModule";
 import { useOptionalActiveProjectId } from "../../../projects/ProjectStateProvider";
 import type { FetchRuntimeStatusParams } from "../../../services/runtimeController/runtimes";
 
@@ -97,6 +101,20 @@ const NO_AGENT_AI_ENGINE_IDS: ReadonlySet<string> = new Set();
 function agentAiEngineOf(provider: string | null | undefined): AgentAiEngine | null {
   const normalized = (provider ?? "").trim().toLowerCase();
   return normalized ? AGENT_AI_ENGINES.find((engine) => engine.id === normalized) ?? null : null;
+}
+
+/**
+ * How a list of agents names an agent's AI when it is an engine: the engine's
+ * own words for that agent when it has some, else the engine's name; null for
+ * a connection or Instafy AI.
+ */
+function agentAiEngineLabel(agent: ControllerAgentProfile): ReactNode {
+  const engine = agentAiEngineOf(agent.provider);
+  if (!engine) {
+    return null;
+  }
+  const { AgentLabel } = engine.agentAi;
+  return AgentLabel ? <AgentLabel agent={agent} /> : engine.agentAi.label;
 }
 
 /** An engine's sentence for a save of an agent's AI the controller refused, or null. */
@@ -423,6 +441,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const [agentProviderDraft, setAgentProviderDraft] = useState<AiProviderId>("openai");
   /** The turn engine chosen as the agent's AI, or null for Instafy AI or a connection. */
   const [agentEngineDraft, setAgentEngineDraft] = useState<string | null>(null);
+  /** What that engine's own fields set since it was chosen or the editor opened, or null for nothing. */
+  const [agentEngineFields, setAgentEngineFields] = useState<TurnEngineAgentAiRequestFields | null>(null);
   const [agentModelDraft, setAgentModelDraft] = useState<string | null>(null);
   const [agentCredentialDirty, setAgentCredentialDirty] = useState(false);
   const [agentModelDirty, setAgentModelDirty] = useState(false);
@@ -461,7 +481,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   }, [agents]);
   // @octo's AI when it is not a connection, such as Claude Code
   // (docs/Local-Engine-Turns.md 11.3): the list names it as it names a bot's.
-  const octoAiLabel = octoAgent ? agentAiEngineOf(octoAgent.provider)?.agentAi.label ?? null : null;
+  const octoAiLabel = octoAgent ? agentAiEngineLabel(octoAgent) : null;
   // A new bot's face, and the one a bot gets back when its picture is
   // removed: the hatchling the owner's picture-less bots wear least, counting
   // down from 8 (docs/Brand.md, "Octo's hatchlings").
@@ -887,6 +907,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentCredentialDraft(null);
     setAgentProviderDraft("openai");
     setAgentEngineDraft(null);
+    setAgentEngineFields(null);
     setAgentModelDraft(null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
@@ -964,6 +985,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentCredentialDraft(credentialId);
     setAgentProviderDraft(provider);
     setAgentEngineDraft(null);
+    setAgentEngineFields(null);
     setAgentModelDraft(credential ? modelOptionsForProvider(provider)[0]?.id ?? null : null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
@@ -1014,6 +1036,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     const provider = credential ? resolveCredentialProviderId(credential) : normalizeAiProviderId(agent.provider);
     setAgentProviderDraft(provider);
     setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
+    setAgentEngineFields(null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -1044,6 +1067,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     const provider = credential ? resolveCredentialProviderId(credential) : normalizeAiProviderId(agent.provider);
     setAgentProviderDraft(provider);
     setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
+    setAgentEngineFields(null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -1146,7 +1170,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         };
         const result = await createMyAgent(
           engineId
-            ? { ...profile, provider: engineId }
+            ? { ...turnEngineAgentAiRequestFields(agentEngineFields), ...profile, provider: engineId }
             : {
                 ...profile,
                 credentialId: credentialId || null,
@@ -1216,9 +1240,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     }
     const aiPatch =
       agentEngineDraft !== null
-        ? engineChanged
-          ? { provider: agentEngineDraft }
-          : {}
+        ? {
+            // The engine's own fields go with it, never in place of what the editor sends.
+            ...turnEngineAgentAiRequestFields(agentEngineFields),
+            ...(engineChanged ? { provider: agentEngineDraft } : {}),
+          }
         : engineChanged
           ? hasConnections
             ? { credentialId, ...(agentModelDirty ? { model: agentModelDraft } : {}) }
@@ -1280,6 +1306,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentCredentialDraft,
     agentCredentialDirty,
     agentEngineDraft,
+    agentEngineFields,
     agentProviderDraft,
     codexCredentials.length,
     agents,
@@ -1344,11 +1371,12 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
     agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
     (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
-    agentCredentialDirty || agentModelDirty || agentEngineDraft !== savedAgentEngineId;
+    agentCredentialDirty || agentModelDirty || agentEngineDraft !== savedAgentEngineId || agentEngineFields !== null;
 
   const agentEditorDirty = agentProfileModal?.mode === "create"
     ? Boolean(agentNameDraft || agentHandleDraft || agentAvatarUrlDraft || agentAvatarFileDraft ||
-        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty || agentEngineDraft) ||
+        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty || agentEngineDraft ||
+        agentEngineFields) ||
       agentFaceDraft !== defaultBotFace
     : agentProfileDirty;
   const dismissAgentProfileModal = useStudioEditorDismissal({
@@ -1530,6 +1558,10 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     (agentAiEngineChoices.length > 0 && !hasAgentAiConnections ? INSTAFY_AI_CHOICE : agentProviderDraft);
   const handleAgentAiChange = useCallback(
     (choice: string) => {
+      // Another AI starts without the fields an engine set.
+      if (choice !== agentEngineDraft) {
+        setAgentEngineFields(null);
+      }
       if (AGENT_AI_ENGINES.some((engine) => engine.id === choice)) {
         setAgentEngineDraft(choice);
         return;
@@ -1539,7 +1571,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         handleAgentProviderChange(normalizeAiProviderId(choice));
       }
     },
-    [handleAgentProviderChange],
+    [agentEngineDraft, handleAgentProviderChange],
   );
 
   const handleCreateBotFromManager = useCallback(() => {
@@ -1590,6 +1622,15 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
               <chosenAgentAiEngine.agentAi.Note resolveControllerUrl={resolveTurnEngineControllerUrl} />
             ) : null}
           </>
+        ) : null}
+        aiFields={chosenAgentAiEngine?.agentAi.Fields ? (
+          <chosenAgentAiEngine.agentAi.Fields
+            agent={editingAgent ?? null}
+            fields={agentEngineFields}
+            onFieldsChange={setAgentEngineFields}
+            disabled={Boolean(agentActionPendingId)}
+            resolveControllerUrl={resolveTurnEngineControllerUrl}
+          />
         ) : null}
         modelId={agentModelDraft}
         modelOptions={creatingWithoutConnection || chosenAgentAiEngine ? [] : agentModelOptions}
@@ -2172,7 +2213,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       subtitle={
                         <>
                           {octoAgent.displayName ? octoAgent.displayName : "Octo"}
-                          {octoAiLabel ? ` · ${octoAiLabel}` : ""}
+                          {octoAiLabel ? <> · {octoAiLabel}</> : null}
                         </>
                       }
                       start={<AgentAvatar agent={octoAgent} />}
@@ -2202,7 +2243,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                   const connectedCredential = agent.credentialId ? credentialsById.get(agent.credentialId) : null;
                   // Its AI: an engine such as Claude Code by name (11.3), else the connection it pins.
                   const connectedLabel =
-                    agentAiEngineOf(agent.provider)?.agentAi.label ??
+                    agentAiEngineLabel(agent) ??
                     (connectedCredential ? resolveCredentialLabel(connectedCredential) : null);
                   const pending = agentActionPendingId === agent.id;
                   return (
@@ -2213,7 +2254,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                         subtitle={
                           <>
                             {agent.displayName ? agent.displayName : "Bot"}
-                            {connectedLabel ? ` · ${connectedLabel}` : ""}
+                            {connectedLabel ? <> · {connectedLabel}</> : null}
                           </>
                         }
                         start={<AgentAvatar agent={agent} />}

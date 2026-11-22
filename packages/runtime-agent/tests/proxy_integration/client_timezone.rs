@@ -254,6 +254,7 @@ async fn run_case() -> Result<()> {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     };
     let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
     tokio::time::timeout(

@@ -3,11 +3,21 @@ import type {
   TurnEngineFailureInput,
   TurnEngineTurnOwner,
 } from "../frontendFeatureModule";
-import type { ControllerRuntimeStatusEntry } from "../../services/runtimeController/runtimes";
+import type {
+  ControllerRuntimeClaudeCode,
+  ControllerRuntimeClaudeCodeLogin,
+  ControllerRuntimeStatusEntry,
+} from "../../services/runtimeController/runtimes";
 import {
   formatUsageLimitResetTime,
   usageLimitResetTimeForReader,
 } from "../../conversations/usageLimitReset";
+import {
+  claudeCodeLoginLabel,
+  claudeCodeLoginsSnapshot,
+  subscribeClaudeCodeLogins,
+  type ClaudeCodeLogin,
+} from "./claudeCodeLoginsStore";
 
 /**
  * How a Claude Code turn reads in the chat (docs/Local-Engine-Turns.md 5.5,
@@ -172,15 +182,45 @@ export function claudeCodeStartingLine(owner: TurnEngineTurnOwner | null): strin
 /** What the person whose turn it is reads while it waits for one of their computers (11.14). */
 export const CLAUDE_CODE_WAITING_LINE = "Waiting for your computer…";
 
+const LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * When the viewer's own Claude Code holds their waiting turns until their
+ * The login the controller's stamp names (`claudeCode: {version: 1, loginId}`,
+ * docs/Local-Engine-Turns.md 11.19), lowercase, or null when it names none or
+ * names it as anything but a UUID. Dispatch stamps a run and its prompt with
+ * the first login its job may run on; completion stamps the reply and the
+ * failure with the login the lease took.
+ */
+export function readClaudeCodeStampLoginId(metadata: unknown): string | null {
+  const stamp = isRecord(metadata) ? metadata[CLAUDE_CODE_STAMP_KEY] : null;
+  const loginId = isRecord(stamp) ? stamp["loginId"] : null;
+  return typeof loginId === "string" && LOGIN_ID.test(loginId) ? loginId.toLowerCase() : null;
+}
+
+/** What a runtime attests of one login, by id, or null when it attests no such login. */
+export function claudeCodeRuntimeLogin(
+  capability: ControllerRuntimeClaudeCode | null | undefined,
+  loginId: string,
+): ControllerRuntimeClaudeCodeLogin | null {
+  if (!capability || !Object.prototype.hasOwnProperty.call(capability.logins, loginId)) {
+    return null;
+  }
+  return capability.logins[loginId] ?? null;
+}
+
+/**
+ * When the viewer's own Claude Code holds their waiting turn until a Claude
  * plan's limit resets (11.11), as epoch ms: the earliest reset still ahead
- * that one of their computers in this space reports. Null when none does, or
- * when one of them is ready, so a turn waits only for its lease.
+ * that one of their computers in this space reports for the turn's login
+ * (`loginId`, from the run's stamp, 11.19), or, for a turn whose stamp names
+ * none, for any of their logins. Null when none does, or when one of their
+ * computers here has that login (or, without one, any login) ready, so the
+ * turn waits only for its lease.
  */
 export function claudeCodePlanLimitResetsAt(
   runtimes: readonly ControllerRuntimeStatusEntry[],
   now: number = Date.now(),
+  loginId: string | null = null,
 ): number | null {
   let earliest: number | null = null;
   for (const entry of runtimes) {
@@ -188,12 +228,18 @@ export function claudeCodePlanLimitResetsAt(
     if (!capability) {
       continue;
     }
-    if (capability.ready) {
-      return null;
-    }
-    const resetsAt = capability.resetsAt ? Date.parse(capability.resetsAt) : Number.NaN;
-    if (Number.isFinite(resetsAt) && resetsAt > now && (earliest === null || resetsAt < earliest)) {
-      earliest = resetsAt;
+    const attested = loginId
+      ? [claudeCodeRuntimeLogin(capability, loginId)].filter((login): login is ControllerRuntimeClaudeCodeLogin => login !== null)
+      : Object.values(capability.logins);
+    for (const login of attested) {
+      if (login.ready) {
+        return null;
+      }
+      const resetsAt =
+        login.reason === "plan_limit" && login.resetsAt ? Date.parse(login.resetsAt) : Number.NaN;
+      if (Number.isFinite(resetsAt) && resetsAt > now && (earliest === null || resetsAt < earliest)) {
+        earliest = resetsAt;
+      }
     }
   }
   return earliest;
@@ -203,26 +249,40 @@ export function claudeCodePlanLimitResetsAt(
  * What a Claude Code turn reads while it waits for a computer to take it
  * (its run is queued, 11.14), by viewer: its person waits for their own
  * computer, or for their Claude plan's limit while one of their computers
- * holds it (11.11), and everyone else for that person's computer.
+ * holds the turn's login (`loginId`, from the run's stamp) for it (11.11,
+ * 11.19), and everyone else for that person's computer.
  */
 export function claudeCodeWaitingLine(
   owner: TurnEngineTurnOwner | null,
   runtimes: readonly ControllerRuntimeStatusEntry[] = [],
   now: number = Date.now(),
+  loginId: string | null = null,
 ): string {
   if (!owner?.isViewer) {
     return `Waiting for ${possessive(owner?.name ?? null)} computer…`;
   }
-  const resetsAt = claudeCodePlanLimitResetsAt(runtimes, now);
+  const resetsAt = claudeCodePlanLimitResetsAt(runtimes, now, loginId);
   return resetsAt === null
     ? CLAUDE_CODE_WAITING_LINE
     : `Waiting for your Claude plan's limit to reset at ${formatUsageLimitResetTime(resetsAt, now)}…`;
 }
 
-/** The plain-text line under a Claude Code reply's header (5.7, D20). */
-export function claudeCodeSpeakerLine(owner: TurnEngineTurnOwner | null): string {
+/**
+ * The plain-text line under a Claude Code reply's header (5.7, D20). The
+ * turn's own person, once they have more than one login, reads which of
+ * their logins ran it, by the login completion stamped on the reply (11.19);
+ * everyone else reads it as before, since a login's name is its owner's own.
+ */
+export function claudeCodeSpeakerLine(
+  owner: TurnEngineTurnOwner | null,
+  metadata: unknown = null,
+  logins: readonly ClaudeCodeLogin[] | null = claudeCodeLoginsSnapshot(),
+): string {
   if (owner?.isViewer) {
-    return "Ran on your own Claude Code, on your computer";
+    const label = logins && logins.length > 1 ? claudeCodeLoginLabel(logins, readClaudeCodeStampLoginId(metadata)) : null;
+    return label
+      ? `Ran on your own Claude Code (${label}), on your computer`
+      : "Ran on your own Claude Code, on your computer";
   }
   return `Ran on ${possessive(owner?.name ?? null)} own Claude Code, on their computer`;
 }
@@ -336,12 +396,18 @@ export function isClaudeCodeControllerStamped(metadata: Record<string, unknown>)
 export const CLAUDE_CODE_TURN_PRESENTATION: FrontendTurnEnginePresentation = Object.freeze({
   isControllerStamped: isClaudeCodeControllerStamped,
   describeStart: claudeCodeStartingLine,
-  describeWaiting: (owner: TurnEngineTurnOwner | null, runtimes: readonly ControllerRuntimeStatusEntry[]) =>
-    claudeCodeWaitingLine(owner, runtimes),
+  describeWaiting: (
+    owner: TurnEngineTurnOwner | null,
+    runtimes: readonly ControllerRuntimeStatusEntry[],
+    metadata?: Readonly<Record<string, unknown>> | null,
+  ) => claudeCodeWaitingLine(owner, runtimes, Date.now(), readClaudeCodeStampLoginId(metadata)),
   describeTurnFailure: describeClaudeCodeTurnFailure,
   describeTeammateTurnFailure: claudeCodeTeammateFailureSentence,
   describeSendRefusal: describeClaudeCodeSendRefusal,
   describeSteerRefusal: (code: string) =>
     code.trim() === CLAUDE_CODE_STEER_REFUSED_CODE ? CLAUDE_CODE_STEER_REFUSED : null,
-  describeSpeaker: claudeCodeSpeakerLine,
+  describeSpeaker: (owner: TurnEngineTurnOwner | null, metadata?: Readonly<Record<string, unknown>> | null) =>
+    claudeCodeSpeakerLine(owner, metadata ?? null),
+  // The speaker line names one of the viewer's logins once their list loads.
+  subscribe: subscribeClaudeCodeLogins,
 });

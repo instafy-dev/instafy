@@ -72,9 +72,11 @@ const GRANT_KEYS = [
   "INSTAFY_CLAUDE_CODE_PATH",
   "INSTAFY_CLAUDE_CODE_USER_ID",
   "INSTAFY_CLAUDE_CODE_ENV_JSON",
+  "INSTAFY_CLAUDE_CODE_LOGINS_JSON",
 ];
 // Every key a method may answer with: the shape Studio parses
-// (packages/frontend/src/features/claudeCode/claudeCodeDesktop.ts).
+// (packages/frontend/src/features/claudeCode/claudeCodeDesktop.ts), and
+// each login's in `logins` (docs/Local-Engine-Turns.md 11.19).
 const STATUS_KEYS = [
   "supported",
   "found",
@@ -84,7 +86,16 @@ const STATUS_KEYS = [
   "candidatePath",
   "candidateProblem",
   "shellSetting",
+  "logins",
 ];
+const LOGIN_KEYS = ["id", "folder", "problem"];
+// The person's Claude Code logins, as the controller names them (11.19).
+const LOGIN_1 = "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1";
+const LOGIN_2 = "c2c2c2c2-c2c2-4c2c-8c2c-c2c2c2c2c2c2";
+const LOGIN_3 = "c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3";
+// What Use Claude Code on this computer passes for the first login, named as Studio names it.
+const FIRST_LOGIN = Object.freeze({ loginId: LOGIN_1, label: "Claude Code" });
+const PICK_FOLDER_TEXT = "Choose the Claude Code folder you signed in to";
 
 const tempRoots = [];
 after(() => {
@@ -120,6 +131,10 @@ function makeFixture() {
   const configDir = path.join(home, ".claude-work");
   fs.mkdirSync(configDir);
   fs.chmodSync(configDir, 0o700);
+  // The folder of another login the person signed in to (11.19).
+  const secondConfigDir = path.join(home, ".claude-personal");
+  fs.mkdirSync(secondConfigDir);
+  fs.chmodSync(secondConfigDir, 0o700);
   const caFile = path.join(home, "corp-ca.pem");
   fs.writeFileSync(caFile, "fixture CA bundle\n");
   fs.chmodSync(caFile, 0o644);
@@ -176,6 +191,12 @@ function makeFixture() {
       CLAUDE_CONFIG_DIR: JSON.stringify(configDir),
       NODE_EXTRA_CA_CERTS: JSON.stringify(caFile),
     }),
+    // The program, and none of the D26 values: Claude Code's usual folder.
+    plain: findingShell(binDir, {}),
+    // Another program, with a CA bundle that is not there any more.
+    otherMissingCa: findingShell(otherBinDir, {
+      NODE_EXTRA_CA_CERTS: JSON.stringify(path.join(home, "deleted-ca.pem")),
+    }),
     // A quoted tilde stays as it is: not a full path.
     relativeConfig: findingShell(binDir, { CLAUDE_CONFIG_DIR: '"~/.claude-work"' }),
     // A configuration folder its group can change.
@@ -227,6 +248,10 @@ function makeFixture() {
     aliasSharedConfig: aliasShell("/usr/bin:/bin", {
       CLAUDE_CONFIG_DIR: JSON.stringify(sharedConfigDir),
     }),
+    // The same alias, with a CA bundle that is not there any more.
+    aliasMissingCa: aliasShell("/usr/bin:/bin", {
+      NODE_EXTRA_CA_CERTS: JSON.stringify(path.join(home, "deleted-ca.pem")),
+    }),
     // A shell that ignores its command: no markers at all.
     noMarkers: ["#!/bin/bash", 'echo "this shell ignores -c"', "exit 0"].join("\n"),
     // Hangs past the timeout, with a background job in its group.
@@ -268,6 +293,7 @@ function makeFixture() {
     claude,
     otherClaude,
     configDir,
+    secondConfigDir,
     caFile,
     movedCaFile,
     sharedConfigDir,
@@ -322,12 +348,14 @@ function memoryConsents(initial = {}) {
   };
 }
 
-function fakeDialogs({ answer = 0, pick = null } = {}) {
+function fakeDialogs({ answer = 0, pick = null, folder = null } = {}) {
   const dialogs = {
     shown: [],
     picks: 0,
+    folderPicks: [],
     answer,
     pick,
+    folder,
     async showMessageBox(options) {
       dialogs.shown.push(options);
       return dialogs.answer;
@@ -335,6 +363,10 @@ function fakeDialogs({ answer = 0, pick = null } = {}) {
     async pickFile() {
       dialogs.picks += 1;
       return dialogs.pick;
+    },
+    async pickFolder(options) {
+      dialogs.folderPicks.push(options);
+      return dialogs.folder;
     },
   };
   return dialogs;
@@ -399,30 +431,50 @@ function setup(overrides = {}) {
   return { fixture, consents, extensions, invoke, grantFor, useShell };
 }
 
-async function consentAs(context, host) {
+// Find, then Use Claude Code on this computer for the first login.
+async function consentAs(context, host, login = FIRST_LOGIN) {
   await context.invoke("detect", host);
-  return await context.invoke("enable", host);
+  return await context.invoke("enable", host, login);
+}
+
+function consentStore(context, userId = USER_A) {
+  return registry.createDesktopExtensionConsentStore(context.consents, {
+    moduleId: claudeCode.CLAUDE_CODE_DESKTOP_FEATURE_MODULE_ID,
+    controllerOrigin: CONTROLLER,
+    userId,
+  });
+}
+
+// One login of a record, as Desktop writes it.
+function recordLogin(id, configDir = null, consentVersion = consent.CLAUDE_CODE_CONSENT_VERSION) {
+  return { id, configDir, consentedAt: NOW.toISOString(), consentVersion };
 }
 
 // A consent record as Use Claude Code on this computer writes it, for a test
-// whose login shells need not answer.
+// whose login shells need not answer: by default, one login in the usual folder.
 function writeConsentRecord(context, record) {
-  registry
-    .createDesktopExtensionConsentStore(context.consents, {
-      moduleId: claudeCode.CLAUDE_CODE_DESKTOP_FEATURE_MODULE_ID,
-      controllerOrigin: CONTROLLER,
-      userId: USER_A,
-    })
-    .write({
-      consentedAt: NOW.toISOString(),
-      osUser: "fixture-user",
-      consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
-      ...record,
-    });
+  consentStore(context).write({
+    osUser: "fixture-user",
+    logins: [recordLogin(LOGIN_1)],
+    ...record,
+  });
 }
 
-// The consent dialog's whole text: the design's, then what it lists (4.2).
+function readConsentRecord(context, userId = USER_A) {
+  return consentStore(context, userId).read();
+}
+
+// The dialog that confirms another program or new values while the lane is
+// on: 11.13's text, then what it lists (4.2).
 const consentDetail = (...listed) => [consent.CLAUDE_CODE_CONSENT_TEXT, ...listed].join("\n\n");
+// One login's consent dialog: 11.19's text, then what it lists.
+const loginConsentDetail = (...listed) =>
+  [consent.CLAUDE_CODE_LOGIN_CONSENT_TEXT, ...listed].join("\n\n");
+const loginQuestion = (label, email = "person-a@example.test") =>
+  `Use your Claude Code login "${label}" on this computer for ${email}?`;
+
+const grantedLogins = (grant) => JSON.parse(grant.env.INSTAFY_CLAUDE_CODE_LOGINS_JSON);
+const grantedShellValues = (grant) => JSON.parse(grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON);
 
 // ---------------------------------------------------------------- detection
 
@@ -843,27 +895,65 @@ test("a login-shell configuration folder or CA file passes only by runtime-agent
   assert.equal(usable("CLAUDE_CONFIG_DIR", "/home/person/work/.claude-work"), true);
   assert.equal(usable("NODE_EXTRA_CA_CERTS", "/home/person/work/../person/corp-ca.pem"), true);
 
-  for (const [setting, value] of [
-    ["CLAUDE_CONFIG_DIR", "~/.claude-work"],
-    ["CLAUDE_CONFIG_DIR", ".claude-work"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/.claude-work\n"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/missing"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/corp-ca.pem"],
-    ["NODE_EXTRA_CA_CERTS", "/home/person/.claude-work"],
-    ["NODE_EXTRA_CA_CERTS", "/home/person/shared-ca.pem"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/open-config"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/admin-config"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/foreign-link"],
-    ["CLAUDE_CONFIG_DIR", "/home/person/loop"],
-    ["NODE_EXTRA_CA_CERTS", "/home/other/ca.pem"],
+  // Each refusal says why, in the program's words; a login's folder is
+  // refused with them too (11.19).
+  for (const [setting, value, problem] of [
+    ["CLAUDE_CONFIG_DIR", "~/.claude-work", "relative_path"],
+    ["CLAUDE_CONFIG_DIR", ".claude-work", "relative_path"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/.claude-work\n", "relative_path"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/missing", "missing"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/corp-ca.pem", "not_a_file"],
+    ["NODE_EXTRA_CA_CERTS", "/home/person/.claude-work", "not_a_file"],
+    ["NODE_EXTRA_CA_CERTS", "/home/person/shared-ca.pem", "writable_by_others"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/open-config", "writable_by_others"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/admin-config", "writable_by_others"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/foreign-link", "foreign_owner"],
+    ["CLAUDE_CONFIG_DIR", "/home/person/loop", "too_many_links"],
+    ["NODE_EXTRA_CA_CERTS", "/home/other/ca.pem", "foreign_owner"],
   ]) {
-    assert.equal(usable(setting, value), false, `${setting}=${JSON.stringify(value)}`);
+    const label = `${setting}=${JSON.stringify(value)}`;
+    assert.equal(usable(setting, value), false, label);
+    assert.deepEqual(
+      validation.checkClaudeCodeShellSetting(setting, value, options),
+      { ok: false, problem },
+      label,
+    );
+    if (setting === "CLAUDE_CONFIG_DIR") {
+      assert.deepEqual(validation.checkClaudeCodeConfigFolder(value, options), { ok: false, problem }, label);
+    }
   }
+  // A folder that passes is where its links lead, which is how two logins
+  // that name one folder in two ways are told to share it.
+  for (const folder of [
+    "/home/person/.claude-work",
+    "/home/person/linked-config",
+    "/home/person/work/.claude-work",
+    "/home/person/work/../person/.claude-work/",
+  ]) {
+    assert.deepEqual(
+      validation.checkClaudeCodeConfigFolder(folder, options),
+      { ok: true, target: "/home/person/.claude-work" },
+      folder,
+    );
+    assert.equal(validation.claudeCodeFolderRealPath(folder, files), "/home/person/.claude-work", folder);
+  }
+  // One that is not there is taken as written.
+  assert.equal(
+    validation.claudeCodeFolderRealPath("/home/person/gone/../gone-too/", files),
+    "/home/person/gone-too",
+  );
 
   // Not in a folder Instafy owns, as given or after links; names compare ignoring case.
   assert.equal(
     usable("CLAUDE_CONFIG_DIR", "/home/person/.claude-work", { desktopOwnedPaths: ["/HOME/Person"] }),
     false,
+  );
+  assert.deepEqual(
+    validation.checkClaudeCodeConfigFolder("/home/person/linked-config", {
+      ...options,
+      desktopOwnedPaths: ["/home/person/.claude-work"],
+    }),
+    { ok: false, problem: "inside_instafy_folder" },
   );
   assert.equal(
     usable("CLAUDE_CONFIG_DIR", "/home/person/linked-config", {
@@ -919,33 +1009,50 @@ test("the configuration folder and CA file checks hold on a real file system", (
 
 // ------------------------------------------------------------- the module
 
+const NO_LOGINS = [];
+
+// The D26 values the `found` login shell exports.
+const FIVE_SHELL_VALUES = (fixture) => ({
+  CLAUDE_CONFIG_DIR: fixture.configDir,
+  HTTPS_PROXY: PROXY_WITH_PASSWORD,
+  HTTP_PROXY: "http://proxy.corp.example:3128",
+  NO_PROXY: "localhost,.corp.example",
+  NODE_EXTRA_CA_CERTS: fixture.caFile,
+});
+
+// What every login shares of them: all but the folder, which is the first login's (11.19).
+const FOUR_SHELL_VALUES = (fixture) => {
+  const { CLAUDE_CONFIG_DIR: _folder, ...shared } = FIVE_SHELL_VALUES(fixture);
+  return shared;
+};
+
+// How a dialog lists those four.
+const FOUR_SHELL_LINES = (fixture) =>
+  `From your login shell:\n${Object.entries(FOUR_SHELL_VALUES(fixture))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n")}`;
+
 test("off macOS, status reports supported: false and no grant resolves", async () => {
   const context = setup({ platform: "linux" });
-  const consents = context.consents;
   // Even a record left behind grants nothing there.
-  const store = registry.createDesktopExtensionConsentStore(consents, {
-    moduleId: claudeCode.CLAUDE_CODE_DESKTOP_FEATURE_MODULE_ID,
-    controllerOrigin: CONTROLLER,
-    userId: USER_A,
-  });
-  store.write({
-    binaryPath: context.fixture.claude,
-    pathEntries: [],
-    env: {},
-    consentedAt: NOW.toISOString(),
-    osUser: "fixture-user",
-    consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
-  });
-  const dialogs = fakeDialogs();
-  const host = hostFor({ consents, dialogs });
-  for (const method of ["status", "detect", "locate", "enable"]) {
-    assert.deepEqual(await context.invoke(method, host), {
+  writeConsentRecord(context, { binaryPath: context.fixture.claude, pathEntries: [], env: {} });
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  for (const [method, payload] of [
+    ["status"],
+    ["detect"],
+    ["locate"],
+    ["enable", FIRST_LOGIN],
+    ["addLogin", { loginId: LOGIN_2, label: "Personal", folder: "choose" }],
+  ]) {
+    assert.deepEqual(await context.invoke(method, host, payload), {
       supported: false,
       found: false,
       consented: false,
-    });
+      logins: NO_LOGINS,
+    }, method);
   }
-  assert.equal(dialogs.shown.length + dialogs.picks, 0);
+  assert.equal(dialogs.shown.length + dialogs.picks + dialogs.folderPicks.length, 0);
   assert.equal(await context.grantFor(USER_A), null);
 });
 
@@ -953,47 +1060,54 @@ test("consent is per controller and per user, and grants only the consenting use
   const context = setup();
   const dialogs = fakeDialogs();
   const hostA = hostFor({ consents: context.consents, dialogs });
+  const { claude, binDir, configDir } = context.fixture;
 
   assert.deepEqual(await context.invoke("status", hostA), {
     supported: true,
     found: false,
     consented: false,
+    logins: NO_LOGINS,
   });
   assert.deepEqual(await context.invoke("detect", hostA), {
     supported: true,
     found: true,
-    path: context.fixture.claude,
+    path: claude,
     consented: false,
+    logins: NO_LOGINS,
   });
   // A found path is not a consent.
   assert.equal(await context.grantFor(USER_A), null);
-  assert.deepEqual(await context.invoke("enable", hostA), {
+  assert.deepEqual(await context.invoke("enable", hostA, FIRST_LOGIN), {
     supported: true,
     found: true,
-    path: context.fixture.claude,
+    path: claude,
     consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
   });
 
   const grant = await context.grantFor(USER_A);
   assert.equal(grant.localEngine, "claude-code");
+  assert.deepEqual([...consent.CLAUDE_CODE_LAUNCH_GRANT_ENV_KEYS], GRANT_KEYS);
   assert.deepEqual(Object.keys(grant.env).sort(), [...GRANT_KEYS].sort());
-  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, context.fixture.claude);
-  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, `${context.fixture.binDir}:/usr/bin:/bin`);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, claude);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, `${binDir}:/usr/bin:/bin`);
   assert.equal(grant.env.INSTAFY_CLAUDE_CODE_USER_ID, USER_A);
-  assert.deepEqual(JSON.parse(grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON), {
-    CLAUDE_CONFIG_DIR: path.join(context.fixture.home, ".claude-work"),
-    HTTPS_PROXY: PROXY_WITH_PASSWORD,
-    HTTP_PROXY: "http://proxy.corp.example:3128",
-    NO_PROXY: "localhost,.corp.example",
-    NODE_EXTRA_CA_CERTS: path.join(context.fixture.home, "corp-ca.pem"),
-  });
+  // The login shell's CLAUDE_CONFIG_DIR is the login's folder, never a shared value (11.19).
+  assert.deepEqual([...consent.CLAUDE_CODE_SHARED_ENV_KEYS], [
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+  ]);
+  assert.deepEqual(grantedShellValues(grant), FOUR_SHELL_VALUES(context.fixture));
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_LOGINS_JSON, JSON.stringify([{ id: LOGIN_1, configDir }]));
 
   // Another controller, or another Instafy user, has no consent.
   assert.equal(await context.grantFor(USER_A, OTHER_CONTROLLER), null);
   assert.equal(await context.grantFor(USER_B), null);
-  assert.equal(
-    (await context.invoke("status", hostFor({ consents: context.consents, controllerOrigin: OTHER_CONTROLLER }))).consented,
-    false,
+  assert.deepEqual(
+    await context.invoke("status", hostFor({ consents: context.consents, controllerOrigin: OTHER_CONTROLLER })),
+    { supported: true, found: false, consented: false, logins: NO_LOGINS },
   );
   assert.equal(
     (await context.invoke("status", hostFor({ consents: context.consents, userId: USER_B }))).consented,
@@ -1003,7 +1117,13 @@ test("consent is per controller and per user, and grants only the consenting use
   assert.equal(await context.grantFor(null), null);
 
   // Turning it off removes the record, and with it the grant.
-  assert.equal((await context.invoke("disable", hostA)).consented, false);
+  assert.deepEqual(await context.invoke("disable", hostA), {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: false,
+    logins: NO_LOGINS,
+  });
   assert.equal(await context.grantFor(USER_A), null);
   assert.deepEqual(context.consents.read(), {});
 });
@@ -1060,56 +1180,95 @@ test("a start bound to the visible session gets its user's grant, in an unpackag
   });
   assert.equal(grantsB[0].grant, null);
   assert.equal(registry.desktopRuntimeLaunchGrantsEqual(grantsA, grantsB), false);
+  // Every start strips every key, the logins' among them, granted or not.
   assert.deepEqual(registry.desktopRuntimeLaunchGrantsForStart(grantsB), [
     { protectedEnvKeys: GRANT_KEYS },
   ]);
 });
 
-test("the consent dialog names the host context's account, never a user id in the payload", async () => {
+test("the consent dialog names the host context's account and the folder Desktop read, never anything else in the payload", async () => {
   const context = setup();
   const dialogs = fakeDialogs();
   const hostA = hostFor({ consents: context.consents, dialogs });
+  const { claude, configDir } = context.fixture;
   await context.invoke("detect", hostA, { userId: USER_B, instafyUserId: USER_B });
   await context.invoke("enable", hostA, {
+    ...FIRST_LOGIN,
     userId: USER_B,
     instafyUserId: USER_B,
     email: "person-b@example.test",
     binaryPath: "/tmp/not-this-one",
+    configDir: "/tmp/not-this-folder",
+    folder: "/tmp/not-this-folder",
   });
 
   assert.equal(dialogs.shown.length, 1);
   const [dialog] = dialogs.shown;
-  assert.equal(dialog.message, "Use Claude Code on this computer for person-a@example.test?");
+  assert.equal(dialog.type, "question");
+  assert.equal(dialog.message, 'Use your Claude Code login "Claude Code" on this computer for person-a@example.test?');
   assert.deepEqual(dialog.buttons, ["Use Claude Code", "Cancel"]);
   assert.equal(dialog.cancelId, 1);
   assert.equal(dialog.defaultId, 1);
-  assert.ok(dialog.detail.startsWith(consent.CLAUDE_CODE_CONSENT_TEXT));
-  assert.ok(dialog.detail.includes(`Program: ${context.fixture.claude}`));
-  assert.ok(dialog.detail.includes(`HTTPS_PROXY=${PROXY_WITH_PASSWORD}`));
+  assert.equal(
+    dialog.detail,
+    loginConsentDetail(
+      `Program: ${claude}`,
+      `Claude Code folder: ${configDir}`,
+      [
+        "From your login shell:",
+        `HTTPS_PROXY=${PROXY_WITH_PASSWORD}`,
+        "HTTP_PROXY=http://proxy.corp.example:3128",
+        "NO_PROXY=localhost,.corp.example",
+        `NODE_EXTRA_CA_CERTS=${context.fixture.caFile}`,
+      ].join("\n"),
+    ),
+  );
+  assert.equal(dialog.detail.includes("CLAUDE_CONFIG_DIR"), false);
   assert.equal(dialog.detail.includes(consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT), false);
 
-  assert.notEqual(await context.grantFor(USER_A), null);
+  const grant = await context.grantFor(USER_A);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, claude);
+  assert.deepEqual(grantedLogins(grant), [{ id: LOGIN_1, configDir }]);
   assert.equal(await context.grantFor(USER_B), null);
 });
 
-test("the consent text is the design's, and the dialog adds 4.5's note for a second account", async () => {
+test("the consent texts are the design's, and a login's dialog adds 4.5's note for a second account", async () => {
+  assert.equal(
+    consent.CLAUDE_CODE_LOGIN_CONSENT_TEXT,
+    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself in this login's folder, for the turns of your agents whose AI is this login: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time on each login, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in to this login is yours.",
+  );
+  // 11.13's text, which also confirms another program while the lane is on.
   assert.equal(
     consent.CLAUDE_CODE_CONSENT_TEXT,
     "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.",
   );
+  // A login's text is 11.13's with only 11.19's three changes, so every
+  // other sentence stays as it is.
+  assert.equal(
+    consent.CLAUDE_CODE_LOGIN_CONSENT_TEXT.replace(
+      "yourself in this login's folder, for the turns of your agents whose AI is this login:",
+      "yourself, for the turns of your agents whose AI you set to Claude Code:",
+    )
+      .replace("one at a time on each login, never", "one at a time, never")
+      .replace("signed in to this login is yours.", "signed in on this computer account is yours."),
+    consent.CLAUDE_CODE_CONSENT_TEXT,
+  );
+  assert.equal(consent.CLAUDE_CODE_CONSENT_VERSION, 3);
   assert.equal(
     consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT,
     "Another Instafy account on this computer account also uses Claude Code. Claude Code turns run on whichever Claude sign-in this computer account has. Only continue if it is yours.",
   );
-  for (const banned of ["included", "free", "unlimited"]) {
-    assert.equal(consent.CLAUDE_CODE_CONSENT_TEXT.toLowerCase().includes(banned), false, banned);
+  for (const text of [consent.CLAUDE_CODE_LOGIN_CONSENT_TEXT, consent.CLAUDE_CODE_CONSENT_TEXT]) {
+    for (const banned of ["included", "free", "unlimited"]) {
+      assert.equal(text.toLowerCase().includes(banned), false, banned);
+    }
   }
 
   const context = setup();
   await consentAs(context, hostFor({ consents: context.consents, userId: USER_B, email: "b@example.test" }));
   const dialogs = fakeDialogs();
   await consentAs(context, hostFor({ consents: context.consents, dialogs }));
-  assert.ok(dialogs.shown[0].detail.includes(consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT));
+  assert.ok(dialogs.shown[0].detail.includes(`\n\n${consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT}\n\nProgram: `));
 });
 
 test("cancelling the dialog stores nothing; no session, or no email, stores nothing either", async () => {
@@ -1124,34 +1283,54 @@ test("cancelling the dialog stores nothing; no session, or no email, stores noth
     supported: true,
     found: false,
     consented: false,
+    logins: NO_LOGINS,
   });
-  await assert.rejects(context.invoke("enable", signedOut), /Sign in/);
+  await assert.rejects(context.invoke("enable", signedOut, FIRST_LOGIN), /Sign in/);
+  await assert.rejects(
+    context.invoke("addLogin", signedOut, { loginId: LOGIN_2, label: "Personal", folder: "usual" }),
+    /Sign in/,
+  );
+  await assert.rejects(context.invoke("removeLogin", signedOut, { loginId: LOGIN_1 }), /Sign in/);
   const noController = hostFor({ consents: context.consents, controllerOrigin: null });
   await assert.rejects(context.invoke("detect", noController), /Start a space/);
-  await assert.rejects(
-    context.invoke("enable", hostFor({ consents: context.consents, email: null })),
-    /email/,
-  );
+  for (const [method, payload] of [
+    ["enable", FIRST_LOGIN],
+    ["addLogin", { loginId: LOGIN_2, label: "Personal", folder: "usual" }],
+  ]) {
+    await assert.rejects(
+      context.invoke(method, hostFor({ consents: context.consents, email: null }), payload),
+      /email/,
+    );
+  }
   assert.deepEqual(context.consents.read(), {});
 });
 
-test("extension methods return no secrets", async () => {
+test("extension methods return no secrets, and a login's folder only as that login's", async () => {
   const context = setup();
-  const dialogs = fakeDialogs({ pick: context.fixture.otherClaude });
+  const dialogs = fakeDialogs({ pick: context.fixture.otherClaude, folder: context.fixture.secondConfigDir });
   const host = hostFor({ consents: context.consents, dialogs });
   const results = [];
-  for (const method of ["status", "detect", "enable", "status", "locate", "disable"]) {
-    results.push(await context.invoke(method, host));
+  for (const [method, payload] of [
+    ["status"],
+    ["detect"],
+    ["enable", FIRST_LOGIN],
+    ["status"],
+    ["locate"],
+    ["addLogin", { loginId: LOGIN_2, label: "Personal", folder: "choose" }],
+    ["removeLogin", { loginId: LOGIN_2 }],
+    ["disable"],
+  ]) {
+    results.push(await context.invoke(method, host, payload));
   }
   const returned = JSON.stringify(results);
   for (const secret of [
     "proxy-password",
     PROXY_WITH_PASSWORD,
-    ".claude-work",
     "corp-ca.pem",
     "corp.example",
     "never-printed",
     "INSTAFY_CLAUDE_CODE",
+    "CLAUDE_CONFIG_DIR",
   ]) {
     assert.equal(returned.includes(secret), false, `a method returned ${secret}`);
   }
@@ -1160,7 +1339,16 @@ test("extension methods return no secrets", async () => {
       Object.keys(result).filter((key) => !STATUS_KEYS.includes(key)),
       [],
     );
+    for (const login of result.logins) {
+      assert.deepEqual(Object.keys(login).filter((key) => !LOGIN_KEYS.includes(key)), []);
+    }
+    const { logins: _logins, ...rest } = result;
+    assert.equal(JSON.stringify(rest).includes(".claude-"), false, "a folder outside logins");
   }
+  assert.deepEqual(results[5].logins, [
+    { id: LOGIN_1, folder: context.fixture.configDir },
+    { id: LOGIN_2, folder: context.fixture.secondConfigDir },
+  ]);
 });
 
 test("locate stores a picked program only when it validates, and updates a lane that is on", async () => {
@@ -1181,6 +1369,7 @@ test("locate stores a picked program only when it validates, and updates a lane 
     path: plain,
     consented: false,
     problem: "not_executable",
+    logins: NO_LOGINS,
   });
   assert.equal((await context.invoke("status", host)).found, false);
 
@@ -1188,59 +1377,90 @@ test("locate stores a picked program only when it validates, and updates a lane 
   dialogs.pick = context.fixture.otherClaude;
   assert.equal((await context.invoke("locate", host)).path, context.fixture.otherClaude);
   assert.equal(await context.grantFor(USER_A), null);
-  await context.invoke("enable", host);
+  await context.invoke("enable", host, FIRST_LOGIN);
   assert.equal(
     (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN,
     context.fixture.otherClaude,
   );
 
-  // Consented: a new path changes the grant at once.
+  // Consented: a new path changes the grant at once, and keeps the logins.
   dialogs.pick = context.fixture.claude;
   assert.equal((await context.invoke("locate", host)).path, context.fixture.claude);
-  assert.equal(
-    (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN,
-    context.fixture.claude,
-  );
+  const grant = await context.grantFor(USER_A);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, context.fixture.claude);
+  assert.deepEqual(grantedLogins(grant), [{ id: LOGIN_1, configDir: context.fixture.configDir }]);
 });
 
-test("a record from another OS account or a malformed one grants nothing", async () => {
+test("a record from another OS account, of consent version 2 or malformed grants nothing", async () => {
   const context = setup();
-  const store = registry.createDesktopExtensionConsentStore(context.consents, {
-    moduleId: claudeCode.CLAUDE_CODE_DESKTOP_FEATURE_MODULE_ID,
-    controllerOrigin: CONTROLLER,
-    userId: USER_A,
-  });
+  const store = consentStore(context);
+  const host = hostFor({ consents: context.consents });
+  const { claude, configDir, secondConfigDir } = context.fixture;
   const record = {
-    binaryPath: context.fixture.claude,
+    binaryPath: claude,
     pathEntries: ["/usr/bin"],
     env: {},
-    consentedAt: NOW.toISOString(),
-    osUser: "someone-else",
-    consentVersion: consent.CLAUDE_CODE_CONSENT_VERSION,
+    osUser: "fixture-user",
+    logins: [recordLogin(LOGIN_1, configDir)],
   };
-  store.write(record);
-  assert.equal(await context.grantFor(USER_A), null);
-  // A record given for version 1's words, or for no version, grants nothing:
-  // version 2 runs every turn of the person's Claude Code agents (11.13).
-  const { consentVersion: _version, ...unversioned } = record;
-  store.write({ ...unversioned, osUser: "fixture-user" });
-  assert.equal(await context.grantFor(USER_A), null);
-  store.write({ ...record, osUser: "fixture-user", consentVersion: 1 });
-  assert.equal(await context.grantFor(USER_A), null);
-  store.write({ ...record, osUser: "fixture-user", env: { ANTHROPIC_BASE_URL: "https://x" } });
-  assert.equal(await context.grantFor(USER_A), null);
-  store.write({ ...record, osUser: "fixture-user", pathEntries: ["relative"] });
-  assert.equal(await context.grantFor(USER_A), null);
-  store.write({ ...record, osUser: "fixture-user" });
-  assert.notEqual(await context.grantFor(USER_A), null);
-});
-
-const FIVE_SHELL_VALUES = (fixture) => ({
-  CLAUDE_CONFIG_DIR: fixture.configDir,
-  HTTPS_PROXY: PROXY_WITH_PASSWORD,
-  HTTP_PROXY: "http://proxy.corp.example:3128",
-  NO_PROXY: "localhost,.corp.example",
-  NODE_EXTRA_CA_CERTS: fixture.caFile,
+  const grantOf = async (written) => {
+    store.write(written);
+    return await context.grantFor(USER_A);
+  };
+  assert.notEqual(await grantOf(record), null);
+  const loginIds = Array.from({ length: 11 }, (_, index) =>
+    `${String(index).padStart(8, "0")}-0000-4000-8000-000000000000`,
+  );
+  const elevenLogins = loginIds.map((id, index) => recordLogin(id, `/fixture/login-${index}`));
+  for (const [why, written] of [
+    ["another OS account", { ...record, osUser: "someone-else" }],
+    // Version 2's record: one consent for the whole computer, and no login.
+    [
+      "consent version 2's record",
+      {
+        binaryPath: claude,
+        pathEntries: ["/usr/bin"],
+        env: { CLAUDE_CONFIG_DIR: configDir },
+        consentedAt: NOW.toISOString(),
+        osUser: "fixture-user",
+        consentVersion: 2,
+      },
+    ],
+    ["no login given consent for version 3's words", { ...record, logins: [recordLogin(LOGIN_1, configDir, 2)] }],
+    ["a login without a version", { ...record, logins: [{ id: LOGIN_1, configDir, consentedAt: NOW.toISOString() }] }],
+    ["no login", { ...record, logins: [] }],
+    ["logins that are not a list", { ...record, logins: { [LOGIN_1]: recordLogin(LOGIN_1) } }],
+    ["a login that is not an object", { ...record, logins: [recordLogin(LOGIN_1), "x"] }],
+    ["a login id that is not a UUID", { ...record, logins: [recordLogin("not-a-uuid")] }],
+    ["a login id in upper case", { ...record, logins: [recordLogin(LOGIN_1.toUpperCase())] }],
+    ["a relative folder", { ...record, logins: [recordLogin(LOGIN_1, ".claude-work")] }],
+    ["a folder with a newline", { ...record, logins: [recordLogin(LOGIN_1, `${configDir}\n`)] }],
+    ["a folder that is not a string", { ...record, logins: [recordLogin(LOGIN_1, 7)] }],
+    ["a login without a time", { ...record, logins: [{ ...recordLogin(LOGIN_1), consentedAt: "never" }] }],
+    ["one login twice", { ...record, logins: [recordLogin(LOGIN_1, configDir), recordLogin(LOGIN_1, secondConfigDir)] }],
+    ["one folder twice", { ...record, logins: [recordLogin(LOGIN_1, configDir), recordLogin(LOGIN_2, configDir)] }],
+    ["the usual folder twice", { ...record, logins: [recordLogin(LOGIN_1), recordLogin(LOGIN_2)] }],
+    ["more than ten logins", { ...record, logins: elevenLogins }],
+    ["CLAUDE_CONFIG_DIR among the shared values", { ...record, env: { CLAUDE_CONFIG_DIR: configDir } }],
+    ["a value no grant carries", { ...record, env: { ANTHROPIC_BASE_URL: "https://x" } }],
+    ["a relative PATH entry", { ...record, pathEntries: ["relative"] }],
+  ]) {
+    assert.equal(await grantOf(written), null, why);
+    assert.deepEqual(
+      await context.invoke("status", host),
+      { supported: true, found: false, consented: false, logins: NO_LOGINS },
+      why,
+    );
+  }
+  // A login given consent for other words is left out, and the rest grant.
+  const mixed = await grantOf({ ...record, logins: [recordLogin(LOGIN_1, configDir, 2), recordLogin(LOGIN_2)] });
+  assert.deepEqual(grantedLogins(mixed), [{ id: LOGIN_2, configDir: null }]);
+  // Ten is the most, in the order they were set up.
+  const ten = await grantOf({ ...record, logins: elevenLogins.slice(0, 10) });
+  assert.deepEqual(
+    grantedLogins(ten).map((login) => login.id),
+    loginIds.slice(0, 10),
+  );
 });
 
 test("a login-shell configuration folder or CA file Desktop can't use is named, and never consented to", async () => {
@@ -1260,11 +1480,14 @@ test("a login-shell configuration folder or CA file Desktop can't use is named, 
       consented: false,
       problem: "shell_setting_unusable",
       shellSetting: setting,
+      logins: NO_LOGINS,
     };
     assert.deepEqual(await context.invoke("detect", host), refused, shell);
     assert.deepEqual(await context.invoke("status", host), refused, shell);
-    // runtime-agent would refuse every turn with it, so nobody is asked.
-    assert.deepEqual(await context.invoke("enable", host), refused, shell);
+    // runtime-agent would refuse every turn on that login, or every turn
+    // at all, so nobody is asked. The login shell's CLAUDE_CONFIG_DIR is the
+    // first login's folder.
+    assert.deepEqual(await context.invoke("enable", host, FIRST_LOGIN), refused, shell);
     assert.equal(dialogs.shown.length, 0, shell);
     assert.deepEqual(context.consents.read(), {}, shell);
     assert.equal(await context.grantFor(USER_A), null, shell);
@@ -1281,14 +1504,21 @@ test("a login-shell configuration folder or CA file Desktop can't use is named, 
     consented: false,
     problem: "shell_setting_unusable",
     shellSetting: "CLAUDE_CONFIG_DIR",
+    logins: NO_LOGINS,
   });
 });
 
-test("a configuration folder or CA file that changes after consent shows as the problem", async () => {
+test("a CA file that changes after consent shows as the program's problem, and a login's folder as that login's", async () => {
   const context = setup();
   const host = hostFor({ consents: context.consents });
   const { claude, caFile, configDir } = context.fixture;
-  const on = { supported: true, found: true, path: claude, consented: true };
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
   assert.deepEqual(await consentAs(context, host), on);
   const grant = await context.grantFor(USER_A);
 
@@ -1305,14 +1535,21 @@ test("a configuration folder or CA file that changes after consent shows as the 
   fs.chmodSync(caFile, 0o644);
   assert.deepEqual(await context.invoke("status", host), on);
 
+  // A login's folder that others can change, or that is gone, makes that
+  // login not ready, and the program is still found.
   fs.chmodSync(configDir, 0o770);
   assert.deepEqual(await context.invoke("status", host), {
     ...on,
-    found: false,
-    problem: "shell_setting_unusable",
-    shellSetting: "CLAUDE_CONFIG_DIR",
+    logins: [{ id: LOGIN_1, folder: configDir, problem: "writable_by_others" }],
   });
+  assert.deepEqual(await context.grantFor(USER_A), grant);
   fs.chmodSync(configDir, 0o700);
+  fs.renameSync(configDir, `${configDir}-moved`);
+  assert.deepEqual(await context.invoke("status", host), {
+    ...on,
+    logins: [{ id: LOGIN_1, folder: configDir, problem: "missing" }],
+  });
+  fs.renameSync(`${configDir}-moved`, configDir);
   assert.deepEqual(await context.invoke("status", host), on);
 });
 
@@ -1320,8 +1557,14 @@ test("while the lane is on, Find and a refused Locate answer the path in use, wi
   const context = setup();
   const dialogs = fakeDialogs();
   const host = hostFor({ consents: context.consents, dialogs });
-  const { claude, otherClaude } = context.fixture;
-  const on = { supported: true, found: true, path: claude, consented: true };
+  const { claude, otherClaude, configDir, caFile } = context.fixture;
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
   assert.deepEqual(await consentAs(context, host), on);
   const binaryInUse = async () => (await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_BIN;
 
@@ -1350,12 +1593,12 @@ test("while the lane is on, Find and a refused Locate answer the path in use, wi
   assert.equal(await binaryInUse(), claude);
 
   // Another program whose login-shell values Desktop can't use: named, and not consented to.
-  context.useShell("otherSharedConfig");
+  context.useShell("otherMissingCa");
   const unusable = {
     ...on,
     candidatePath: otherClaude,
     candidateProblem: "shell_setting_unusable",
-    shellSetting: "CLAUDE_CONFIG_DIR",
+    shellSetting: "NODE_EXTRA_CA_CERTS",
   };
   assert.deepEqual(await context.invoke("detect", host), unusable);
   const asked = dialogs.shown.length;
@@ -1363,12 +1606,24 @@ test("while the lane is on, Find and a refused Locate answer the path in use, wi
   assert.equal(dialogs.shown.length, asked);
   assert.equal(await binaryInUse(), claude);
 
-  // Use Claude Code on this computer confirms what Find turned up, through the consent dialog.
+  // While the lane is on, the login shell's CLAUDE_CONFIG_DIR is no login's
+  // folder, so one Desktop can't use keeps nothing from being offered.
+  context.useShell("otherSharedConfig");
+  assert.deepEqual(await context.invoke("detect", host), { ...on, candidatePath: otherClaude });
+
+  // Use Claude Code on this computer confirms what Find turned up, through
+  // 11.13's dialog, for every login, and changes no login.
   context.useShell("foundOther");
   assert.deepEqual(await context.invoke("detect", host), { ...on, candidatePath: otherClaude });
   assert.deepEqual(await context.invoke("enable", host), { ...on, path: otherClaude });
-  assert.ok(dialogs.shown[dialogs.shown.length - 1].detail.includes(`Program: ${otherClaude}`));
+  const confirmed = dialogs.shown[dialogs.shown.length - 1];
+  assert.equal(confirmed.message, "Use Claude Code on this computer for person-a@example.test?");
+  assert.equal(
+    confirmed.detail,
+    consentDetail(`Program: ${otherClaude}`, `From your login shell:\nNODE_EXTRA_CA_CERTS=${caFile}`),
+  );
   assert.equal(await binaryInUse(), otherClaude);
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)), [{ id: LOGIN_1, configDir }]);
 });
 
 test("while the lane is on, Find offers the program in use again with login-shell values that replace recorded ones Desktop can't use", async () => {
@@ -1376,10 +1631,15 @@ test("while the lane is on, Find offers the program in use again with login-shel
   const dialogs = fakeDialogs();
   const host = hostFor({ consents: context.consents, dialogs });
   const { claude, otherClaude, caFile, configDir } = context.fixture;
-  const on = { supported: true, found: true, path: claude, consented: true };
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
   assert.deepEqual(await consentAs(context, host), on);
-  const grantedEnv = async () =>
-    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+  const grantedEnv = async () => grantedShellValues(await context.grantFor(USER_A));
 
   // The CA file goes after consent. A Find whose shell still names it reads nothing new.
   fs.rmSync(caFile);
@@ -1391,20 +1651,23 @@ test("while the lane is on, Find offers the program in use again with login-shel
   };
   assert.deepEqual(await context.invoke("detect", host), stale);
   // New values Desktop can't use either are not offered, and nobody is asked about them.
-  context.useShell("sharedConfig");
+  context.useShell("missingCa");
   assert.deepEqual(await context.invoke("detect", host), stale);
   const asked = dialogs.shown.length;
   assert.deepEqual(await context.invoke("enable", host), stale);
   assert.equal(dialogs.shown.length, asked);
 
   // The person stops exporting it and chooses Find: the program in use shows
-  // beside itself, and turns keep the recorded values until Use for my
-  // messages confirms the new ones.
+  // beside itself, and turns keep the recorded values until Use Claude Code
+  // on this computer confirms the new ones.
   context.useShell("configOnly");
   const renewed = { ...stale, candidatePath: claude };
   assert.deepEqual(await context.invoke("detect", host), renewed);
   assert.deepEqual(await context.invoke("status", host), renewed);
   assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
+  // The shell's CLAUDE_CONFIG_DIR plays no part: a folder Desktop can't use offers the same.
+  context.useShell("sharedConfig");
+  assert.deepEqual(await context.invoke("detect", host), renewed);
 
   // Locating the program in use keeps that find, and drops a find of another program.
   dialogs.pick = claude;
@@ -1418,16 +1681,15 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await context.invoke("locate", host), stale);
   assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
 
-  // Use Claude Code on this computer confirms the new values through the consent dialog.
+  // Use Claude Code on this computer confirms the new values through the
+  // dialog, which lists no CLAUDE_CONFIG_DIR, and the login keeps its folder.
   context.useShell("configOnly");
   assert.deepEqual(await context.invoke("detect", host), renewed);
   assert.deepEqual(await context.invoke("enable", host), on);
   assert.equal(dialogs.shown.length, asked + 1);
-  const { detail } = dialogs.shown[asked];
-  assert.ok(detail.includes(`Program: ${claude}`));
-  assert.ok(detail.includes(`CLAUDE_CONFIG_DIR=${configDir}`));
-  assert.equal(detail.includes("NODE_EXTRA_CA_CERTS"), false);
-  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+  assert.equal(dialogs.shown[asked].detail, consentDetail(`Program: ${claude}`));
+  assert.deepEqual(await grantedEnv(), {});
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)), [{ id: LOGIN_1, configDir }]);
   assert.deepEqual(await context.invoke("status", host), on);
 
   // Once the recorded values pass, a Find of the same program with other
@@ -1439,11 +1701,8 @@ test("while the lane is on, Find offers the program in use again with login-shel
   assert.deepEqual(await context.invoke("status", host), on);
   assert.deepEqual(await context.invoke("enable", host), on);
   assert.equal(dialogs.shown.length, asked + 2);
-  assert.equal(
-    dialogs.shown[asked + 1].detail,
-    consentDetail(`Program: ${claude}`, `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`),
-  );
-  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+  assert.equal(dialogs.shown[asked + 1].detail, consentDetail(`Program: ${claude}`));
+  assert.deepEqual(await grantedEnv(), {});
 });
 
 test("while the lane is on, a Find whose login shell gave no answer offers no new values, and Use Claude Code on this computer keeps the recorded ones", async () => {
@@ -1462,11 +1721,18 @@ test("while the lane is on, a Find whose login shell gave no answer offers no ne
   writeConsentRecord(context, {
     binaryPath: localClaude,
     pathEntries: [localBin, "/usr/bin", "/bin"],
-    env: { CLAUDE_CONFIG_DIR: fixture.configDir, NODE_EXTRA_CA_CERTS: fixture.caFile },
+    env: { NODE_EXTRA_CA_CERTS: fixture.caFile },
+    logins: [recordLogin(LOGIN_1, fixture.configDir)],
   });
   const dialogs = fakeDialogs();
   const host = hostFor({ consents: context.consents, dialogs });
-  const on = { supported: true, found: true, path: localClaude, consented: true };
+  const on = {
+    supported: true,
+    found: true,
+    path: localClaude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: fixture.configDir }],
+  };
   const grant = await context.grantFor(USER_A);
 
   // Such a Find turns up the program in use with no PATH and no values. It
@@ -1476,7 +1742,10 @@ test("while the lane is on, a Find whose login shell gave no answer offers no ne
   assert.deepEqual(await context.invoke("detect", host), on);
   assert.deepEqual(await context.invoke("enable", host), on);
   assert.equal(dialogs.shown.length, 1);
-  assert.ok(dialogs.shown[0].detail.includes(`NODE_EXTRA_CA_CERTS=${fixture.caFile}`));
+  assert.equal(
+    dialogs.shown[0].detail,
+    consentDetail(`Program: ${localClaude}`, `From your login shell:\nNODE_EXTRA_CA_CERTS=${fixture.caFile}`),
+  );
   assert.deepEqual(await context.grantFor(USER_A), grant);
 
   // The CA file goes. That Find read nothing, so it offers nothing in its place.
@@ -1505,19 +1774,26 @@ test("while the lane is on, a Find whose login shell names no program, as for an
   const { claude, configDir, caFile } = context.fixture;
   const dialogs = fakeDialogs({ pick: claude });
   const host = hostFor({ consents: context.consents, dialogs });
-  const on = { supported: true, found: true, path: claude, consented: true };
-  const grantedEnv = async () =>
-    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
+  const grantedEnv = async () => grantedShellValues(await context.grantFor(USER_A));
 
   // Find can't follow an alias, so the person located the program. Locate
-  // read the login shell, and Use Claude Code on this computer recorded its values.
+  // read the login shell, and Use Claude Code on this computer recorded its
+  // values, its CLAUDE_CONFIG_DIR as the first login's folder.
   context.useShell("aliasValues");
-  assert.deepEqual(await context.invoke("locate", host), { ...on, consented: false });
-  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.deepEqual(await context.invoke("locate", host), { ...on, consented: false, logins: NO_LOGINS });
+  assert.deepEqual(await context.invoke("enable", host, FIRST_LOGIN), on);
   assert.equal((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_PATH, "/usr/bin:/bin");
-  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir, NODE_EXTRA_CA_CERTS: caFile });
+  assert.deepEqual(await grantedEnv(), { NODE_EXTRA_CA_CERTS: caFile });
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)), [{ id: LOGIN_1, configDir }]);
 
-  // The CA file goes. A Find whose shell still names it, names a folder
+  // The CA file goes. A Find whose shell still names it, names another
   // Desktop can't use either, or gives no answer, found no other program and
   // offers nothing, and Use Claude Code on this computer asks about none of them.
   fs.rmSync(caFile);
@@ -1527,7 +1803,7 @@ test("while the lane is on, a Find whose login shell names no program, as for an
     problem: "shell_setting_unusable",
     shellSetting: "NODE_EXTRA_CA_CERTS",
   };
-  for (const shell of ["aliasValues", "aliasSharedConfig", "noMarkers"]) {
+  for (const shell of ["aliasValues", "aliasMissingCa", "noMarkers"]) {
     context.useShell(shell);
     const nothingNew = { ...stale, candidateProblem: "not_found" };
     assert.deepEqual(await context.invoke("detect", host), nothingNew, shell);
@@ -1538,32 +1814,34 @@ test("while the lane is on, a Find whose login shell names no program, as for an
   assert.deepEqual(await context.invoke("locate", host), stale);
 
   // The person stops exporting it and chooses Find. Still no program, but
-  // values that pass with the one in use, which shows beside itself.
-  context.useShell("aliasConfigOnly");
+  // values that pass with the one in use, which shows beside itself. The
+  // shell's CLAUDE_CONFIG_DIR is no login's folder, so one Desktop can't use
+  // offers the same.
   const renewed = { ...stale, candidatePath: claude };
+  context.useShell("aliasSharedConfig");
+  assert.deepEqual(await context.invoke("detect", host), renewed);
+  context.useShell("aliasConfigOnly");
   assert.deepEqual(await context.invoke("detect", host), renewed);
   assert.deepEqual(await context.invoke("status", host), renewed);
   // Locating the program in use keeps that find, and turns keep the recorded values.
   assert.deepEqual(await context.invoke("locate", host), renewed);
   assert.equal((await grantedEnv()).NODE_EXTRA_CA_CERTS, caFile);
 
-  // Use Claude Code on this computer confirms the program in use with that Find's PATH
-  // and values, through the consent dialog, which lists the program and the
-  // values as for any consent; the PATH entries go only into the record. The
-  // find stays, and with the recorded values passing it shows only that it
-  // found no other program.
+  // Use Claude Code on this computer confirms the program in use with that
+  // Find's PATH and values, through the consent dialog, which lists the
+  // program and the values as for any consent; the PATH entries go only into
+  // the record. The find stays, and with the recorded values passing it
+  // shows only that it found no other program.
   const confirmed = { ...on, candidateProblem: "not_found" };
-  const listed = consentDetail(
-    `Program: ${claude}`,
-    `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`,
-  );
+  const listed = consentDetail(`Program: ${claude}`);
   assert.deepEqual(await context.invoke("enable", host), confirmed);
   assert.equal(dialogs.shown.length, 2);
   assert.equal(dialogs.shown[1].detail, listed);
   const grant = await context.grantFor(USER_A);
   assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, claude);
   assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, "/opt/corp-tools/bin:/usr/bin:/bin");
-  assert.deepEqual(await grantedEnv(), { CLAUDE_CONFIG_DIR: configDir });
+  assert.deepEqual(await grantedEnv(), {});
+  assert.deepEqual(grantedLogins(grant), [{ id: LOGIN_1, configDir }]);
   assert.deepEqual(await context.invoke("status", host), confirmed);
 
   // While the recorded values pass, a Find of no program with other values
@@ -1584,13 +1862,19 @@ test("while the lane is on, a Find whose login shell names no program shows a co
   const { claude, configDir, caFile } = fixture;
   const dialogs = fakeDialogs({ pick: claude });
   const host = hostFor({ consents: context.consents, dialogs });
-  const on = { supported: true, found: true, path: claude, consented: true };
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
   // Find can't follow the login shell's alias, so the person located the
   // program, and Use Claude Code on this computer recorded the values Locate read. Then
   // the CA file goes.
   context.useShell("aliasValues");
   await context.invoke("locate", host);
-  assert.deepEqual(await context.invoke("enable", host), on);
+  assert.deepEqual(await context.invoke("enable", host, FIRST_LOGIN), on);
   const grant = await context.grantFor(USER_A);
   fs.rmSync(caFile);
   const stale = {
@@ -1624,17 +1908,15 @@ test("while the lane is on, a Find whose login shell names no program shows a co
   assert.deepEqual(await context.invoke("detect", host), { ...stale, candidatePath: localClaude });
   assert.deepEqual(await context.invoke("enable", host), { ...on, path: localClaude });
   assert.equal(dialogs.shown.length, 2);
-  assert.equal(
-    dialogs.shown[1].detail,
-    consentDetail(`Program: ${localClaude}`, `From your login shell:\nCLAUDE_CONFIG_DIR=${configDir}`),
-  );
+  assert.equal(dialogs.shown[1].detail, consentDetail(`Program: ${localClaude}`));
   const switched = await context.grantFor(USER_A);
   assert.equal(switched.env.INSTAFY_CLAUDE_CODE_BIN, localClaude);
   assert.equal(switched.env.INSTAFY_CLAUDE_CODE_PATH, "/opt/corp-tools/bin:/usr/bin:/bin");
-  assert.deepEqual(JSON.parse(switched.env.INSTAFY_CLAUDE_CODE_ENV_JSON), { CLAUDE_CONFIG_DIR: configDir });
+  assert.deepEqual(grantedShellValues(switched), {});
+  assert.deepEqual(grantedLogins(switched), [{ id: LOGIN_1, configDir }]);
 });
 
-test("Locate without a Find reads the login shell, so the grant carries its PATH and D26 values", async () => {
+test("Locate without a Find reads the login shell, so the grant carries its PATH, D26 values and folder", async () => {
   const context = setup();
   const { fixture } = context;
   const dialogs = fakeDialogs({ pick: fixture.otherClaude });
@@ -1646,19 +1928,24 @@ test("Locate without a Find reads the login shell, so the grant carries its PATH
     found: true,
     path: fixture.otherClaude,
     consented: false,
+    logins: NO_LOGINS,
   });
   assert.equal(fs.existsSync(fixture.envDump), true, "the login shell ran, as for Find");
-  assert.equal((await context.invoke("enable", host)).consented, true);
-  const [dialog] = dialogs.shown;
-  assert.ok(dialog.detail.includes(`Program: ${fixture.otherClaude}`));
-  for (const [key, value] of Object.entries(FIVE_SHELL_VALUES(fixture))) {
-    assert.ok(dialog.detail.includes(`${key}=${value}`), `the dialog lists ${key}`);
-  }
+  assert.equal((await context.invoke("enable", host, FIRST_LOGIN)).consented, true);
+  assert.equal(
+    dialogs.shown[0].detail,
+    loginConsentDetail(
+      `Program: ${fixture.otherClaude}`,
+      `Claude Code folder: ${fixture.configDir}`,
+      FOUR_SHELL_LINES(fixture),
+    ),
+  );
   const grant = await context.grantFor(USER_A);
   assert.equal(grant.env.INSTAFY_CLAUDE_CODE_BIN, fixture.otherClaude);
   // The picked program, with the shell's PATH.
   assert.equal(grant.env.INSTAFY_CLAUDE_CODE_PATH, `${fixture.binDir}:/usr/bin:/bin`);
-  assert.deepEqual(JSON.parse(grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON), FIVE_SHELL_VALUES(fixture));
+  assert.deepEqual(grantedShellValues(grant), FOUR_SHELL_VALUES(fixture));
+  assert.deepEqual(grantedLogins(grant), [{ id: LOGIN_1, configDir: fixture.configDir }]);
 
   // What the shell said stays for the next Locate, which does not run it again.
   fs.rmSync(fixture.envDump);
@@ -1666,24 +1953,691 @@ test("Locate without a Find reads the login shell, so the grant carries its PATH
   dialogs.pick = fixture.claude;
   assert.equal((await context.invoke("locate", host)).path, fixture.claude);
   assert.equal(fs.existsSync(fixture.envDump), false);
-  await context.invoke("enable", host);
-  assert.deepEqual(
-    JSON.parse((await context.grantFor(USER_A)).env.INSTAFY_CLAUDE_CODE_ENV_JSON),
-    FIVE_SHELL_VALUES(fixture),
-  );
+  await context.invoke("enable", host, FIRST_LOGIN);
+  assert.deepEqual(grantedShellValues(await context.grantFor(USER_A)), FOUR_SHELL_VALUES(fixture));
 
-  // A login shell that gives no answer leaves them empty, as it does for Find.
+  // A login shell that gives no answer leaves them empty, as it does for
+  // Find, and names no folder, so the first login is in the usual one.
   const quiet = setup();
   quiet.useShell("noMarkers");
-  const quietHost = hostFor({
-    consents: quiet.consents,
-    dialogs: fakeDialogs({ pick: quiet.fixture.claude }),
-  });
+  const quietDialogs = fakeDialogs({ pick: quiet.fixture.claude });
+  const quietHost = hostFor({ consents: quiet.consents, dialogs: quietDialogs });
   assert.equal((await quiet.invoke("locate", quietHost)).found, true);
-  await quiet.invoke("enable", quietHost);
+  await quiet.invoke("enable", quietHost, FIRST_LOGIN);
+  assert.equal(
+    quietDialogs.shown[0].detail,
+    loginConsentDetail(`Program: ${quiet.fixture.claude}`, "Claude Code folder: Claude Code's usual folder"),
+  );
   const quietGrant = await quiet.grantFor(USER_A);
   assert.equal(quietGrant.env.INSTAFY_CLAUDE_CODE_PATH, "");
   assert.equal(quietGrant.env.INSTAFY_CLAUDE_CODE_ENV_JSON, "{}");
+  assert.equal(quietGrant.env.INSTAFY_CLAUDE_CODE_LOGINS_JSON, JSON.stringify([{ id: LOGIN_1, configDir: null }]));
+});
+
+// ------------------------------------------------------------ logins (11.19)
+
+// What Desktop says of a name it won't show in its consent dialog.
+const LABEL_REFUSAL =
+  "A Claude Code login's name must be 1 to 60 characters on one line, with no double quotes or invisible characters. Rename the login, then try again.";
+
+test("Use Claude Code on this computer sets up the first login in the login shell's CLAUDE_CONFIG_DIR, or the usual folder, and records it alone", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const { claude, binDir, configDir } = context.fixture;
+  // Its id in either case, kept as the controller writes it.
+  await consentAs(context, host, { loginId: LOGIN_1.toUpperCase(), label: "Work" });
+  assert.equal(dialogs.shown[0].message, loginQuestion("Work"));
+  // The program and the shared values, and the one login with its folder and its own consent.
+  assert.deepEqual(readConsentRecord(context), {
+    binaryPath: claude,
+    pathEntries: [binDir, "/usr/bin", "/bin"],
+    env: FOUR_SHELL_VALUES(context.fixture),
+    osUser: "fixture-user",
+    logins: [{ id: LOGIN_1, configDir, consentedAt: NOW.toISOString(), consentVersion: 3 }],
+  });
+
+  // A login shell that sets no CLAUDE_CONFIG_DIR: the usual folder, which
+  // the dialog names as such, and the grant as null.
+  const usual = setup();
+  usual.useShell("plain");
+  const usualDialogs = fakeDialogs();
+  const usualHost = hostFor({ consents: usual.consents, dialogs: usualDialogs });
+  assert.deepEqual(await consentAs(usual, usualHost), {
+    supported: true,
+    found: true,
+    path: usual.fixture.claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: null }],
+  });
+  assert.equal(
+    usualDialogs.shown[0].detail,
+    loginConsentDetail(`Program: ${usual.fixture.claude}`, "Claude Code folder: Claude Code's usual folder"),
+  );
+  const grant = await usual.grantFor(USER_A);
+  assert.deepEqual(grantedLogins(grant), [{ id: LOGIN_1, configDir: null }]);
+  assert.equal(grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON, "{}");
+
+  // Without a Find there is nothing to confirm.
+  const unfound = setup();
+  await assert.rejects(
+    unfound.invoke("enable", hostFor({ consents: unfound.consents }), FIRST_LOGIN),
+    /Find the claude program on this computer first\./,
+  );
+});
+
+test("while the lane is on, Use Claude Code on this computer confirms the program for every login and never adds one", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  const { claude, otherClaude, configDir, secondConfigDir } = context.fixture;
+  await consentAs(context, host);
+  await context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" });
+  const logins = [
+    { id: LOGIN_1, folder: configDir },
+    { id: LOGIN_2, folder: secondConfigDir },
+  ];
+  const on = { supported: true, found: true, path: claude, consented: true, logins };
+
+  // Naming a login does not add it this way, and a payload that names none
+  // is not refused: while the lane is on, enable reads no payload.
+  context.useShell("foundOther");
+  await context.invoke("detect", host);
+  assert.deepEqual(
+    await context.invoke("enable", host, { loginId: LOGIN_3, label: "Team" }),
+    { ...on, path: otherClaude },
+  );
+  assert.equal(dialogs.shown[dialogs.shown.length - 1].message, "Use Claude Code on this computer for person-a@example.test?");
+  assert.deepEqual(await context.invoke("enable", host, { loginId: "not a login" }), { ...on, path: otherClaude });
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)), [
+    { id: LOGIN_1, configDir },
+    { id: LOGIN_2, configDir: secondConfigDir },
+  ]);
+  // Each login keeps the consent it was given.
+  assert.deepEqual(
+    readConsentRecord(context).logins.map((login) => login.consentVersion),
+    [3, 3],
+  );
+});
+
+test("a login id must be a UUID and a name a trimmed line of 1 to 60 characters; anything else is refused, and nothing asked or written", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  await context.invoke("detect", host);
+  const badIds = [
+    undefined,
+    null,
+    42,
+    "",
+    "not-a-uuid",
+    `{${LOGIN_1}}`,
+    ` ${LOGIN_1}`,
+    `${LOGIN_1}\n`,
+    LOGIN_1.replace(/-/g, ""),
+    `${LOGIN_1.slice(0, -1)}g`,
+    // Full-width digits and letters look like hex but are not.
+    LOGIN_1.replace(/c/g, "\u{ff43}"),
+  ];
+  const badLabels = [
+    undefined,
+    null,
+    7,
+    ["Work"],
+    "",
+    " ",
+    " Work",
+    "Work ",
+    "Wo\nrk",
+    "Wo\trk",
+    "Wo\u0000rk",
+    "Wo\u007frk",
+    "Wo\u0085rk",
+    "Wo\u{2028}rk",
+    "Wo\u{2029}rk",
+    "Wo\ud800rk",
+    "x".repeat(61),
+    "\u{1F4BC}".repeat(61),
+  ];
+  for (const loginId of badIds) {
+    await assert.rejects(
+      context.invoke("enable", host, { loginId, label: "Work" }),
+      (error) => {
+        assert.equal(error.message, "Instafy couldn't tell which Claude Code login this is. Reload the page, then try again.");
+        return true;
+      },
+      String(loginId),
+    );
+  }
+  for (const payload of [undefined, null, "x", [LOGIN_1], { label: "Work" }]) {
+    await assert.rejects(context.invoke("enable", host, payload), /which Claude Code login/);
+  }
+  for (const label of badLabels) {
+    await assert.rejects(
+      context.invoke("enable", host, { loginId: LOGIN_1, label }),
+      (error) => {
+        assert.equal(error.message, LABEL_REFUSAL);
+        return true;
+      },
+      JSON.stringify(label),
+    );
+  }
+  assert.equal(dialogs.shown.length, 0);
+  assert.deepEqual(context.consents.read(), {});
+
+  // The longest name, counted in characters rather than UTF-16 units, passes, quoted as given.
+  const longest = "\u{1F4BC}".repeat(60);
+  assert.equal(consent.parseClaudeCodeLoginLabel(longest), longest);
+  assert.equal(consent.parseClaudeCodeLoginLabel("Kim's work & co."), "Kim's work & co.");
+  // The dialog quotes the name, so a double quote in it is refused.
+  assert.equal(consent.parseClaudeCodeLoginLabel('Work "A" & co.'), null);
+  await context.invoke("enable", host, { loginId: LOGIN_1, label: longest });
+  assert.equal(dialogs.shown[0].message, loginQuestion(longest));
+
+  // Add a login and Remove from this computer hold the same rules, and Add a
+  // login's folder is one of two words, never a path.
+  const before = context.consents.read();
+  for (const loginId of badIds) {
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId, label: "Personal", folder: "usual" }),
+      /which Claude Code login/,
+    );
+    await assert.rejects(context.invoke("removeLogin", host, { loginId }), /which Claude Code login/);
+  }
+  for (const label of badLabels) {
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId: LOGIN_2, label, folder: "usual" }),
+      (error) => error.message === LABEL_REFUSAL,
+    );
+  }
+  for (const folder of [
+    undefined,
+    null,
+    "",
+    "Usual",
+    "chosen",
+    context.fixture.secondConfigDir,
+    { path: context.fixture.secondConfigDir },
+  ]) {
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder }),
+      (error) => {
+        assert.equal(error.message, "Choose Claude Code's usual folder or another folder for this login.");
+        return true;
+      },
+      JSON.stringify(folder),
+    );
+  }
+  assert.equal(dialogs.shown.length, 1);
+  assert.equal(dialogs.folderPicks.length, 0);
+  assert.deepEqual(context.consents.read(), before);
+});
+
+test("a login's name holds no format character but the joiners, and no double quote, so the dialog's question reads as it is", async () => {
+  // The reviewer's name: a right-to-left override, then words it turns
+  // around into `Personal" for you@corp.example?`, so the question would
+  // seem to name that account, with the real one reversed after it.
+  const reversed = '\u{202e}?elpmaxe.proc@uoy rof "lanosreP';
+  // Each kind of format character (Unicode category Cf).
+  const formatCharacters = {
+    "embeddings and overrides": [0x202a, 0x202b, 0x202c, 0x202d, 0x202e],
+    isolates: [0x2066, 0x2067, 0x2068, 0x2069],
+    "direction marks": [0x200e, 0x200f, 0x61c],
+    "zero-width characters": [0x200b, 0x2060, 0xfeff],
+    "other format characters": [0xad, 0x600, 0x6dd, 0x180e, 0x2061, 0x206a, 0xfff9, 0x110bd, 0x1d173, 0xe0001, 0xe0067],
+  };
+  for (const [kind, codes] of Object.entries(formatCharacters)) {
+    for (const code of codes) {
+      assert.equal(
+        consent.parseClaudeCodeLoginLabel(`Wo${String.fromCodePoint(code)}rk`),
+        null,
+        `${kind}: U+${code.toString(16)}`,
+      );
+    }
+  }
+  // Every format character there is, but the two joiners.
+  let formatCount = 0;
+  for (let code = 0; code <= 0x10ffff; code += 1) {
+    if (code >= 0xd800 && code <= 0xdfff) {
+      continue;
+    }
+    const character = String.fromCodePoint(code);
+    if (!/\p{Cf}/u.test(character)) {
+      continue;
+    }
+    formatCount += 1;
+    const passes = consent.parseClaudeCodeLoginLabel(`Wo${character}rk`) !== null;
+    assert.equal(passes, code === 0x200c || code === 0x200d, `U+${code.toString(16)}`);
+  }
+  assert.ok(formatCount > 150, `${formatCount} format characters`);
+  for (const label of [
+    reversed,
+    "\u{202e}?elpmaxe.proc@uoy rof lanosreP",
+    'Personal" for you@corp.example? Not "x',
+    '"Work"',
+    "\u{2066}Work\u{2069}",
+  ]) {
+    assert.equal(consent.parseClaudeCodeLoginLabel(label), null, JSON.stringify(label));
+  }
+  // Names some people need pass, as given: an emoji sequence joined by ZWJ,
+  // a word parted by ZWNJ, a variation selector, a combining mark and a
+  // typographic apostrophe.
+  const kept = [
+    "\u{1f469}\u{200d}\u{1f4bb} Dev",
+    "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}",
+    "\u{2764}\u{fe0f} Home",
+    "Cafe\u{301}",
+    "Kim\u{2019}s work",
+  ];
+  for (const label of kept) {
+    assert.equal(consent.parseClaudeCodeLoginLabel(label), label, JSON.stringify(label));
+  }
+
+  // Through the methods: refused with a plain sentence, before any picker or dialog.
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  await context.invoke("detect", host);
+  for (const label of [reversed, "Wo\u{200b}rk", 'Work "A"']) {
+    await assert.rejects(
+      context.invoke("enable", host, { loginId: LOGIN_1, label }),
+      (error) => {
+        assert.equal(error.message, LABEL_REFUSAL);
+        return true;
+      },
+      JSON.stringify(label),
+    );
+  }
+  assert.deepEqual(context.consents.read(), {});
+  await context.invoke("enable", host, { loginId: LOGIN_1, label: kept[0] });
+  for (const label of [reversed, "Wo\u{2066}rk"]) {
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId: LOGIN_2, label, folder: "choose" }),
+      (error) => {
+        assert.equal(error.message, LABEL_REFUSAL);
+        return true;
+      },
+      JSON.stringify(label),
+    );
+  }
+  assert.equal(dialogs.folderPicks.length, 0);
+  assert.deepEqual(dialogs.shown.map((dialog) => dialog.message), [loginQuestion(kept[0])]);
+});
+
+test("an email with an invisible format character names no account, so no consent dialog is shown for it", async () => {
+  const context = setup();
+  const dialogs = fakeDialogs({ folder: context.fixture.secondConfigDir });
+  await consentAs(context, hostFor({ consents: context.consents, dialogs }));
+  const emailRefusal = "Instafy couldn't read this account's email. Sign in again, then try again.";
+  for (const email of [
+    // The reviewer's trick on the email itself: an address reversed after an override.
+    "\u{202e}tset.elpmaxe@a-nosrep",
+    "person-a@example.test\u{200e}",
+    "person\u{200b}-a@example.test",
+    "person-a@exa\u{feff}mple.test",
+    "\u{2066}person-a@example.test\u{2069}",
+  ]) {
+    const host = hostFor({ consents: context.consents, dialogs, email });
+    // The account is still the session's, so what Desktop has for it reads as before.
+    assert.equal((await context.invoke("status", host)).consented, true, JSON.stringify(email));
+    for (const [method, payload] of [
+      ["enable", undefined],
+      ["addLogin", { loginId: LOGIN_2, label: "Personal", folder: "choose" }],
+    ]) {
+      await assert.rejects(
+        context.invoke(method, host, payload),
+        (error) => {
+          assert.equal(error.message, emailRefusal);
+          return true;
+        },
+        `${method} ${JSON.stringify(email)}`,
+      );
+    }
+  }
+  assert.equal(dialogs.shown.length, 1, "only the first login's dialog");
+  assert.equal(dialogs.folderPicks.length, 0);
+
+  // An account with no record gets no first login's dialog either.
+  const fresh = setup();
+  const freshDialogs = fakeDialogs();
+  const freshHost = hostFor({
+    consents: fresh.consents,
+    dialogs: freshDialogs,
+    email: "\u{202e}tset.elpmaxe@a-nosrep",
+  });
+  await fresh.invoke("detect", freshHost);
+  await assert.rejects(fresh.invoke("enable", freshHost, FIRST_LOGIN), (error) => error.message === emailRefusal);
+  assert.equal(freshDialogs.shown.length, 0);
+  assert.deepEqual(fresh.consents.read(), {});
+});
+
+test("Add a login needs the lane on, opens a native folder picker for another folder, and adds the login once its own dialog is confirmed", async () => {
+  const context = setup();
+  const { claude, configDir, secondConfigDir, home } = context.fixture;
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  const personal = { loginId: LOGIN_2, label: "Personal" };
+  await context.invoke("detect", host);
+  await assert.rejects(
+    context.invoke("addLogin", host, { ...personal, folder: "usual" }),
+    (error) => {
+      assert.equal(error.message, "Turn on Claude Code on this computer first.");
+      return true;
+    },
+  );
+  assert.equal(dialogs.shown.length + dialogs.folderPicks.length, 0);
+  const first = { id: LOGIN_1, folder: configDir };
+  const on = { supported: true, found: true, path: claude, consented: true, logins: [first] };
+  assert.deepEqual(await context.invoke("enable", host, FIRST_LOGIN), on);
+  const grantBefore = await context.grantFor(USER_A);
+
+  // Another folder: the native picker, then the login's dialog. Cancelling
+  // either changes nothing.
+  assert.deepEqual(await context.invoke("addLogin", host, { ...personal, folder: "choose" }), on);
+  assert.deepEqual(dialogs.folderPicks, [
+    { title: PICK_FOLDER_TEXT, message: PICK_FOLDER_TEXT, buttonLabel: "Use This Folder", defaultPath: home },
+  ]);
+  assert.equal(dialogs.shown.length, 1);
+  dialogs.folder = secondConfigDir;
+  dialogs.answer = 1;
+  assert.deepEqual(await context.invoke("addLogin", host, { ...personal, folder: "choose" }), on);
+  assert.equal(dialogs.shown.length, 2);
+  assert.deepEqual(await context.grantFor(USER_A), grantBefore);
+
+  dialogs.answer = 0;
+  const second = { id: LOGIN_2, folder: secondConfigDir };
+  assert.deepEqual(
+    await context.invoke("addLogin", host, { ...personal, folder: "choose" }),
+    { ...on, logins: [first, second] },
+  );
+  const dialog = dialogs.shown[2];
+  assert.equal(dialog.message, loginQuestion("Personal"));
+  assert.equal(
+    dialog.detail,
+    loginConsentDetail(`Program: ${claude}`, `Claude Code folder: ${secondConfigDir}`, FOUR_SHELL_LINES(context.fixture)),
+  );
+  assert.deepEqual(dialog.buttons, ["Use Claude Code", "Cancel"]);
+  assert.equal(dialog.defaultId, 1);
+  assert.equal(dialog.cancelId, 1);
+  // The grant carries both, in order; the program and shared values stay.
+  const grant = await context.grantFor(USER_A);
+  assert.deepEqual(grantedLogins(grant), [
+    { id: LOGIN_1, configDir },
+    { id: LOGIN_2, configDir: secondConfigDir },
+  ]);
+  for (const key of ["INSTAFY_CLAUDE_CODE_BIN", "INSTAFY_CLAUDE_CODE_PATH", "INSTAFY_CLAUDE_CODE_ENV_JSON"]) {
+    assert.equal(grant.env[key], grantBefore.env[key], key);
+  }
+  assert.deepEqual(readConsentRecord(context).logins[1], {
+    id: LOGIN_2,
+    configDir: secondConfigDir,
+    consentedAt: NOW.toISOString(),
+    consentVersion: 3,
+  });
+
+  // The usual folder needs no picker.
+  assert.deepEqual(
+    await context.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "usual" }),
+    { ...on, logins: [first, second, { id: LOGIN_3, folder: null }] },
+  );
+  assert.equal(dialogs.folderPicks.length, 3);
+  assert.equal(
+    dialogs.shown[3].detail,
+    loginConsentDetail(`Program: ${claude}`, "Claude Code folder: Claude Code's usual folder", FOUR_SHELL_LINES(context.fixture)),
+  );
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)).map((login) => login.configDir), [
+    configDir,
+    secondConfigDir,
+    null,
+  ]);
+});
+
+test("Add a login refuses a login already set up here, and a folder another login uses, by where it really is, the usual folder once", async () => {
+  const context = setup();
+  // The first login is in the usual folder.
+  context.useShell("plain");
+  const { home, root, configDir } = context.fixture;
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs });
+  await consentAs(context, host);
+  let before = context.consents.read();
+  const refused = async (payload, sentence) => {
+    await assert.rejects(context.invoke("addLogin", host, payload), (error) => {
+      assert.equal(error.message, sentence);
+      return true;
+    });
+    assert.deepEqual(context.consents.read(), before);
+  };
+  const usedFolder =
+    "Another of your Claude Code logins on this computer already uses this folder. Choose another one.";
+
+  // The same login, in another folder or by its id in upper case.
+  dialogs.folder = configDir;
+  for (const loginId of [LOGIN_1, LOGIN_1.toUpperCase()]) {
+    await refused({ loginId, label: "Claude Code", folder: "choose" }, "This login is already set up on this computer.");
+  }
+  // The usual folder again, by name, by its path or through a link to it.
+  await refused(
+    { loginId: LOGIN_2, label: "Personal", folder: "usual" },
+    "Another of your Claude Code logins on this computer already uses Claude Code's usual folder.",
+  );
+  const usualFolder = path.join(home, ".claude");
+  fs.mkdirSync(usualFolder, { mode: 0o700 });
+  const linkToUsual = path.join(home, "claude-link");
+  fs.symlinkSync(usualFolder, linkToUsual);
+  for (const folder of [usualFolder, linkToUsual]) {
+    dialogs.folder = folder;
+    await refused({ loginId: LOGIN_2, label: "Personal", folder: "choose" }, usedFolder);
+  }
+  assert.equal(dialogs.shown.length, 1, "only the first login's dialog");
+
+  // Another folder is set up; then it is taken too, however it is named.
+  dialogs.folder = configDir;
+  assert.deepEqual(
+    (await context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" })).logins,
+    [
+      { id: LOGIN_1, folder: null },
+      { id: LOGIN_2, folder: configDir },
+    ],
+  );
+  before = context.consents.read();
+  const linkToWork = path.join(root, "work-link");
+  fs.symlinkSync(configDir, linkToWork);
+  for (const folder of [configDir, linkToWork, `${configDir}/`, `${configDir}/../.claude-work`]) {
+    dialogs.folder = folder;
+    await refused({ loginId: LOGIN_3, label: "Team", folder: "choose" }, usedFolder);
+  }
+
+  // A login whose folder is the usual one by its path counts as the usual
+  // folder too: the usual folder is ~/.claude, in the account's home folder.
+  const byPath = setup();
+  const byPathUsual = path.join(byPath.fixture.home, ".claude");
+  fs.mkdirSync(byPathUsual, { mode: 0o700 });
+  writeConsentRecord(byPath, {
+    binaryPath: byPath.fixture.claude,
+    pathEntries: [byPath.fixture.binDir],
+    env: {},
+    logins: [recordLogin(LOGIN_1, byPathUsual)],
+  });
+  await assert.rejects(
+    byPath.invoke("addLogin", hostFor({ consents: byPath.consents }), {
+      loginId: LOGIN_2,
+      label: "Personal",
+      folder: "usual",
+    }),
+    /already uses Claude Code's usual folder/,
+  );
+});
+
+test("Add a login takes at most ten logins on this computer", async () => {
+  const context = setup();
+  const { home, claude, binDir } = context.fixture;
+  const ids = Array.from({ length: 11 }, (_, index) =>
+    `${String(index).padStart(8, "0")}-0000-4000-8000-000000000000`,
+  );
+  const folders = ids.map((_, index) => {
+    const folder = path.join(home, `.claude-${index}`);
+    fs.mkdirSync(folder, { mode: 0o700 });
+    return folder;
+  });
+  writeConsentRecord(context, {
+    binaryPath: claude,
+    pathEntries: [binDir],
+    env: {},
+    logins: ids.slice(0, 10).map((id, index) => recordLogin(id, folders[index])),
+  });
+  const dialogs = fakeDialogs({ folder: folders[10] });
+  const host = hostFor({ consents: context.consents, dialogs });
+  const eleventh = { loginId: ids[10], label: "Eleventh", folder: "choose" };
+  await assert.rejects(
+    context.invoke("addLogin", host, eleventh),
+    (error) => {
+      assert.equal(
+        error.message,
+        "This computer already has 10 of your Claude Code logins. Remove one from this computer, then try again.",
+      );
+      return true;
+    },
+  );
+  assert.equal(dialogs.folderPicks.length + dialogs.shown.length, 0);
+
+  // Removing one makes room.
+  await context.invoke("removeLogin", host, { loginId: ids[0] });
+  const added = await context.invoke("addLogin", host, eleventh);
+  assert.deepEqual(added.logins.map((login) => login.id), ids.slice(1));
+  assert.equal(grantedLogins(await context.grantFor(USER_A)).length, 10);
+});
+
+test("Add a login checks a chosen folder as CLAUDE_CONFIG_DIR is checked, and says why it won't use it", async () => {
+  const context = setup();
+  const { claude, configDir, sharedConfigDir, home, workspace, caFile } = context.fixture;
+  const dialogs = fakeDialogs();
+  const host = hostFor({ consents: context.consents, dialogs, desktopOwnedPaths: [workspace] });
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
+  };
+  assert.deepEqual(await consentAs(context, host), on);
+  const before = context.consents.read();
+  const inWorkspace = path.join(workspace, ".claude");
+  fs.mkdirSync(inWorkspace, { mode: 0o700 });
+  const choose = "Choose the Claude Code folder you signed in to.";
+  const refusals = [
+    [
+      sharedConfigDir,
+      "Other accounts on this computer can change this folder, so Instafy Desktop won't use it. Choose a folder only you can change.",
+    ],
+    [caFile, `This isn't a folder. ${choose}`],
+    [path.join(home, ".claude-gone"), `Instafy Desktop can't find this folder. ${choose}`],
+    [inWorkspace, `This folder is inside a folder Instafy uses, so Instafy Desktop won't use it. ${choose}`],
+    ["relative/folder", `Instafy Desktop can't use this folder. ${choose}`],
+  ];
+  for (const [folder, sentence] of refusals) {
+    dialogs.folder = folder;
+    await assert.rejects(
+      context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" }),
+      (error) => {
+        assert.equal(error.message, sentence);
+        return true;
+      },
+      folder,
+    );
+  }
+  assert.equal(dialogs.folderPicks.length, refusals.length);
+  assert.equal(dialogs.shown.length, 1, "only the first login's dialog");
+  assert.deepEqual(context.consents.read(), before);
+
+  // A program or shared value that would make every turn refuse: nobody is
+  // asked about a login, not even for its folder, and the answer says why.
+  fs.rmSync(caFile);
+  assert.deepEqual(
+    await context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" }),
+    { ...on, found: false, problem: "shell_setting_unusable", shellSetting: "NODE_EXTRA_CA_CERTS" },
+  );
+  assert.equal(dialogs.folderPicks.length, refusals.length);
+  assert.deepEqual(context.consents.read(), before);
+});
+
+test("Remove from this computer removes one login, and removing the last turns the lane off", async () => {
+  const context = setup();
+  const { claude, configDir, secondConfigDir } = context.fixture;
+  const dialogs = fakeDialogs({ folder: secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  await consentAs(context, host);
+  await context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" });
+  const on = { supported: true, found: true, path: claude, consented: true };
+  const both = [
+    { id: LOGIN_1, folder: configDir },
+    { id: LOGIN_2, folder: secondConfigDir },
+  ];
+  const before = context.consents.read();
+
+  // A login not set up here changes nothing.
+  assert.deepEqual(await context.invoke("removeLogin", host, { loginId: LOGIN_3 }), { ...on, logins: both });
+  assert.deepEqual(context.consents.read(), before);
+
+  assert.deepEqual(
+    await context.invoke("removeLogin", host, { loginId: LOGIN_1 }),
+    { ...on, logins: [both[1]] },
+  );
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)), [{ id: LOGIN_2, configDir: secondConfigDir }]);
+  assert.equal(dialogs.shown.length, 2, "removing asks nothing");
+
+  // The last one: the record goes, and with it the grant.
+  assert.deepEqual(
+    await context.invoke("removeLogin", host, { loginId: LOGIN_2.toUpperCase() }),
+    { ...on, consented: false, logins: NO_LOGINS },
+  );
+  assert.deepEqual(context.consents.read(), {});
+  assert.equal(await context.grantFor(USER_A), null);
+  // With nothing set up, removing is no error.
+  assert.equal((await context.invoke("removeLogin", host, { loginId: LOGIN_2 })).consented, false);
+});
+
+test("no method looks inside a login's folder or Claude Code's usual folder, only at each folder and the links to it", async () => {
+  const touched = [];
+  const watchedFs = Object.fromEntries(
+    Object.entries(hermeticFs).map(([name, call]) => [
+      name,
+      (file, ...rest) => {
+        touched.push([name, file]);
+        return call(file, ...rest);
+      },
+    ]),
+  );
+  const context = setup({ fs: watchedFs });
+  const { home, configDir, secondConfigDir, root } = context.fixture;
+  const usualFolder = path.join(home, ".claude");
+  fs.mkdirSync(usualFolder, { mode: 0o700 });
+  const linkToSecond = path.join(root, "personal-link");
+  fs.symlinkSync(secondConfigDir, linkToSecond);
+  const dialogs = fakeDialogs({ folder: linkToSecond });
+  const host = hostFor({ consents: context.consents, dialogs });
+  await consentAs(context, host);
+  await context.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" });
+  await context.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "usual" });
+  dialogs.folder = configDir;
+  await assert.rejects(
+    context.invoke("addLogin", host, { loginId: "c4c4c4c4-c4c4-4c4c-8c4c-c4c4c4c4c4c4", label: "Again", folder: "choose" }),
+    /already uses this folder/,
+  );
+  await context.invoke("status", host);
+  await context.invoke("removeLogin", host, { loginId: LOGIN_2 });
+  await context.invoke("disable", host);
+
+  const inside = (file, folder) => typeof file === "string" && file.startsWith(`${folder}/`);
+  for (const [name, file] of touched) {
+    for (const folder of [configDir, secondConfigDir, usualFolder]) {
+      assert.equal(inside(file, folder), false, `${name}(${file})`);
+    }
+  }
+  // It did look at each folder itself.
+  for (const folder of [configDir, secondConfigDir, usualFolder]) {
+    assert.ok(touched.some(([, file]) => file === folder), folder);
+  }
 });
 
 // ------------------------------------------------------ restarts (4.3, 4.4)
@@ -1699,19 +2653,22 @@ function runtimeHarness(context) {
       launchGrants: context.extensions.launchGrantsWithoutValues(),
     },
     decision: "replaced",
+    // Answers for the next replacements, in order, before `decision`.
+    decisions: [],
   };
-  const invoke = (methodId, host) =>
+  const invoke = (methodId, host, payload = {}) =>
     registry.invokeDesktopExtensionWithLaunchGrants({
       registry: context.extensions,
       extensionId: claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID,
       methodId,
-      payload: {},
+      payload,
       host,
       withRuntimeLock: async (operation) => await operation(),
       runningRuntime: () => state.runtime,
       replaceRuntime: async (current) => {
         replaced.push(current.handle);
-        if (state.decision === "kept") {
+        const decision = state.decisions.length > 0 ? state.decisions.shift() : state.decision;
+        if (decision === "kept") {
           return "kept";
         }
         const launchGrants = await context.extensions.resolveLaunchGrants({
@@ -1738,7 +2695,7 @@ test("after enable, disable or locate, the runtime is replaced only when its gra
   await harness.invoke("status", hostA);
   assert.deepEqual(harness.replaced, []);
 
-  await harness.invoke("enable", hostA);
+  await harness.invoke("enable", hostA, FIRST_LOGIN);
   assert.deepEqual(harness.replaced, ["runtime-1"]);
   assert.notEqual(harness.state.runtime.launchGrants[0].grant, null);
 
@@ -1748,7 +2705,7 @@ test("after enable, disable or locate, the runtime is replaced only when its gra
 
   // Another Instafy user's change restarts nothing.
   await harness.invoke("detect", hostB);
-  await harness.invoke("enable", hostB);
+  await harness.invoke("enable", hostB, FIRST_LOGIN);
   await harness.invoke("disable", hostB);
   assert.equal(harness.replaced.length, 1);
 
@@ -1770,8 +2727,213 @@ test("after enable, disable or locate, the runtime is replaced only when its gra
   // granted, so a consent change cannot alter it.
   harness.state.runtime = { ...harness.state.runtime, instafyUserId: null };
   await harness.invoke("detect", hostA);
-  assert.equal((await harness.invoke("enable", hostA)).consented, true);
+  assert.equal((await harness.invoke("enable", hostA, FIRST_LOGIN)).consented, true);
   assert.equal(harness.replaced.length, 3);
+});
+
+test("Add a login and Remove from this computer change the grant, so they replace the runtime as enable and disable do", async () => {
+  const context = setup();
+  const harness = runtimeHarness(context);
+  const { configDir, secondConfigDir } = context.fixture;
+  const dialogs = fakeDialogs({ folder: secondConfigDir });
+  const host = hostFor({ consents: context.consents, dialogs });
+  const runtimeLogins = () => grantedLogins(harness.state.runtime.launchGrants[0].grant);
+  const extensionId = claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID;
+  for (const method of ["addLogin", "removeLogin"]) {
+    assert.equal(context.extensions.methodIsReadOnly(extensionId, method), false, method);
+  }
+
+  await harness.invoke("detect", host);
+  await harness.invoke("enable", host, FIRST_LOGIN);
+  assert.deepEqual(harness.replaced, ["runtime-1"]);
+  await harness.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" });
+  assert.equal(harness.replaced.length, 2);
+  assert.deepEqual(runtimeLogins(), [
+    { id: LOGIN_1, configDir },
+    { id: LOGIN_2, configDir: secondConfigDir },
+  ]);
+
+  // A refusal, a cancelled dialog or an id not set up here changes nothing, so nothing is replaced.
+  await assert.rejects(
+    harness.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "usual" }),
+    /already set up/,
+  );
+  dialogs.answer = 1;
+  await harness.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "usual" });
+  dialogs.answer = 0;
+  await harness.invoke("removeLogin", host, { loginId: LOGIN_3 });
+  assert.equal(harness.replaced.length, 2);
+
+  // Keep working puts the record back, for either change.
+  harness.state.decision = "kept";
+  const before = context.consents.read();
+  for (const [method, payload] of [
+    ["removeLogin", { loginId: LOGIN_2 }],
+    ["addLogin", { loginId: LOGIN_3, label: "Team", folder: "usual" }],
+  ]) {
+    await assert.rejects(harness.invoke(method, host, payload), (error) => {
+      assert.equal(error.code, "desktop_extension_change_not_made");
+      return true;
+    }, method);
+    assert.deepEqual(context.consents.read(), before, method);
+  }
+  assert.equal(harness.replaced.length, 4);
+  assert.equal((await context.invoke("status", host)).logins.length, 2);
+
+  harness.state.decision = "replaced";
+  await harness.invoke("removeLogin", host, { loginId: LOGIN_2 });
+  assert.equal(harness.replaced.length, 5);
+  assert.deepEqual(runtimeLogins(), [{ id: LOGIN_1, configDir }]);
+  // The last one turns the lane off, which the runtime loses too.
+  await harness.invoke("removeLogin", host, { loginId: LOGIN_1 });
+  assert.equal(harness.replaced.length, 6);
+  assert.equal(harness.state.runtime.launchGrants[0].grant, null);
+});
+
+// Native dialogs a test answers one at a time, in the order they opened,
+// and a folder picker that hands out the folders given, in order.
+function heldDialogs(folders = []) {
+  const dialogs = {
+    shown: [],
+    open: [],
+    folderPicks: 0,
+    picks: 0,
+    async showMessageBox(options) {
+      dialogs.shown.push(options);
+      return await new Promise((resolve) => dialogs.open.push(resolve));
+    },
+    async pickFile() {
+      dialogs.picks += 1;
+      return null;
+    },
+    async pickFolder() {
+      dialogs.folderPicks += 1;
+      return folders.shift() ?? null;
+    },
+    answer(button) {
+      dialogs.open.shift()(button);
+    },
+  };
+  return dialogs;
+}
+
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+async function untilOpen(dialogs, count) {
+  while (dialogs.open.length < count) {
+    await nextTurn();
+  }
+}
+
+// Long enough for a call that may not start yet to have started if it could.
+async function aWhile() {
+  for (let turn = 0; turn < 20; turn += 1) {
+    await nextTurn();
+  }
+}
+
+// A record of these logins, and a runtime started with its grant.
+async function runningWithLogins(context, logins) {
+  const { claude, binDir } = context.fixture;
+  writeConsentRecord(context, { binaryPath: claude, pathEntries: [binDir], env: {}, logins });
+  const harness = runtimeHarness(context);
+  harness.state.runtime.launchGrants = await context.extensions.resolveLaunchGrants({
+    projectId: PROJECT_ID,
+    controllerOrigin: CONTROLLER,
+    instafyUserId: USER_A,
+    consents: context.consents,
+  });
+  return {
+    harness,
+    recorded: () => (readConsentRecord(context)?.logins ?? []).map((login) => login.id),
+    running: () => grantedLogins(harness.state.runtime.launchGrants[0].grant).map((login) => login.id),
+  };
+}
+
+const outcome = (call) =>
+  call.then(
+    () => "made",
+    (error) => error.code ?? error.message,
+  );
+
+test("Keep working on one consent change never undoes another, since a module's consent changes run one at a time", async () => {
+  const context = setup();
+  const { secondConfigDir, home } = context.fixture;
+  const teamFolder = path.join(home, ".claude-team");
+  fs.mkdirSync(teamFolder, { mode: 0o700 });
+  const { harness, recorded, running } = await runningWithLogins(context, [
+    recordLogin(LOGIN_1),
+    recordLogin(LOGIN_2, secondConfigDir),
+  ]);
+  const dialogs = heldDialogs([teamFolder]);
+  const host = hostFor({ consents: context.consents, dialogs });
+
+  // The reviewer's case. Add a login for L3, its consent dialog open.
+  const adding = outcome(harness.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "choose" }));
+  await untilOpen(dialogs, 1);
+  // Remove from this computer for L2 waits for it, end to end.
+  const removing = outcome(harness.invoke("removeLogin", host, { loginId: LOGIN_2 }));
+  await aWhile();
+  assert.deepEqual(recorded(), [LOGIN_1, LOGIN_2]);
+  assert.equal(harness.replaced.length, 0);
+  // A status read does not wait for the dialog.
+  assert.deepEqual(
+    (await harness.invoke("status", host)).logins.map((login) => login.id),
+    [LOGIN_1, LOGIN_2],
+  );
+
+  // The person confirms L3 while a turn runs and keeps working, so L3 is put
+  // back. Only then does the removal run, and its replacement is made.
+  harness.state.decisions = ["kept", "replaced"];
+  dialogs.answer(0);
+  assert.equal(await adding, "desktop_extension_change_not_made");
+  assert.equal(await removing, "made");
+  assert.deepEqual(recorded(), [LOGIN_1]);
+  assert.deepEqual(running(), [LOGIN_1]);
+  assert.equal(harness.replaced.length, 2);
+  // The removed login stays removed: a status read replaces nothing and grants it nowhere.
+  await harness.invoke("status", host);
+  assert.equal(harness.replaced.length, 2);
+  assert.deepEqual(grantedLogins(await context.grantFor(USER_A)).map((login) => login.id), [LOGIN_1]);
+});
+
+test("two Add a login calls run one after the other, so keeping the work on either undoes only that one", async () => {
+  for (const [first, second, left] of [
+    ["kept", "replaced", [LOGIN_1, LOGIN_3]],
+    ["replaced", "kept", [LOGIN_1, LOGIN_2]],
+  ]) {
+    const context = setup();
+    const { secondConfigDir, home } = context.fixture;
+    const teamFolder = path.join(home, ".claude-team");
+    fs.mkdirSync(teamFolder, { mode: 0o700 });
+    const { harness, recorded, running } = await runningWithLogins(context, [recordLogin(LOGIN_1)]);
+    harness.state.decisions = [first, second];
+    const dialogs = heldDialogs([secondConfigDir, teamFolder]);
+    const host = hostFor({ consents: context.consents, dialogs });
+    const outcomeOf = (decision) => (decision === "kept" ? "desktop_extension_change_not_made" : "made");
+
+    const adding = outcome(harness.invoke("addLogin", host, { loginId: LOGIN_2, label: "Personal", folder: "choose" }));
+    await untilOpen(dialogs, 1);
+    const addingAnother = outcome(
+      harness.invoke("addLogin", host, { loginId: LOGIN_3, label: "Team", folder: "choose" }),
+    );
+    await aWhile();
+    // The second has asked nothing yet: no folder picker, no dialog.
+    assert.equal(dialogs.folderPicks, 1, first);
+    assert.equal(dialogs.shown.length, 1, first);
+
+    dialogs.answer(0);
+    assert.equal(await adding, outcomeOf(first), first);
+    // Only now does the second pick its folder and ask, about the record the first left.
+    await untilOpen(dialogs, 1);
+    assert.equal(dialogs.folderPicks, 2, first);
+    assert.equal(dialogs.shown[1].message, loginQuestion("Team"), first);
+    assert.deepEqual(recorded(), first === "kept" ? [LOGIN_1] : [LOGIN_1, LOGIN_2], first);
+    dialogs.answer(0);
+    assert.equal(await addingAnother, outcomeOf(second), first);
+    assert.deepEqual(recorded(), left, first);
+    assert.deepEqual(running(), left, first);
+  }
 });
 
 test("confirming a moved CA file for the program in use replaces the runtime that holds the old place", async () => {
@@ -1779,11 +2941,10 @@ test("confirming a moved CA file for the program in use replaces the runtime tha
   const harness = runtimeHarness(context);
   const dialogs = fakeDialogs();
   const host = hostFor({ consents: context.consents, dialogs });
-  const { claude, caFile, movedCaFile } = context.fixture;
-  const runtimeEnv = () =>
-    JSON.parse(harness.state.runtime.launchGrants[0].grant.env.INSTAFY_CLAUDE_CODE_ENV_JSON);
+  const { claude, caFile, movedCaFile, configDir } = context.fixture;
+  const runtimeEnv = () => grantedShellValues(harness.state.runtime.launchGrants[0].grant);
   await harness.invoke("detect", host);
-  await harness.invoke("enable", host);
+  await harness.invoke("enable", host, FIRST_LOGIN);
   assert.equal(harness.replaced.length, 1);
   assert.equal(runtimeEnv().NODE_EXTRA_CA_CERTS, caFile);
 
@@ -1800,13 +2961,14 @@ test("confirming a moved CA file for the program in use replaces the runtime tha
     found: true,
     path: claude,
     consented: true,
+    logins: [{ id: LOGIN_1, folder: configDir }],
   });
   assert.ok(
     dialogs.shown[dialogs.shown.length - 1].detail.includes(`NODE_EXTRA_CA_CERTS=${movedCaFile}`),
   );
   assert.equal(harness.replaced.length, 2);
   assert.deepEqual(runtimeEnv(), {
-    ...FIVE_SHELL_VALUES(context.fixture),
+    ...FOUR_SHELL_VALUES(context.fixture),
     NODE_EXTRA_CA_CERTS: movedCaFile,
   });
 });
@@ -1816,7 +2978,7 @@ test("Keep working puts the consent store back and reports the change as not mad
   const harness = runtimeHarness(context);
   const hostA = hostFor({ consents: context.consents });
   await harness.invoke("detect", hostA);
-  await harness.invoke("enable", hostA);
+  await harness.invoke("enable", hostA, FIRST_LOGIN);
   assert.equal(harness.replaced.length, 1);
   const before = context.consents.read();
 
@@ -1854,7 +3016,13 @@ test("a Locate whose login shell gave no answer offers no new values for a recor
     env: { NODE_EXTRA_CA_CERTS: caFile },
   });
   const host = hostFor({ consents: context.consents, dialogs: fakeDialogs({ pick: claude }) });
-  const on = { supported: true, found: true, path: claude, consented: true };
+  const on = {
+    supported: true,
+    found: true,
+    path: claude,
+    consented: true,
+    logins: [{ id: LOGIN_1, folder: null }],
+  };
   const stale = {
     ...on,
     found: false,
@@ -1928,7 +3096,7 @@ test("a status read during a consent change waits for it, and shows it undone wh
   const context = setup();
   const extensionId = claudeCode.CLAUDE_CODE_DESKTOP_EXTENSION_ID;
   assert.equal(context.extensions.methodIsReadOnly(extensionId, "status"), true);
-  for (const method of ["detect", "locate", "enable", "disable"]) {
+  for (const method of ["detect", "locate", "enable", "addLogin", "removeLogin", "disable"]) {
     assert.equal(context.extensions.methodIsReadOnly(extensionId, method), false, method);
   }
   // One runtime lock, first come first served, as main.ts's.
@@ -1955,12 +3123,12 @@ test("a status read during a consent change waits for it, and shows it undone wh
     launchGrants: context.extensions.launchGrantsWithoutValues(),
   };
   const hostA = hostFor({ consents: context.consents });
-  const invoke = (methodId) =>
+  const invoke = (methodId, payload = {}) =>
     registry.invokeDesktopExtensionWithLaunchGrants({
       registry: context.extensions,
       extensionId,
       methodId,
-      payload: {},
+      payload,
       host: hostA,
       withRuntimeLock,
       runningRuntime: () => runtime,
@@ -1972,7 +3140,7 @@ test("a status read during a consent change waits for it, and shows it undone wh
     });
 
   await invoke("detect");
-  const enabling = invoke("enable").then(
+  const enabling = invoke("enable", FIRST_LOGIN).then(
     () => "made",
     (error) => error.code,
   );
@@ -1989,5 +3157,6 @@ test("a status read during a consent change waits for it, and shows it undone wh
     found: true,
     path: context.fixture.claude,
     consented: false,
+    logins: NO_LOGINS,
   });
 });

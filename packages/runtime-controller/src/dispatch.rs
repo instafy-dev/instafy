@@ -234,6 +234,20 @@ struct AgentTarget {
     /// its turn runs on their own computer, with no credential and no runtime
     /// pin, and is never Instafy AI.
     claude_code: bool,
+    /// A Claude Code agent's Claude Code logins, in the order its job may run
+    /// on them (`agent_jobs.claude_code_login_ids`, docs/Local-Engine-Turns.md
+    /// 11.19): the agent's own login when it names one of its owner's, else
+    /// the owner's first login, else none. Empty for every other target.
+    claude_code_login_ids: Vec<Uuid>,
+}
+
+impl AgentTarget {
+    /// The first of [`Self::claude_code_login_ids`]: the login a Claude Code
+    /// target's stamps name, its session is looked for on, and its job
+    /// takes while it is still its owner's.
+    fn first_claude_code_login(&self) -> Option<Uuid> {
+        self.claude_code_login_ids.first().copied()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -642,8 +656,11 @@ async fn resolve_agent_targets(
         let mut description: Option<String> = None;
         let mut avatar_seed: Option<String> = None;
         let mut claude_code = false;
+        let mut claude_code_login_ids: Vec<Uuid> = Vec::new();
 
         if let Some(user_uuid) = user_id {
+            // A Claude Code agent's logins (11.19): its own when it names one
+            // of its owner's, else the owner's first, their oldest, else none.
             let row = transaction
                 .query_typed_opt(
                     "select ua.id as agent_id,
@@ -652,7 +669,21 @@ async fn resolve_agent_targets(
                             ua.display_name as display_name,
                             ua.description as description,
                             ua.avatar_seed as avatar_seed,
-                            ua.provider = $4 and ua.credential_id is null as claude_code
+                            ua.provider = $4 and ua.credential_id is null as claude_code,
+                            case when ua.provider = $4 and ua.credential_id is null then
+                                coalesce(
+                                    (select array[agent_login.id]
+                                       from claude_code_logins agent_login
+                                      where agent_login.id = ua.claude_code_login_id
+                                        and agent_login.user_id = ua.user_id),
+                                    (select array[first_login.id]
+                                       from claude_code_logins first_login
+                                      where first_login.user_id = ua.user_id
+                                      order by first_login.created_at, first_login.id
+                                      limit 1),
+                                    '{}'::uuid[]
+                                )
+                            end as claude_code_login_ids
                      from user_agents ua
                      left join user_credentials uc
                        on uc.id = ua.credential_id
@@ -685,6 +716,9 @@ async fn resolve_agent_targets(
                 description = row.get("description");
                 avatar_seed = Some(row.get("avatar_seed"));
                 claude_code = row.get::<_, Option<bool>>("claude_code").unwrap_or(false);
+                claude_code_login_ids = row
+                    .get::<_, Option<Vec<Uuid>>>("claude_code_login_ids")
+                    .unwrap_or_default();
             }
         }
 
@@ -722,6 +756,7 @@ async fn resolve_agent_targets(
             description,
             avatar_seed,
             claude_code,
+            claude_code_login_ids,
         });
     }
 
@@ -743,6 +778,7 @@ async fn resolve_agent_targets(
             description,
             avatar_seed: Some("octo".to_string()),
             claude_code: false,
+            claude_code_login_ids: Vec::new(),
         });
     }
 
@@ -2054,19 +2090,31 @@ pub(crate) async fn process_dispatch_prompt_timed(
     } else {
         for target in agent_targets.iter_mut() {
             target.claude_code = false;
+            target.claude_code_login_ids.clear();
         }
     }
     // A send whose every target is a Claude Code agent needs no runtime of
     // the space's: its jobs wait for their person's own computer (11.7). It
     // neither names nor prefers one, and the person's message and prompt
-    // carry the lane's stamps.
+    // carry the lane's stamps, with the first login every target shares
+    // (11.19), and none when their first logins differ.
     let all_claude_code =
         !agent_targets.is_empty() && agent_targets.iter().all(|target| target.claude_code);
     if all_claude_code {
+        let first_login = agent_targets
+            .first()
+            .and_then(AgentTarget::first_claude_code_login)
+            .filter(|login| {
+                agent_targets
+                    .iter()
+                    .all(|target| target.first_claude_code_login() == Some(*login))
+            });
         request.runtime_id = None;
         request.prefer_runtime = false;
-        crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
-        request.claude_code_lane = Some(crate::claude_code_lane::LaneAdmission);
+        crate::claude_code_lane::stamp(ensure_object(&mut request.metadata), first_login);
+        request.claude_code_lane = Some(crate::claude_code_lane::LaneAdmission {
+            login_id: first_login,
+        });
     }
     let strict_runtime_record = strict_browser_runtime_record;
     request.grant_ids = match agent_targets.as_slice() {
@@ -2169,7 +2217,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
         apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut run_request.metadata, target);
         if target.claude_code {
-            crate::claude_code_lane::stamp(ensure_object(&mut run_request.metadata));
+            crate::claude_code_lane::stamp(
+                ensure_object(&mut run_request.metadata),
+                target.first_claude_code_login(),
+            );
         }
         apply_agent_write_scope_metadata(
             &mut run_request.metadata,
@@ -2710,7 +2761,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
             );
         }
     } else if all_claude_code {
-        crate::claude_code_lane::stamp(ensure_object(&mut request.metadata));
+        crate::claude_code_lane::stamp(
+            ensure_object(&mut request.metadata),
+            request.claude_code_lane.and_then(|lane| lane.login_id),
+        );
     } else {
         let map = ensure_object(&mut request.metadata);
         map.insert(
@@ -2786,15 +2840,21 @@ pub(crate) async fn process_dispatch_prompt_timed(
     .await?;
 
     // An ambient evaluation asks an agent whether to join in now. A Claude
-    // Code agent none of whose person's computers could take it now sits the
-    // message out: its run is closed, and it gets no job that would wait
-    // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7).
+    // Code agent none of whose person's computers could take it now, on the
+    // login its job would take, sits the message out: its run is closed, and
+    // it gets no job that would wait (crate::claude_code_lane,
+    // docs/Local-Engine-Turns.md 11.7, 11.19).
     let mut claude_code_skipped_runs: Vec<Uuid> = Vec::new();
     if skill_mode_ambient_evaluation {
         if let Some(person) = context.user_id {
-            let mut a_computer_is_ready: Option<bool> = None;
-            for (run_id, _) in agent_runs.iter().filter(|(_, target)| target.claude_code) {
-                let ready = match a_computer_is_ready {
+            let mut ready_on: Vec<(Option<Uuid>, bool)> = Vec::new();
+            for (run_id, target) in agent_runs.iter().filter(|(_, target)| target.claude_code) {
+                let login = target.first_claude_code_login();
+                let known = ready_on
+                    .iter()
+                    .find(|(on, _)| *on == login)
+                    .map(|(_, ready)| *ready);
+                let ready = match known {
                     Some(ready) => ready,
                     None => {
                         let ready = crate::claude_code_lane::a_computer_is_ready(
@@ -2802,9 +2862,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
                             &transaction,
                             &project.id,
                             person,
+                            login,
                         )
                         .await?;
-                        a_computer_is_ready = Some(ready);
+                        ready_on.push((login, ready));
                         ready
                     }
                 };
@@ -2863,9 +2924,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
         inject_agent_target_metadata(&mut agent_request.metadata, target);
         // Only this target's own copy says whether its job runs on its
         // person's own Claude Code.
-        agent_request.claude_code_lane = target
-            .claude_code
-            .then_some(crate::claude_code_lane::LaneAdmission);
+        agent_request.claude_code_lane =
+            target
+                .claude_code
+                .then_some(crate::claude_code_lane::LaneAdmission {
+                    login_id: target.first_claude_code_login(),
+                });
         // Job-payload-only, and never the sender's word for it.
         ensure_object(&mut agent_request.metadata).insert(
             CONVERSATION_VISIBILITY_KEY.to_string(),
@@ -2937,8 +3001,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
         let resumes_provider_thread =
             !target.claude_code && supports_provider_state && agent_request.grant_ids.is_empty();
         // A Claude Code agent's turn resumes only its own engine's session:
-        // its person's, with this agent, in this conversation, on whichever of
-        // their computers holds it (docs/Local-Engine-Turns.md 11.9).
+        // its person's, with this agent, in this conversation, on the login
+        // its job expects, on whichever of their computers holds it
+        // (docs/Local-Engine-Turns.md 11.9, 11.19).
         let provider_conversation_state = if target.claude_code {
             match (context.user_id, request.conversation_id) {
                 (Some(person), Some(conversation_id)) => {
@@ -2948,6 +3013,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                         &conversation_id,
                         &person,
                         target.agent_id.as_ref(),
+                        target.claude_code_login_ids.first(),
                     )
                     .await?
                 }
@@ -3017,6 +3083,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &prompt_id,
             queued_runtime_id,
             target.credential_id,
+            &target.claude_code_login_ids,
             provider_conversation_state.as_ref(),
             research_parent_job_id,
         )
@@ -7147,6 +7214,7 @@ mod tests {
             description: None,
             avatar_seed: Some("hatchling:3".to_string()),
             claude_code: false,
+            claude_code_login_ids: Vec::new(),
         };
         // The controller's stamp replaces whatever `agent` the request carried.
         let mut metadata =
@@ -8108,6 +8176,7 @@ mod tests {
             description: None,
             avatar_seed: None,
             claude_code: false,
+            claude_code_login_ids: Vec::new(),
         };
 
         apply_agent_prompt_segment(&mut normalized, &segments, &target);
@@ -8185,6 +8254,7 @@ mod tests {
             description: None,
             avatar_seed: None,
             claude_code: false,
+            claude_code_login_ids: Vec::new(),
         };
         let (managed, own_key, other_managed) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let runs = vec![

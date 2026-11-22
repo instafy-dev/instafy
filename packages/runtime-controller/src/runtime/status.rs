@@ -131,46 +131,29 @@ pub(crate) struct RuntimeStatusEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     skill_packs: Option<Vec<RuntimeSkillPack>>,
     /// This runtime's own Claude Code, as registration attested it
-    /// (docs/Local-Engine-Turns.md 2.10). Present only on the viewer's own
-    /// private runtime, and only while local-engine turns are on for them.
+    /// (docs/Local-Engine-Turns.md 2.10, 11.19), in the capability's own
+    /// version 2 shape ([`claude_code_status_from_capabilities`]). Present
+    /// only on the viewer's own private runtime, and only while local-engine
+    /// turns are on for them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    claude_code: Option<RuntimeClaudeCodeStatus>,
+    claude_code: Option<JsonValue>,
 }
 
-/// `claudeCode` on a runtime status entry: `{ready, reason, cli, verified,
-/// planSignIn}`, and `resetsAt` while a not-ready capability says when it
-/// expects to be ready again, such as a Claude plan's limit's reset
-/// (docs/Local-Engine-Turns.md 11.11). `reason`, `cli` and `verified` are
-/// null, and `planSignIn` false, when the runtime did not say.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RuntimeClaudeCodeStatus {
-    ready: bool,
-    reason: Option<&'static str>,
-    cli: Option<String>,
-    verified: Option<bool>,
-    plan_sign_in: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resets_at: Option<String>,
-}
-
-/// `claudeCode` from a runtime's stored capabilities, read as registration
-/// attests it ([`super::register::ClaudeCodeCapability`]); none when absent
-/// or malformed.
-fn claude_code_status_from_capabilities(
-    capabilities: &JsonValue,
-) -> Option<RuntimeClaudeCodeStatus> {
-    let capability = super::register::ClaudeCodeCapability::from_reported(
+/// `claudeCode` on a runtime status entry, the shape registration attests
+/// (docs/Local-Engine-Turns.md 11.19): the program's `version` (2), `ready`,
+/// `reason` while not ready, `cli`, `verified` and `partialMessages`, and
+/// `logins`, each Claude Code login of the runtime's grant by its id, with
+/// its `ready`, its `reason` while not ready, `resetsAt` while a Claude
+/// plan's limit holds it (11.11), `planSignIn` and `signedIn`. A field the
+/// runtime did not report is absent. Read from the stored capability as
+/// registration reads a report ([`super::register::ClaudeCodeCapability`]),
+/// so nothing it would drop shows; none when absent or malformed, as a
+/// version 1 capability is.
+fn claude_code_status_from_capabilities(capabilities: &JsonValue) -> Option<JsonValue> {
+    super::register::ClaudeCodeCapability::from_reported(
         capabilities.get(super::register::CLAUDE_CODE_CAPABILITY)?,
-    )?;
-    Some(RuntimeClaudeCodeStatus {
-        ready: capability.ready,
-        reason: capability.reason,
-        cli: capability.cli,
-        verified: capability.verified,
-        plan_sign_in: capability.plan_sign_in == Some(true),
-        resets_at: capability.resets_at,
-    })
+    )
+    .map(|capability| capability.to_json())
 }
 
 /// One entry of `skillPacks` on a runtime status entry.
@@ -2045,67 +2028,61 @@ mod tests {
         assert_eq!(entry, json!({ "name": "plain", "version": "2.0.0" }));
     }
 
-    /// The status shape of `claudeCode` (docs/Local-Engine-Turns.md 2.10):
-    /// `{ready, reason, cli, verified, planSignIn}` from a well-formed stored
-    /// capability, and nothing from a malformed one.
+    /// The status shape of `claudeCode` (docs/Local-Engine-Turns.md 2.10,
+    /// 11.19): the version 2 capability registration attests, its logins
+    /// included, from a well-formed stored capability, and nothing from a
+    /// malformed one or one of version 1.
     #[test]
     fn claude_code_status_shows_only_the_known_fields() {
+        let (work, home) = (
+            "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01",
+            "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02",
+        );
         let status = |claude_code: JsonValue| {
             claude_code_status_from_capabilities(
                 &json!({ "agent": true, "claudeCode": claude_code }),
             )
-            .map(|status| serde_json::to_value(status).unwrap())
         };
+        let ready = json!({
+            "version": 2,
+            "ready": true,
+            "cli": "2.1.314",
+            "verified": true,
+            "partialMessages": true,
+            "logins": {
+                work: { "ready": true, "planSignIn": true, "signedIn": true },
+                home: { "ready": false, "reason": "binary_unsafe", "signedIn": false },
+            },
+        });
+        assert_eq!(status(ready.clone()), Some(ready));
         assert_eq!(
-            status(json!({
-                "version": 1,
-                "ready": true,
-                "cli": "2.1.314",
-                "verified": true,
-                "planSignIn": true,
-                "partialMessages": true,
-            })),
-            Some(json!({
-                "ready": true,
-                "reason": null,
-                "cli": "2.1.314",
-                "verified": true,
-                "planSignIn": true,
-            }))
-        );
-        assert_eq!(
-            status(json!({ "version": 1, "ready": false, "reason": "binary_missing" })),
-            Some(json!({
-                "ready": false,
-                "reason": "binary_missing",
-                "cli": null,
-                "verified": null,
-                "planSignIn": false,
-            }))
+            status(
+                json!({ "version": 2, "ready": false, "reason": "binary_missing", "logins": {} })
+            ),
+            Some(json!({ "version": 2, "ready": false, "reason": "binary_missing", "logins": {} }))
         );
         // A stored value is read as registration attests one: unknown fields
         // and ill-formed values never show.
         assert_eq!(
             status(json!({
-                "version": 1,
+                "version": 2,
                 "ready": true,
                 "reason": "bare_default",
                 "cli": "/home/someone/.local/bin/claude",
                 "verified": "true",
-                "planSignIn": "yes",
+                "planSignIn": true,
+                "resetsAt": "2026-11-22T18:00:00Z",
                 "path": "/home/someone/.local/bin/claude",
+                "logins": {
+                    work: { "ready": true, "planSignIn": "yes", "folder": "/home/someone" },
+                    "not-a-login": { "ready": true },
+                },
             })),
-            Some(json!({
-                "ready": true,
-                "reason": null,
-                "cli": null,
-                "verified": null,
-                "planSignIn": false,
-            }))
+            Some(json!({ "version": 2, "ready": true, "logins": { work: { "ready": true } } }))
         );
         for malformed in [
-            json!({ "version": 2, "ready": true }),
-            json!({ "version": 1, "ready": "true" }),
+            json!({ "version": 1, "ready": true, "planSignIn": true }),
+            json!({ "version": 2, "ready": "true" }),
             json!({ "ready": true }),
             json!(null),
         ] {
@@ -2114,7 +2091,7 @@ mod tests {
         assert_eq!(claude_code_status_from_capabilities(&json!({})), None);
         assert_eq!(
             claude_code_status_from_capabilities(
-                &json!({ "claude_code": { "version": 1, "ready": true } })
+                &json!({ "claude_code": { "version": 2, "ready": true } })
             ),
             None
         );

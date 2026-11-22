@@ -168,11 +168,14 @@ pub(crate) struct FailedClaudeCodeTurn {
     pub(crate) prompt_id: Option<Uuid>,
     /// The job's payload: whose @octo ran the turn, and for whom.
     pub(crate) payload: JsonValue,
+    /// The Claude Code login the turn's lease took, which its failure
+    /// message names (docs/Local-Engine-Turns.md 11.19).
+    pub(crate) claude_code_login_id: Option<Uuid>,
 }
 
 impl FailedClaudeCodeTurn {
     /// The turn of a failed job's row, which carries `id, project_id, run_id,
-    /// conversation_id, session_id, prompt_id, payload`.
+    /// conversation_id, session_id, prompt_id, payload, claude_code_login_id`.
     pub(super) fn from_job_row(row: &tokio_postgres::Row) -> Self {
         Self {
             job_id: row.get("id"),
@@ -184,6 +187,7 @@ impl FailedClaudeCodeTurn {
             payload: row
                 .get::<_, tokio_postgres::types::Json<JsonValue>>("payload")
                 .0,
+            claude_code_login_id: row.get("claude_code_login_id"),
         }
     }
 }
@@ -2679,6 +2683,7 @@ pub(crate) async fn record_failed_claude_code_turn(
                 crate::claude_code_lane::stamp_failure(
                     map,
                     crate::claude_code_lane::MACHINE_STOPPED,
+                    turn.claude_code_login_id,
                 );
             }
             Some(
@@ -2743,7 +2748,7 @@ async fn fail_claude_code_jobs_for_unavailable_runtime(
                )
                and engine is not null
              returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                       payload",
+                       payload, claude_code_login_id",
             &[&runtime.id, &runtime.project_id, &message],
         )
         .await

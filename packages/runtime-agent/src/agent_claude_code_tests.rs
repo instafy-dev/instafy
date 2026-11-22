@@ -35,6 +35,38 @@ const FIXTURES: &str = concat!(
 );
 /// The session id the scenarios print.
 const SESSION: &str = "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50";
+/// The person's login in a folder of its own, `home/.claude-work`: the one a space's jobs run on
+/// unless a test says otherwise (11.19).
+const WORK: &str = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+/// The person's login in Claude Code's usual folder.
+const USUAL: &str = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+
+fn login(id: &str) -> Uuid {
+    Uuid::parse_str(id).unwrap()
+}
+
+/// The capability of a space's lane whose two logins were signed in with a Claude plan when last
+/// probed: ready, or not ready for the program's `reason`, which each login then carries.
+fn capability(reason: Option<&str>) -> Value {
+    let of_a_login = || match reason {
+        None => json!({ "ready": true, "planSignIn": true, "signedIn": true }),
+        Some(reason) => {
+            json!({ "ready": false, "reason": reason, "planSignIn": true, "signedIn": true })
+        }
+    };
+    let mut capability = match reason {
+        None => json!({
+            "version": 2,
+            "ready": true,
+            "cli": "2.1.325",
+            "verified": true,
+            "partialMessages": true,
+        }),
+        Some(reason) => json!({ "version": 2, "ready": false, "reason": reason }),
+    };
+    capability["logins"] = json!({ WORK: of_a_login(), USUAL: of_a_login() });
+    capability
+}
 /// The person's recorded message, with the spaces and line end it was typed with.
 const PROMPT: &str = "  Rename the project in README.md\n";
 const KEY_ID: &str = "claude-code-lane-tests";
@@ -257,6 +289,7 @@ impl Space {
         for (name, mode) in [
             ("bin", 0o755),
             ("home", 0o700),
+            ("home/.claude-work", 0o700),
             ("tmp", 0o700),
             ("record", 0o700),
             ("workspace", 0o755),
@@ -298,6 +331,14 @@ impl Space {
                 path: None,
                 user_id: Some(person.to_string().into()),
                 env_json: None,
+                logins_json: Some(
+                    json!([
+                        { "id": WORK, "configDir": root.join("home/.claude-work") },
+                        { "id": USUAL, "configDir": null },
+                    ])
+                    .to_string()
+                    .into(),
+                ),
             },
             snapshot,
             Confinement::new([root.join("workspace")]),
@@ -497,7 +538,15 @@ impl Space {
         }
     }
 
-    /// The job the controller leases for the person's message: a lane job as 2.5 says it is.
+    /// The job the controller leases for the person's message on `login`.
+    fn job_on(&self, login_id: &str) -> LeaseJob {
+        let mut job = self.job();
+        job.claude_code_login_id = Some(login(login_id));
+        job
+    }
+
+    /// The job the controller leases for the person's message: a lane job as 2.5 says it is, on
+    /// the login its lease took, [`WORK`] (11.19).
     fn job(&self) -> LeaseJob {
         let run_id = Uuid::new_v4();
         let token = self.sign(&self.claims(
@@ -512,6 +561,7 @@ impl Space {
             "run_id": run_id,
             "conversation_id": Uuid::new_v4(),
             "engine": "claude-code",
+            "claude_code_login_id": WORK,
             "lease_attempts": 1,
             "workspace_token": token,
             "workspace_token_scopes": ["workspace.lease.write", "origin.token.mint"],
@@ -603,6 +653,34 @@ impl Space {
             .into_iter()
             .filter(|(argv, _)| argv.first().map(String::as_str) == Some("--print"))
             .collect()
+    }
+
+    /// The `CLAUDE_CONFIG_DIR` each of the turns' calls ran with, in order: its login's folder,
+    /// or none for Claude Code's usual folder.
+    fn print_config_dirs(&self) -> Vec<Option<String>> {
+        let mut folders = Vec::new();
+        for n in 0.. {
+            let call = self.root.join(format!("record/call-{n}"));
+            if !call.join("done").exists() {
+                break;
+            }
+            let argv = std::fs::read(call.join("argv")).unwrap();
+            if !argv.starts_with(b"--print\0") {
+                continue;
+            }
+            let env = std::fs::read_to_string(call.join("env")).unwrap();
+            folders.push(
+                env.lines()
+                    .find_map(|line| line.strip_prefix("CLAUDE_CONFIG_DIR="))
+                    .map(str::to_string),
+            );
+        }
+        folders
+    }
+
+    /// The folder of the [`WORK`] login.
+    fn work_folder(&self) -> PathBuf {
+        self.root.join("home/.claude-work")
     }
 
     /// The pid a scenario step recorded as `name`, in any call.
@@ -737,6 +815,11 @@ fn a_lane_turn_runs_on_the_persons_claude_code_and_saves_through_the_lane_filter
         let (argv, stdin) = &print_calls[0];
         assert_eq!(stdin.as_slice(), PROMPT.as_bytes());
         assert!(!argv.iter().any(|arg| arg == "--resume"), "{argv:?}");
+        // On the login its lease took, with that login's own folder (11.19).
+        assert_eq!(
+            space.print_config_dirs(),
+            [Some(space.work_folder().display().to_string())]
+        );
 
         // What was saved, and what stayed on this computer.
         let saved: Vec<&str> =
@@ -892,9 +975,9 @@ fn a_failed_turn_saves_nothing_and_reports_its_code() {
                 completion["proxy_metadata"]["conversation"].is_null(),
                 "{completion:#}"
             );
-            // The plan's limit said it reset at a time that has passed: nothing holds the lane,
+            // The plan's limit said it reset at a time that has passed: nothing holds the login,
             // and the next turn runs (11.11).
-            assert_eq!(space.lane.plan_limit_hold(), None);
+            assert_eq!(space.lane.plan_limit_hold(login(WORK)), None);
         }
         assert!(space.requests_to("/lease/acquire").is_empty());
         assert!(space.origin_requests.lock().is_empty());
@@ -1059,18 +1142,21 @@ fn a_plan_only_turn_runs_in_plan_mode_and_saves_nothing() {
     });
 }
 
-/// A turn that fails at the Claude plan's limit holds the lane until the limit resets (11.11):
-/// the runtime registers again saying it is not ready, as `plan_limit` with the reset time; a
-/// turn leased meanwhile fails as `plan_limit` at its probe, before Claude Code starts; and at the
-/// reset time the runtime probes again, registers again as ready, and turns run.
+/// A turn on a login that fails at its Claude plan's limit holds that login until the limit
+/// resets (11.11, 11.19): the runtime registers again saying that login is not ready, as
+/// `plan_limit` with the reset time, while the person's other login stays ready; a turn leased on
+/// the held login meanwhile fails as `plan_limit` at its probe, before Claude Code starts, while a
+/// turn on the other login runs, in that login's own folder; and at the reset time the runtime
+/// probes the held login again, registers again with it ready, and its turns run.
 #[test]
-fn a_plan_limit_holds_the_lane_until_it_resets() {
+fn a_plan_limit_holds_its_login_until_it_resets_and_the_other_login_takes_turns() {
     static LATCH: AtomicBool = AtomicBool::new(false);
     on_a_worker_stack(async {
         let space = Space::new(&LATCH).await;
         space.answer_registrations();
-        assert!(space.lane.probe_and_publish().await.readiness.is_ready());
+        assert!(space.lane.probe_and_publish_all().await);
         let ready = space.lane.capability().expect("published");
+        assert_eq!(ready, capability(None));
         let mut registration = space.registration.clone();
         registration.agent_token_expires_at =
             Some((chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339());
@@ -1079,11 +1165,11 @@ fn a_plan_limit_holds_the_lane_until_it_resets() {
             claude_code: Some(ready.clone()),
         });
 
-        // A turn reaches the limit, which resets in an hour.
+        // A turn on the work login reaches the limit, which resets in an hour.
         let resets_at = chrono::Utc::now().timestamp() + 3_600;
         space.set("FAKE_CLAUDE_RESETS_AT", &resets_at.to_string());
         space.scenario("plan-limit-resets");
-        let limited = space.job();
+        let limited = space.job_on(WORK);
         space.handle(limited.clone(), 0).await;
         let completion = space.completion(limited.id);
         assert_eq!(
@@ -1098,17 +1184,22 @@ fn a_plan_limit_holds_the_lane_until_it_resets() {
         let reset = chrono::DateTime::from_timestamp(resets_at, 0)
             .unwrap()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        assert_eq!(
-            space.registered_capability(),
-            json!({ "version": 1, "ready": false, "reason": "plan_limit", "resetsAt": reset })
-        );
+        let mut held = ready.clone();
+        held["logins"][WORK] = json!({
+            "ready": false,
+            "reason": "plan_limit",
+            "resetsAt": reset,
+            "planSignIn": true,
+            "signedIn": true,
+        });
+        assert_eq!(space.registered_capability(), held);
 
-        // A turn leased meanwhile fails at its probe, and Claude Code never starts.
+        // A turn on that login leased meanwhile fails at its probe, and Claude Code never starts.
         space.scenario("success");
         let starts = space.print_calls().len();
-        let held = space.job();
-        space.handle(held.clone(), 0).await;
-        let completion = space.completion(held.id);
+        let on_hold = space.job_on(WORK);
+        space.handle(on_hold.clone(), 0).await;
+        let completion = space.completion(on_hold.id);
         assert_eq!(completion["outcome"], "failed", "{completion:#}");
         assert_eq!(failure_code(&completion), Some("plan_limit"));
         assert!(
@@ -1120,30 +1211,47 @@ fn a_plan_limit_holds_the_lane_until_it_resets() {
         );
         assert_eq!(space.print_calls().len(), starts);
 
-        // The limit resets sooner than it said: at that time the lane probes again, and this
-        // runtime registers again as ready.
+        // The person's other login keeps taking turns, in its own folder: Claude Code's usual one.
+        let other = space.job_on(USUAL);
+        space.handle(other.clone(), 0).await;
+        assert_eq!(
+            space.completion(other.id)["outcome"],
+            "succeeded",
+            "{:#}",
+            space.completion(other.id)
+        );
+        assert_eq!(space.print_calls().len(), starts + 1);
+        assert_eq!(space.print_config_dirs().last(), Some(&None));
+        assert_eq!(space.registered_capability(), held);
+
+        // The limit resets sooner than it said: at that time the lane probes the login again, and
+        // this runtime registers again with it ready.
         let reprobe = tokio::spawn(space.lane.reprobe_while_not_ready(Duration::from_secs(600)));
         let sooner = space
             .lane
-            .hold_for_plan_limit(Some(chrono::Utc::now().timestamp() + 2))
+            .hold_for_plan_limit(login(WORK), Some(chrono::Utc::now().timestamp() + 2))
             .expect("a hold");
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 renewed.changed().await.unwrap();
-                if space.registered_capability()["ready"] == true {
+                if space.registered_capability()["logins"][WORK]["ready"] == true {
                     break;
                 }
             }
         })
         .await
-        .expect("registered again as ready");
+        .expect("registered again with the login ready");
         assert!(chrono::Utc::now() >= sooner.resets_at());
         assert_eq!(space.registered_capability(), ready);
         reprobe.abort();
 
-        let next = space.job();
+        let next = space.job_on(WORK);
         space.handle(next.clone(), 0).await;
         assert_eq!(space.completion(next.id)["outcome"], "succeeded");
+        assert_eq!(
+            space.print_config_dirs().last(),
+            Some(&Some(space.work_folder().display().to_string()))
+        );
         renewal.abort().await;
         assert!(!LATCH.load(Ordering::SeqCst));
     });
@@ -1556,6 +1664,12 @@ fn a_refused_turn_starts_no_claude() {
             json!({ "mode": "coordination_required" });
         let mut command = space.job();
         command.payload["prompt_text"] = json!("/terminal ls");
+        // A lease names the login it took; one that names none, or a login not set up on this
+        // computer, runs nothing (11.19).
+        let mut no_login = space.job();
+        no_login.claude_code_login_id = None;
+        let mut another_login = space.job();
+        another_login.claude_code_login_id = Some(Uuid::new_v4());
         for job in [
             &someone_else,
             &unknown,
@@ -1567,6 +1681,8 @@ fn a_refused_turn_starts_no_claude() {
             &owned,
             &coordination,
             &command,
+            &no_login,
+            &another_login,
         ] {
             space.handle(job.clone(), 60).await;
             let completion = space.completion(job.id);
@@ -1619,7 +1735,25 @@ fn a_refused_turn_starts_no_claude() {
         );
         std::fs::rename(space.folder.join("git-away"), space.folder.join(".git")).unwrap();
 
-        // The per-turn probe decides: a `claude` that is too old now fails the turn.
+        // The per-turn probe decides. A login whose folder others can now change fails the turn
+        // as `binary_unsafe`, and only that login is not ready (11.19), after the startup probe
+        // found both ready.
+        assert!(space.lane.probe_and_publish_all().await);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(space.work_folder(), std::fs::Permissions::from_mode(0o770))
+            .unwrap();
+        let unsafe_folder = space.job_on(WORK);
+        space.handle(unsafe_folder.clone(), 0).await;
+        assert_eq!(
+            failure_code(&space.completion(unsafe_folder.id)),
+            Some("binary_unsafe")
+        );
+        let capability = space.lane.capability().unwrap();
+        assert_eq!(capability["logins"][WORK]["reason"], "binary_unsafe");
+        assert_eq!(capability["logins"][USUAL]["ready"], true);
+        std::fs::set_permissions(space.work_folder(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        // A `claude` that is too old now fails the turn.
         space.set("FAKE_CLAUDE_VERSION", "old");
         let outdated = space.job();
         space.handle(outdated.clone(), 0).await;
@@ -1726,7 +1860,8 @@ fn a_probe_that_changes_the_capability_registers_again() {
         let space = Space::new(&LATCH).await;
         space.answer_registrations();
         // Registered as ready: the startup probe.
-        assert!(space.lane.probe_and_publish().await.readiness.is_ready());
+        assert!(space.lane.probe_and_publish_all().await);
+        assert_eq!(space.lane.capability(), Some(capability(None)));
         let mut registration = space.registration.clone();
         registration.agent_token_expires_at =
             Some((chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339());
@@ -1737,7 +1872,7 @@ fn a_probe_that_changes_the_capability_registers_again() {
 
         // A turn's probe disagrees: Claude Code was replaced by an older one.
         space.set("FAKE_CLAUDE_VERSION", "old");
-        let probe = space.lane.probe_and_publish().await;
+        let probe = space.lane.probe_and_publish(login(WORK)).await;
         assert!(probe.capability_changed);
         tokio::time::timeout(Duration::from_secs(30), renewed.changed())
             .await
@@ -1745,7 +1880,7 @@ fn a_probe_that_changes_the_capability_registers_again() {
             .unwrap();
         assert_eq!(
             space.registered_capability(),
-            json!({ "version": 1, "ready": false, "reason": "unsupported_version" })
+            capability(Some("unsupported_version"))
         );
         assert_eq!(
             space.requests_to("/runtime/register").last().unwrap()["capabilities"]["agent"],
@@ -1763,9 +1898,7 @@ fn a_probe_that_changes_the_capability_registers_again() {
             .await
             .expect("registered again")
             .unwrap();
-        let capability = space.registered_capability();
-        assert_eq!(capability["ready"], true, "{capability}");
-        assert_eq!(capability["cli"], "2.1.325");
+        assert_eq!(space.registered_capability(), capability(None));
         reprobe.abort();
         renewal.abort().await;
         assert_eq!(space.requests_to("/runtime/register").len(), 2);
@@ -1783,10 +1916,10 @@ fn a_capability_published_before_the_renewal_task_starts_registers_again() {
     on_a_worker_stack(async {
         let space = Space::new(&LATCH).await;
         space.answer_registrations();
-        let not_ready = json!({ "version": 1, "ready": false, "reason": "unsupported_version" });
+        let not_ready = capability(Some("unsupported_version"));
 
         // A cycle registers as ready.
-        assert!(space.lane.probe_and_publish().await.readiness.is_ready());
+        assert!(space.lane.probe_and_publish_all().await);
         let ready = space.lane.capability().expect("published");
         let registered = Registered::register(&space.client, &space.config, Some(space.lane))
             .await
@@ -1796,7 +1929,7 @@ fn a_capability_published_before_the_renewal_task_starts_registers_again() {
 
         // While it starts its origin and tunnel, a probe finds an older Claude Code.
         space.set("FAKE_CLAUDE_VERSION", "old");
-        assert!(space.lane.probe_and_publish().await.capability_changed);
+        assert!(space.lane.probe_and_publish_all().await);
         let (renewal, mut renewed) = space.renewal_task(registered);
         tokio::time::timeout(Duration::from_secs(30), renewed.changed())
             .await
@@ -1809,7 +1942,7 @@ fn a_capability_published_before_the_renewal_task_starts_registers_again() {
 
         // The next cycle adopts that renewal; before its task starts, the person updates Claude Code.
         space.set("FAKE_CLAUDE_VERSION", "supported");
-        assert!(space.lane.probe_and_publish().await.capability_changed);
+        assert!(space.lane.probe_and_publish_all().await);
         let (renewal, mut renewed) = space.renewal_task(adopted);
         tokio::time::timeout(Duration::from_secs(30), renewed.changed())
             .await

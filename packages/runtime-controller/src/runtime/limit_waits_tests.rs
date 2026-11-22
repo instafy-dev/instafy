@@ -1803,7 +1803,11 @@ async fn a_desktop_is_the_live_runner_of_a_lane_turn_pinned_to_it() -> anyhow::R
                         "mode": "private",
                         "ownerUserId": owner.to_string(),
                     },
-                    "claudeCode": { "version": 1, "ready": true },
+                    "claudeCode": {
+                        "version": 2,
+                        "ready": true,
+                        "logins": { Uuid::new_v4().to_string(): { "ready": true } },
+                    },
                 }),
             ],
         )

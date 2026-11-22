@@ -39,6 +39,12 @@ export const CLAUDE_CODE_COPY = {
       "Claude Code isn't set up on this computer yet. Set it up in Connections, under Claude Code on this computer.",
     /** A save the controller refused because the switch doesn't cover the person (11.3). */
     notAllowed: "Claude Code turns aren't on for your account.",
+    /** A save naming a login that is no longer the person's, such as one just deleted (11.19). */
+    loginUnknown: "That Claude Code login is no longer one of yours. Choose another login.",
+    /** The editor's choice of which of the person's logins the agent's turns run on (11.19). */
+    login: "Login",
+    /** After the oldest login's name: an agent that names none runs on it. */
+    firstLogin: "(first login)",
   },
 
   /** What a waiting turn's row adds for its person: what makes it run (11.14). */
@@ -48,6 +54,9 @@ export const CLAUDE_CODE_COPY = {
     startingAction: "Starting…",
     elsewhere: "It runs when Instafy Desktop runs this space on your computer.",
     setUpHere: "Set up Claude Code on this computer in Your AI to run it here.",
+    /** Claude Code is set up here, but not the login the turn runs on (11.19). */
+    loginNotHere:
+      "The Claude Code login this turn runs on isn't set up on this computer. Set it up in Your AI to run it here.",
   },
 
   /**
@@ -129,8 +138,81 @@ export const CLAUDE_CODE_COPY = {
      */
     firstUse: "Sign in to Claude Code on this computer first: run claude in a terminal once.",
     firstUseDismiss: "Got it",
+    /**
+     * The person's Claude Code logins (11.19): each a Claude Code folder they
+     * signed in to themselves, one subscription each, with what this
+     * computer says of it. A folder shows only on its own computer.
+     */
+    logins: {
+      title: "Logins",
+      /** The name of the first login Use Claude Code on this computer makes, unless the person names it. */
+      defaultLabel: "Claude Code",
+      usualFolder: "Claude Code's usual folder",
+      notSetUpHere: "Not set up on this computer",
+      /** A login this computer has set up that the person deleted, from here or another computer. */
+      deleted: "A login you deleted",
+      ready: "Ready.",
+      notSignedIn:
+        "Not signed in yet. In a terminal, run claude with CLAUDE_CONFIG_DIR set to this folder and sign in with /login.",
+      notSignedInUsualFolder: "Not signed in yet. In a terminal, run claude and sign in with /login.",
+      planLimitBefore: "Reached its Claude plan's limit. Ready again at",
+      planLimitNoTime: "Reached its Claude plan's limit. Ready again once it resets.",
+      /** Desktop or this computer's checks refuse the folder (its owner, its mode, where it is). */
+      folderUnusable:
+        "Instafy Desktop can't use this folder. It must be a folder that only you can change, outside the folders Instafy uses. Fix it, or remove this login from this computer and set it up again.",
+      /** Set up here, and this computer's check hasn't reached it yet. */
+      notCheckedYet: "Not checked on this computer yet. It's checked again when this space starts.",
+      setUp: "Set up on this computer",
+      rename: "Rename",
+      removeHere: "Remove from this computer",
+      delete: "Delete",
+      add: "Add a login",
+      name: "Name",
+      folder: "Folder",
+      chooseFolder: "Choose a folder…",
+      addSubmit: "Add login",
+      setUpSubmit: "Set up",
+      save: "Save",
+      cancel: "Cancel",
+      /** In place of Add a login once the person has the most logins there can be. */
+      atLimit: "You have 10 Claude Code logins, the most you can have.",
+      /** Asked before Delete removes a login everywhere (docs/Settings-UI.md, Your AI). */
+      deleteConfirm: "Agents that use it switch to your first login.",
+      errors: {
+        notAllowed: "Claude Code turns aren't on for your account.",
+        labelInvalid: "A login's name is 1 to 60 characters on one line, and can't hold double quotes or invisible characters.",
+        labelTaken: "You already have a login with this name. Choose another.",
+        limit: "You have 10 Claude Code logins, the most you can have.",
+        notFound: "That login is gone. It may have been deleted on another computer.",
+        listFailed: "Instafy couldn't load your Claude Code logins. Try again.",
+        changeFailed: "Instafy couldn't change your Claude Code logins. Try again.",
+      },
+    },
   },
 } as const;
+
+/**
+ * What the controller's refusal of a change to the person's logins reads as,
+ * by its code (docs/Local-Engine-Turns.md 11.19); a plain sentence for any
+ * other refusal, whose raw text could name the plumbing.
+ */
+export function claudeCodeLoginRefusalSentence(code: string | null): string {
+  const errors = CLAUDE_CODE_COPY.yourAi.logins.errors;
+  switch (code) {
+    case "claude_code_turn_not_allowed":
+      return errors.notAllowed;
+    case "claude_code_login_label_invalid":
+      return errors.labelInvalid;
+    case "claude_code_login_label_taken":
+      return errors.labelTaken;
+    case "claude_code_login_limit":
+      return errors.limit;
+    case "not_found":
+      return errors.notFound;
+    default:
+      return errors.changeFailed;
+  }
+}
 
 /** Why this computer's Claude Code cannot take a turn, in words. */
 export function claudeCodeNotReadySentence(

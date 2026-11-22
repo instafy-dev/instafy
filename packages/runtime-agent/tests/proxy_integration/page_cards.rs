@@ -570,6 +570,7 @@ printf '{{"posted":true,"title":"%s","command":"instafy preview open","answer":{
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         };
         // A required change: the runtime holds the turn to it, as the routing step's requirement
         // does for a routed message.

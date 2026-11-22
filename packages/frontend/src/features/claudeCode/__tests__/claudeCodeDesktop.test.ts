@@ -3,6 +3,7 @@ import {
   CLAUDE_CODE_DESKTOP_EXTENSION_ID,
   ClaudeCodeDesktopActionError,
   claudeCodeDesktopHostAvailable,
+  claudeCodeLoginSetUpHere,
   forgetClaudeCodeDesktopRefusalForTests,
   invokeClaudeCodeDesktopAction,
   parseClaudeCodeDesktopStatus,
@@ -25,12 +26,13 @@ describe("parseClaudeCodeDesktopStatus", () => {
   it("keeps only the exact status shape", () => {
     expect(
       parseClaudeCodeDesktopStatus({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: false }),
-    ).toEqual({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: false });
+    ).toEqual({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: false, logins: [] });
     expect(parseClaudeCodeDesktopStatus({ supported: true, found: false, consented: false })).toEqual({
       supported: true,
       found: false,
       path: null,
       consented: false,
+      logins: [],
     });
     expect(parseClaudeCodeDesktopStatus({ supported: "true", found: true, consented: true })).toBeNull();
     expect(parseClaudeCodeDesktopStatus({ supported: true, found: true })).toBeNull();
@@ -59,6 +61,7 @@ describe("parseClaudeCodeDesktopStatus", () => {
       found: true,
       path: "/opt/homebrew/bin/claude",
       consented: true,
+      logins: [],
       candidatePath: "/home/sam/.local/bin/claude",
       candidateProblem: "shell_setting_unusable",
       shellSetting: "NODE_EXTRA_CA_CERTS",
@@ -92,6 +95,7 @@ describe("parseClaudeCodeDesktopStatus", () => {
       found: false,
       path: "/opt/homebrew/bin/claude",
       consented: true,
+      logins: [],
       problem: "shell_setting_unusable",
       shellSetting: "NODE_EXTRA_CA_CERTS",
       candidatePath: "/opt/homebrew/bin/claude",
@@ -110,7 +114,7 @@ describe("parseClaudeCodeDesktopStatus", () => {
       shellSetting: "HTTPS_PROXY",
       somethingNew: { nested: true },
     });
-    expect(parsed).toEqual({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: true });
+    expect(parsed).toEqual({ supported: true, found: true, path: "/opt/homebrew/bin/claude", consented: true, logins: [] });
     expect(
       parseClaudeCodeDesktopStatus({
         supported: true,
@@ -119,6 +123,78 @@ describe("parseClaudeCodeDesktopStatus", () => {
         candidatePath: `/${"x".repeat(5000)}`,
       }),
     ).not.toHaveProperty("candidatePath");
+  });
+});
+
+// docs/Local-Engine-Turns.md 11.19: this account's logins on this computer.
+describe("the logins Desktop has set up here", () => {
+  const WORK = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+  const USUAL = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+  const on = { supported: true, found: true, consented: true, path: "/opt/homebrew/bin/claude" };
+
+  it("reads each login with its folder, null for the usual one, and why a folder no longer passes", () => {
+    const parsed = parseClaudeCodeDesktopStatus({
+      ...on,
+      logins: [
+        { id: WORK, folder: "/home/sam/.claude-work", problem: "writable_by_others" },
+        { id: USUAL.toUpperCase(), folder: null },
+      ],
+    });
+    expect(parsed?.logins).toEqual([
+      { id: WORK, folder: "/home/sam/.claude-work", problem: "writable_by_others" },
+      { id: USUAL, folder: null },
+    ]);
+    expect(parsed && claudeCodeLoginSetUpHere(parsed, USUAL)).toBe(true);
+    expect(parsed && claudeCodeLoginSetUpHere(parsed, WORK.toUpperCase())).toBe(true);
+    expect(parsed && claudeCodeLoginSetUpHere(parsed, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")).toBe(false);
+  });
+
+  it("drops an entry it can't show: no UUID, a folder that is no full path, a login twice; and keeps ten", () => {
+    const parsed = parseClaudeCodeDesktopStatus({
+      ...on,
+      logins: [
+        { id: "work", folder: null },
+        { id: WORK, folder: "relative/folder" },
+        { id: WORK, folder: 42 },
+        { id: WORK },
+        { id: WORK, folder: "/home/sam/.claude-work", problem: "made_up" },
+        { id: WORK, folder: null },
+        "not an entry",
+      ],
+    });
+    expect(parsed?.logins).toEqual([{ id: WORK, folder: "/home/sam/.claude-work" }]);
+    expect(parseClaudeCodeDesktopStatus({ ...on, logins: "all" })?.logins).toEqual([]);
+    const many = Array.from({ length: 12 }, (_, index) => ({
+      id: `aaaaaaaa-bbbb-4ccc-8ddd-${String(index).padStart(12, "0")}`,
+      folder: null,
+    }));
+    expect(parseClaudeCodeDesktopStatus({ ...on, logins: many })?.logins).toHaveLength(10);
+  });
+
+  it("asks Desktop to set up and remove a login by its id and name, never a path", async () => {
+    const invokeDesktopExtension = vi.fn<(request: InstafyDesktopExtensionInvokeOptions) => Promise<unknown>>(
+      async () => ({ ...on, logins: [{ id: WORK, folder: null }] }),
+    );
+    stubDesktop({ invokeDesktopExtension });
+    const login = { loginId: WORK, label: "Work" };
+    await invokeClaudeCodeDesktopAction({ action: "enable", login }, CONTROLLER_URL);
+    await invokeClaudeCodeDesktopAction({ action: "addLogin", login, folder: "choose" }, CONTROLLER_URL);
+    await invokeClaudeCodeDesktopAction({ action: "removeLogin", loginId: WORK }, CONTROLLER_URL);
+    await invokeClaudeCodeDesktopAction("enable", CONTROLLER_URL);
+    await invokeClaudeCodeDesktopAction({ action: "disable" }, null);
+    expect(invokeDesktopExtension.mock.calls.map(([request]) => request)).toEqual([
+      { extensionId: "claude-code", method: "enable", payload: { loginId: WORK, label: "Work" }, controllerUrl: CONTROLLER_URL },
+      {
+        extensionId: "claude-code",
+        method: "addLogin",
+        payload: { loginId: WORK, label: "Work", folder: "choose" },
+        controllerUrl: CONTROLLER_URL,
+      },
+      { extensionId: "claude-code", method: "removeLogin", payload: { loginId: WORK }, controllerUrl: CONTROLLER_URL },
+      // While it is on, enable confirms another program or new values, with no login.
+      { extensionId: "claude-code", method: "enable", controllerUrl: CONTROLLER_URL },
+      { extensionId: "claude-code", method: "disable" },
+    ]);
   });
 });
 
@@ -139,6 +215,7 @@ describe("the Desktop module", () => {
       found: true,
       path: null,
       consented: true,
+      logins: [],
     });
     // Desktop keys the consent by the controller Studio names and the session it reads itself.
     expect(invokeDesktopExtension).toHaveBeenCalledWith({

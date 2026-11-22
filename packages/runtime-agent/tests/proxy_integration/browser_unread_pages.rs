@@ -506,6 +506,7 @@ fn browser_job(project_id: Uuid, hands_back: bool) -> LeaseJob {
         grants: Vec::new(),
         grant_token: None,
         engine: None,
+        claude_code_login_id: None,
     }
 }
 

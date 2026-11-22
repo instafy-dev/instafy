@@ -11,6 +11,7 @@ import {
 } from "../AgentJobThreadPreviewLayout";
 import { AssistantSpeakerIdentityLabel } from "../AssistantSpeakerIdentityPill";
 import { RunFailureRetryProvider, type RunFailureRetryContextValue } from "../RunFailureNotice";
+import { setClaudeCodeLoginsLoaderForTests } from "../../../../features/claudeCode/claudeCodeLoginsStore";
 
 const JOB_ID = "0d4c9c1e-49af-4b1d-9a63-5b8f6f4f2f10";
 // What only the controller writes on a Claude Code turn's reply (docs/Local-Engine-Turns.md 2.1).
@@ -140,6 +141,35 @@ describe("the line under a turn-engine reply's header", () => {
       await render(reply(metadata), ownerContext({ isViewer: false, name: "Sam" }));
       expect(lines()).toEqual([]);
       expect(container.textContent).not.toContain("Claude Code");
+    });
+
+    // docs/Local-Engine-Turns.md 11.19: which of the person's own logins ran
+    // it, by completion's stamp, once their list of logins has loaded.
+    it("names the viewer's own login that ran it once they have more than one, and nobody else's", async () => {
+      const WORK = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+      const PERSONAL = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+      const loader = vi.fn(async () => ({
+        success: true as const,
+        logins: [
+          { id: PERSONAL, label: "Personal", createdAt: "2026-11-01T00:00:00Z" },
+          { id: WORK, label: "Work", createdAt: "2026-11-02T00:00:00Z" },
+        ],
+      }));
+      setClaudeCodeLoginsLoaderForTests(loader);
+      try {
+        const ranOnWork = reply({ ...STAMPED, claudeCode: { version: 1, loginId: WORK } });
+        await render(ranOnWork, ownerContext({ isViewer: true, name: "Sam" }));
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(lines()).toEqual(["Ran on your own Claude Code (Work), on your computer"]);
+        expect(loader).toHaveBeenCalledTimes(1);
+
+        await render(ranOnWork, ownerContext({ isViewer: false, name: "Sam" }));
+        expect(lines()).toEqual(["Ran on Sam's own Claude Code, on their computer"]);
+      } finally {
+        setClaudeCodeLoginsLoaderForTests(null);
+      }
     });
 
     it("leaves a failed turn to its failure sentence", async () => {

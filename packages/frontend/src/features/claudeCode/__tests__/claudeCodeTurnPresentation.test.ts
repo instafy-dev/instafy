@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { TurnEngineFailureInput } from "../../../conversations/runFailurePresentation";
-import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
+import type {
+  ControllerRuntimeClaudeCodeLogin,
+  ControllerRuntimeStatusEntry,
+} from "../../../services/runtimeController/runtimes";
 import {
   CLAUDE_CODE_FAILURE_SENTENCES,
   CLAUDE_CODE_SEND_REFUSAL_SENTENCES,
@@ -17,8 +20,10 @@ import {
   describeClaudeCodeSendRefusal,
   describeClaudeCodeTurnFailure,
   isClaudeCodeControllerStamped,
+  readClaudeCodeStampLoginId,
   type ClaudeCodeFailureCode,
 } from "../claudeCodeTurnPresentation";
+import { setClaudeCodeLogins, setClaudeCodeLoginsLoaderForTests } from "../claudeCodeLoginsStore";
 import { bannedWordIn } from "./claudeCodeBannedWords";
 
 // The codes a failed turn carries are runtime-contracts' lists: the same file
@@ -50,11 +55,31 @@ function failure(
   };
 }
 
+const WORK = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
+const PERSONAL = "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02";
+
 function runtimeEntry(
-  claudeCode: Omit<NonNullable<ControllerRuntimeStatusEntry["claudeCode"]>, "resetsAt"> & { resetsAt?: string | null },
+  claudeCode: Omit<NonNullable<ControllerRuntimeStatusEntry["claudeCode"]>, "logins"> & {
+    logins?: Record<string, ControllerRuntimeClaudeCodeLogin>;
+  },
   runtimeId = "runtime-1",
 ): ControllerRuntimeStatusEntry {
-  return { runtimeId, claudeCode: { resetsAt: null, ...claudeCode } } as ControllerRuntimeStatusEntry;
+  return { runtimeId, claudeCode: { logins: {}, ...claudeCode } } as ControllerRuntimeStatusEntry;
+}
+
+/** A login as a runtime attests it: ready and signed in, unless said otherwise. */
+function login(overrides: Partial<ControllerRuntimeClaudeCodeLogin> = {}): ControllerRuntimeClaudeCodeLogin {
+  return { ready: true, reason: null, resetsAt: null, planSignIn: true, signedIn: true, ...overrides };
+}
+
+/** A login held until its plan's limit resets at `resetsAt` (11.11). */
+function heldLogin(resetsAt: string): ControllerRuntimeClaudeCodeLogin {
+  return login({ ready: false, reason: "plan_limit", resetsAt });
+}
+
+/** A runtime of the person's with these logins, its program ready. */
+function computer(logins: Record<string, ControllerRuntimeClaudeCodeLogin>, runtimeId = "runtime-1") {
+  return runtimeEntry({ ready: true, reason: null, cli: "2.1.325", verified: true, logins }, runtimeId);
 }
 
 // docs/Local-Engine-Turns.md 5.5, one row per code.
@@ -96,7 +121,7 @@ function everyTurnSentence(): string[] {
   const sentences = Object.keys(EXPECTED).map((code) => describeClaudeCodeTurnFailure(failure(code)));
   sentences.push(
     describeClaudeCodeTurnFailure(
-      failure("not_signed_in", { runtime: runtimeEntry({ ready: true, reason: null, cli: "2.1.400", verified: false, planSignIn: true }) }),
+      failure("not_signed_in", { runtime: runtimeEntry({ ready: true, reason: null, cli: "2.1.400", verified: false }) }),
     ),
     describeClaudeCodeTurnFailure(failure("plan_limit", { rawText: "5-hour limit reached ∙ resets 2pm" })),
     describeClaudeCodeTurnFailure(failure(null)),
@@ -114,10 +139,12 @@ function everyTurnSentence(): string[] {
     claudeCodeWaitingLine({ isViewer: true, name: null }),
     claudeCodeWaitingLine({ isViewer: false, name: "Sam" }),
     claudeCodeWaitingLine(null),
-    claudeCodeWaitingLine({ isViewer: true, name: null }, [
-      runtimeEntry({ ready: false, reason: null, cli: null, verified: null, planSignIn: true, resetsAt: "2099-01-01T10:00:00Z" }),
-    ]),
+    claudeCodeWaitingLine({ isViewer: true, name: null }, [computer({ [WORK]: heldLogin("2099-01-01T10:00:00Z") })]),
     claudeCodeSpeakerLine({ isViewer: true, name: null }),
+    claudeCodeSpeakerLine({ isViewer: true, name: null }, { claudeCode: { version: 1, loginId: WORK } }, [
+      { id: WORK, label: "Work", createdAt: "" },
+      { id: PERSONAL, label: "Personal", createdAt: "" },
+    ]),
     claudeCodeSpeakerLine({ isViewer: false, name: "Sam" }),
     claudeCodeSpeakerLine(null),
   );
@@ -146,14 +173,14 @@ describe("Claude Code turn wording", () => {
   });
 
   it("adds the newer-version sentence to not_signed_in only when the runtime says the version is not verified", () => {
-    const unverified = runtimeEntry({ ready: true, reason: null, cli: "2.1.400", verified: false, planSignIn: true });
+    const unverified = runtimeEntry({ ready: true, reason: null, cli: "2.1.400", verified: false });
     expect(describeClaudeCodeTurnFailure(failure("not_signed_in", { runtime: unverified }))).toBe(
       `${EXPECTED.not_signed_in} If you're signed in, this newer Claude Code may no longer let other apps use your sign-in.`,
     );
-    const verified = runtimeEntry({ ready: true, reason: null, cli: "2.1.314", verified: true, planSignIn: true });
+    const verified = runtimeEntry({ ready: true, reason: null, cli: "2.1.314", verified: true });
     expect(describeClaudeCodeTurnFailure(failure("not_signed_in", { runtime: verified }))).toBe(EXPECTED.not_signed_in);
     // Unknown is not unverified.
-    const unknown = runtimeEntry({ ready: true, reason: null, cli: null, verified: null, planSignIn: false });
+    const unknown = runtimeEntry({ ready: true, reason: null, cli: null, verified: null });
     expect(describeClaudeCodeTurnFailure(failure("not_signed_in", { runtime: unknown }))).toBe(EXPECTED.not_signed_in);
     // The flag belongs to not_signed_in alone.
     expect(describeClaudeCodeTurnFailure(failure("crashed", { runtime: unverified }))).toBe(EXPECTED.crashed);
@@ -274,8 +301,7 @@ describe("Claude Code turn wording", () => {
   // 11.14: while no computer has taken it, by viewer.
   it("waits for its person's computer, or their Claude plan's limit while one of their computers holds it", () => {
     const now = Date.UTC(2026, 10, 19, 12, 0);
-    const holding = (resetsAt: string, runtimeId = "runtime-1") =>
-      runtimeEntry({ ready: false, reason: null, cli: "2.1.325", verified: true, planSignIn: true, resetsAt }, runtimeId);
+    const holding = (resetsAt: string, runtimeId = "runtime-1") => computer({ [WORK]: heldLogin(resetsAt) }, runtimeId);
     expect(claudeCodeWaitingLine({ isViewer: true, name: "Sam" }, [], now)).toBe("Waiting for your computer…");
     expect(claudeCodeWaitingLine({ isViewer: false, name: "Sam" }, [], now)).toBe("Waiting for Sam's computer…");
     expect(claudeCodeWaitingLine({ isViewer: false, name: null }, [], now)).toBe("Waiting for the sender's computer…");
@@ -292,7 +318,7 @@ describe("Claude Code turn wording", () => {
     ).toBe(at);
     expect(claudeCodePlanLimitResetsAt([holding("2026-11-19T11:00:00Z")], now)).toBeNull();
     // A ready computer of theirs takes the turn: it waits for nothing else.
-    const ready = runtimeEntry({ ready: true, reason: null, cli: "2.1.325", verified: true, planSignIn: true }, "c");
+    const ready = computer({ [WORK]: login() }, "c");
     expect(claudeCodePlanLimitResetsAt([holding("2026-11-19T14:30:00Z"), ready], now)).toBeNull();
     expect(claudeCodeWaitingLine({ isViewer: true, name: null }, [holding("2026-11-19T14:30:00Z"), ready], now)).toBe(
       "Waiting for your computer…",
@@ -303,12 +329,135 @@ describe("Claude Code turn wording", () => {
     );
   });
 
+  // 11.19: the plan-limit line reads by the turn's login, from the run's stamp.
+  it("waits for the limit of the login the run's stamp names, and only on the computers that attest it", () => {
+    const now = Date.UTC(2026, 10, 19, 12, 0);
+    const workAt = Date.UTC(2026, 10, 19, 14, 30);
+    const personalAt = Date.UTC(2026, 10, 19, 13, 0);
+    const local = (at: number) => new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(at));
+    const laptop = computer({ [WORK]: heldLogin("2026-11-19T14:30:00Z"), [PERSONAL]: heldLogin("2026-11-19T13:00:00Z") }, "laptop");
+
+    // Each login's own reset, not the earliest of all.
+    expect(claudeCodePlanLimitResetsAt([laptop], now, WORK)).toBe(workAt);
+    expect(claudeCodePlanLimitResetsAt([laptop], now, PERSONAL)).toBe(personalAt);
+    expect(claudeCodeWaitingLine({ isViewer: true, name: null }, [laptop], now, WORK)).toBe(
+      `Waiting for your Claude plan's limit to reset at ${local(workAt)}…`,
+    );
+    // Without a login in the stamp: the earliest reset over all of them.
+    expect(claudeCodePlanLimitResetsAt([laptop], now)).toBe(personalAt);
+
+    // Another login ready does not take this turn, whose login is held.
+    const workHeldPersonalReady = computer({ [WORK]: heldLogin("2026-11-19T14:30:00Z"), [PERSONAL]: login() });
+    expect(claudeCodePlanLimitResetsAt([workHeldPersonalReady], now, WORK)).toBe(workAt);
+    // Without a login, any ready one means the turn waits only for its lease.
+    expect(claudeCodePlanLimitResetsAt([workHeldPersonalReady], now)).toBeNull();
+
+    // The turn's login ready on another computer of theirs takes it.
+    const desktop = computer({ [WORK]: login() }, "desktop");
+    expect(claudeCodePlanLimitResetsAt([laptop, desktop], now, WORK)).toBeNull();
+    // A computer that attests no such login says nothing of it.
+    const elsewhere = computer({ [PERSONAL]: heldLogin("2026-11-19T13:00:00Z") }, "elsewhere");
+    expect(claudeCodePlanLimitResetsAt([elsewhere], now, WORK)).toBeNull();
+    expect(claudeCodeWaitingLine({ isViewer: true, name: null }, [elsewhere], now, WORK)).toBe("Waiting for your computer…");
+    // A login not ready for another reason holds nothing until a reset.
+    const unsafe = computer({ [WORK]: login({ ready: false, reason: "binary_unsafe" }) });
+    expect(claudeCodePlanLimitResetsAt([unsafe], now, WORK)).toBeNull();
+  });
+
+  it("reads the stamp's login through the presentation, only as a UUID", () => {
+    const later = new Date(Date.now() + 2 * 60 * 60_000);
+    const laptop = computer({ [WORK]: heldLogin(later.toISOString()), [PERSONAL]: login() });
+    const owner = { isViewer: true, name: null };
+    const stamped = (loginId: unknown) => ({ aiAccessMode: "claude-code", claudeCode: { version: 1, loginId } });
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(owner, [laptop], stamped(WORK))).toContain(
+      "Waiting for your Claude plan's limit to reset at",
+    );
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(owner, [laptop], stamped(WORK.toUpperCase()))).toContain(
+      "Waiting for your Claude plan's limit to reset at",
+    );
+    // The stamp names another login, or none: Personal is ready, so the turn waits for its lease.
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(owner, [laptop], stamped(PERSONAL))).toBe("Waiting for your computer…");
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(owner, [laptop], stamped("work"))).toBe("Waiting for your computer…");
+    expect(CLAUDE_CODE_TURN_PRESENTATION.describeWaiting(owner, [laptop], null)).toBe("Waiting for your computer…");
+
+    expect(readClaudeCodeStampLoginId(stamped(WORK.toUpperCase()))).toBe(WORK);
+    for (const loginId of ["work", 42, null, `${WORK} `, `{${WORK}}`]) {
+      expect(readClaudeCodeStampLoginId(stamped(loginId)), String(loginId)).toBeNull();
+    }
+    expect(readClaudeCodeStampLoginId({ claudeCode: "loginId" })).toBeNull();
+    expect(readClaudeCodeStampLoginId(null)).toBeNull();
+  });
+
   it("says whose own Claude Code ran a reply, in plain words", () => {
     expect(claudeCodeSpeakerLine({ isViewer: false, name: "Sam" })).toBe(
       "Ran on Sam's own Claude Code, on their computer",
     );
     expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" })).toBe("Ran on your own Claude Code, on your computer");
     expect(claudeCodeSpeakerLine(null)).toBe("Ran on the sender's own Claude Code, on their computer");
+  });
+
+  describe("naming the login that ran a reply (11.19)", () => {
+    afterEach(() => {
+      setClaudeCodeLoginsLoaderForTests(null);
+    });
+
+    const stamp = (loginId: string) => ({ aiAccessMode: "claude-code", claudeCode: { version: 1, loginId } });
+    const TWO = [
+      { id: PERSONAL, label: "Personal", createdAt: "2026-11-01T00:00:00Z" },
+      { id: WORK, label: "Work", createdAt: "2026-11-02T00:00:00Z" },
+    ];
+
+    it("names it for the turn's own person once they have more than one login", () => {
+      expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" }, stamp(WORK), TWO)).toBe(
+        "Ran on your own Claude Code (Work), on your computer",
+      );
+      // One login, a login that is not theirs, or none stamped: today's line.
+      expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" }, stamp(WORK), TWO.slice(1))).toBe(
+        "Ran on your own Claude Code, on your computer",
+      );
+      expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" }, stamp("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), TWO)).toBe(
+        "Ran on your own Claude Code, on your computer",
+      );
+      expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" }, { claudeCode: { version: 1 } }, TWO)).toBe(
+        "Ran on your own Claude Code, on your computer",
+      );
+      // Before the list has loaded.
+      expect(claudeCodeSpeakerLine({ isViewer: true, name: "Sam" }, stamp(WORK), null)).toBe(
+        "Ran on your own Claude Code, on your computer",
+      );
+    });
+
+    it("never names a login for anyone else", () => {
+      expect(claudeCodeSpeakerLine({ isViewer: false, name: "Sam" }, stamp(WORK), TWO)).toBe(
+        "Ran on Sam's own Claude Code, on their computer",
+      );
+      expect(claudeCodeSpeakerLine(null, stamp(WORK), TWO)).toBe("Ran on the sender's own Claude Code, on their computer");
+    });
+
+    it("reads the viewer's logins as last listed, and tells its subscribers when they load", async () => {
+      let listed: (value: { success: true; logins: typeof TWO }) => void = () => {};
+      setClaudeCodeLoginsLoaderForTests(() => new Promise((resolve) => { listed = resolve; }));
+      const owner = { isViewer: true, name: null };
+      expect(CLAUDE_CODE_TURN_PRESENTATION.describeSpeaker(owner, stamp(WORK))).toBe(
+        "Ran on your own Claude Code, on your computer",
+      );
+      let changes = 0;
+      const stop = CLAUDE_CODE_TURN_PRESENTATION.subscribe?.(() => {
+        changes += 1;
+      });
+      listed({ success: true, logins: TWO });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(changes).toBeGreaterThan(0);
+      expect(CLAUDE_CODE_TURN_PRESENTATION.describeSpeaker(owner, stamp(WORK))).toBe(
+        "Ran on your own Claude Code (Work), on your computer",
+      );
+      stop?.();
+      // A list the row writes after a rename reads at once.
+      setClaudeCodeLogins([TWO[0]!, { ...TWO[1]!, label: "Day job" }]);
+      expect(CLAUDE_CODE_TURN_PRESENTATION.describeSpeaker(owner, stamp(WORK))).toBe(
+        "Ran on your own Claude Code (Day job), on your computer",
+      );
+    });
   });
 
   it("counts only the controller's own stamp as a Claude Code turn's", () => {

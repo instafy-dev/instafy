@@ -24,6 +24,28 @@ pub const NOT_READY_REASONS: [&str; 6] = [
     "plan_limit",
 ];
 
+/// The reasons that belong to the `claude` program itself, the top-level `reason` of a not-ready
+/// version 2 capability: every reason a probe gives, so [`NOT_READY_REASONS`] without
+/// `plan_limit`, which belongs to one login (docs/Local-Engine-Turns.md 11.19). A login's own
+/// `reason` is any of [`NOT_READY_REASONS`]: the program's while the program is not ready,
+/// otherwise `binary_unsafe` for a folder that fails its checks, or `plan_limit` while its hold
+/// lasts.
+pub const PROGRAM_NOT_READY_REASONS: [&str; 5] = [
+    "binary_missing",
+    "binary_unsafe",
+    "probe_failed",
+    "unsupported_version",
+    "bare_default",
+];
+
+/// The version of the `claudeCode` capability (11.19, D52): the program once, and each Claude
+/// Code login of the grant apart, under `logins`, keyed by the login's id. A runtime that
+/// reports another version takes no lane turn.
+pub const CAPABILITY_VERSION: u64 = 2;
+
+/// The most Claude Code logins a person has, a grant carries and a capability lists (11.19).
+pub const MAX_LOGINS: usize = 10;
+
 /// The codes of a lane turn's `claude-code/failure` artifact that the controller copies onto
 /// its failure message as `claudeCodeFailure` (2.6): the rows of 5.5's table above
 /// `claude_code_turn_not_allowed`, in its order. The controller leaves any other code off, and
@@ -58,7 +80,10 @@ pub const STOP_AND_SWEEP_FAILURE_CODES: [&str; 2] = [MACHINE_STOPPED, RUN_ONCE_I
 
 #[cfg(test)]
 mod tests {
-    use super::{NOT_READY_REASONS, RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES};
+    use super::{
+        CAPABILITY_VERSION, MAX_LOGINS, NOT_READY_REASONS, PROGRAM_NOT_READY_REASONS,
+        RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES,
+    };
     use serde_json::Value;
 
     fn fixtures() -> Value {
@@ -78,6 +103,18 @@ mod tests {
     fn the_lists_are_the_fixtures() {
         let fixtures = fixtures();
         assert_eq!(codes(&fixtures, "notReadyReasons"), NOT_READY_REASONS);
+        assert_eq!(
+            codes(&fixtures, "programNotReadyReasons"),
+            PROGRAM_NOT_READY_REASONS
+        );
+        assert_eq!(
+            fixtures["capabilityVersion"].as_u64(),
+            Some(CAPABILITY_VERSION)
+        );
+        assert_eq!(
+            fixtures["maxLogins"].as_u64(),
+            u64::try_from(MAX_LOGINS).ok()
+        );
         assert_eq!(
             codes(&fixtures, "runtimeFailureCodes"),
             RUNTIME_FAILURE_CODES
@@ -105,6 +142,34 @@ mod tests {
         every.sort_unstable();
         every.dedup();
         assert_eq!(every.len(), listed, "a code is listed twice");
+    }
+
+    #[test]
+    fn the_program_has_every_reason_but_a_logins_plan_limit() {
+        let mut program: Vec<&str> = PROGRAM_NOT_READY_REASONS.to_vec();
+        program.push("plan_limit");
+        assert_eq!(program, NOT_READY_REASONS);
+    }
+
+    #[test]
+    fn the_capability_fixture_is_a_version_2_capability_with_two_logins() {
+        let fixtures = fixtures();
+        let capability = &fixtures["capability"];
+        assert_eq!(capability["version"].as_u64(), Some(CAPABILITY_VERSION));
+        assert_eq!(capability["ready"], Value::Bool(true));
+        let logins = capability["logins"].as_object().expect("logins");
+        assert_eq!(logins.len(), 2);
+        for (id, login) in logins {
+            assert!(
+                id.len() == 36 && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+                "{id}"
+            );
+            assert!(login["ready"].is_boolean(), "{id}");
+            if login["ready"] == Value::Bool(false) {
+                assert_eq!(login["reason"].as_str(), Some("plan_limit"));
+                assert!(login["resetsAt"].is_string());
+            }
+        }
     }
 
     #[test]

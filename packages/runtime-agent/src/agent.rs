@@ -3428,6 +3428,7 @@ mod tests {
             grants: Vec::new(),
             grant_token: None,
             engine: None,
+            claude_code_login_id: None,
         }
     }
 }

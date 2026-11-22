@@ -52,6 +52,10 @@ pub(crate) struct AgentProfile {
     model: Option<String>,
     reasoning_effort: Option<String>,
     credential_id: Option<String>,
+    /// The Claude Code login a Claude Code agent's turns run on
+    /// (docs/Local-Engine-Turns.md 11.19); null for its owner's first login,
+    /// and for every other agent.
+    claude_code_login_id: Option<String>,
     runtime_id: Option<String>,
     deleted_at: Option<String>,
     created_at: String,
@@ -76,6 +80,9 @@ pub(crate) struct CreateAgentBody {
     provider: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+    /// One of the owner's own Claude Code logins, with `provider:
+    /// "claude-code"` only (11.19).
+    claude_code_login_id: Option<String>,
 }
 
 /// Distinguish "field absent" (keep) from "field: null" (clear) for PATCH
@@ -113,6 +120,12 @@ pub(crate) struct UpdateAgentBody {
     /// The agent's AI when it has no credential: `"claude-code"` makes it a
     /// Claude Code agent (11.3), which takes no credential in the same body.
     provider: Option<String>,
+    /// The Claude Code login its turns run on (11.19): absent keeps it, null
+    /// clears it (its owner's first login), and a value, one of the owner's
+    /// own logins, sets it on an agent whose AI is Claude Code after the
+    /// request.
+    #[serde(default, deserialize_with = "double_option")]
+    claude_code_login_id: Option<Option<String>>,
     project_id: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     runtime_id: Option<Option<String>>,
@@ -319,6 +332,56 @@ fn ensure_claude_code_choice(
         return Err(crate::claude_code_lane::not_allowed());
     }
     Ok(())
+}
+
+/// A `claudeCodeLoginId` that names no Claude Code login of the agent
+/// owner's own.
+const CLAUDE_CODE_LOGIN_UNKNOWN: &str = "claude_code_login_unknown";
+
+/// The Claude Code login `raw` names for an agent whose provider after the
+/// request is `provider` (docs/Local-Engine-Turns.md 11.19): one of
+/// `user_id`'s own logins, on a Claude Code agent only. The login is held
+/// until the request ends, so a delete of it waits for the agent's save and
+/// then clears it there too (`on delete set null`). The composite reference
+/// on `user_agents` keeps any other person's login out whoever writes the
+/// row; this answers the person with the reason instead.
+async fn resolve_claude_code_login(
+    transaction: &Transaction<'_>,
+    user_id: &Uuid,
+    provider: &str,
+    raw: &str,
+) -> Result<Uuid, (StatusCode, Json<ApiError>)> {
+    if provider != PROVIDER_CLAUDE_CODE {
+        return Err(bad_request(
+            "claudeCodeLoginId goes only with an agent whose AI is Claude Code.",
+        ));
+    }
+    let unknown = || {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError::with_details(
+                "That Claude Code login isn't one of yours.",
+                CLAUDE_CODE_LOGIN_UNKNOWN,
+                serde_json::json!({ "reason": "unknown" }),
+            )),
+        )
+    };
+    let login_id = Uuid::from_str(raw.trim()).map_err(|_| unknown())?;
+    let owned = transaction
+        .query_opt(
+            "select 1 from claude_code_logins
+              where id = $1 and user_id = $2
+              for key share",
+            &[&login_id, user_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to check the Claude Code login: {error}"))
+        })?;
+    match owned {
+        Some(_) => Ok(login_id),
+        None => Err(unknown()),
+    }
 }
 
 /// The AI an agent with no credential falls back to when it stops using
@@ -678,6 +741,7 @@ async fn list_my_agents(
                     ua.model,
                     ua.reasoning_effort,
                     ua.credential_id,
+                    ua.claude_code_login_id,
                     ua.deleted_at,
                     ua.created_at,
                     ua.updated_at,
@@ -708,6 +772,7 @@ async fn list_my_agents(
             let model: Option<String> = row.get("model");
             let reasoning_effort: Option<String> = row.get("reasoning_effort");
             let credential_id: Option<Uuid> = row.get("credential_id");
+            let claude_code_login_id: Option<Uuid> = row.get("claude_code_login_id");
             let runtime_id: Option<Uuid> = row.get("runtime_id");
             let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
             let created_at: DateTime<Utc> = row.get("created_at");
@@ -724,6 +789,7 @@ async fn list_my_agents(
                 model,
                 reasoning_effort,
                 credential_id: credential_id.map(|value| value.to_string()),
+                claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
                 runtime_id: runtime_id.map(|value| value.to_string()),
                 deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
                 created_at: created_at.to_rfc3339(),
@@ -786,6 +852,12 @@ async fn create_my_agent(
                 .unwrap_or_else(|| PROVIDER_OPENAI.to_string()),
         }
     };
+    // The login a Claude Code agent's turns run on, one of the owner's own
+    // (11.19). None: their first login.
+    let claude_code_login_id = match body.claude_code_login_id.as_deref() {
+        Some(raw) => Some(resolve_claude_code_login(&transaction, &user_id, &provider, raw).await?),
+        None => None,
+    };
 
     let (agent_id, _handle) = if let Some(handle) = body
         .handle
@@ -805,8 +877,8 @@ async fn create_my_agent(
         transaction
             .execute(
                 "insert into user_agents (
-                     id, user_id, credential_id, provider, model, reasoning_effort, handle, display_name, description, avatar_seed
-                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                     id, user_id, credential_id, provider, model, reasoning_effort, handle, display_name, description, avatar_seed, claude_code_login_id
+                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 &[
                     &agent_id,
                     &user_id,
@@ -818,6 +890,7 @@ async fn create_my_agent(
                     &display_name,
                     &description,
                     &avatar_seed,
+                    &claude_code_login_id,
                 ],
             )
             .await
@@ -867,7 +940,7 @@ async fn create_my_agent(
 
     let row = transaction
         .query_one(
-            "select id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at
+            "select id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, deleted_at, created_at, updated_at
              from user_agents
              where id = $1 and user_id = $2
              limit 1",
@@ -891,6 +964,7 @@ async fn create_my_agent(
     let model: Option<String> = row.get("model");
     let reasoning_effort: Option<String> = row.get("reasoning_effort");
     let credential_id: Option<Uuid> = row.get("credential_id");
+    let claude_code_login_id: Option<Uuid> = row.get("claude_code_login_id");
     let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
     let created_at: DateTime<Utc> = row.get("created_at");
     let updated_at: DateTime<Utc> = row.get("updated_at");
@@ -906,6 +980,7 @@ async fn create_my_agent(
         model,
         reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
+        claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
         runtime_id: None,
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
@@ -1059,6 +1134,22 @@ async fn update_my_agent(
         }
         None => existing_provider,
     };
+    // The login a Claude Code agent's turns run on (11.19): set or cleared as
+    // the body says while the agent's AI is Claude Code, and cleared whenever
+    // it no longer is, as choosing a connection or Instafy AI does. Otherwise
+    // the update leaves the column as the row holds it then, never as this
+    // request read it: a delete of the login since then has cleared it, and
+    // writing the old id back would name a login that is gone.
+    let claude_code_login_update: Option<Option<Uuid>> = match body.claude_code_login_id.as_ref() {
+        Some(Some(raw)) => Some(Some(
+            resolve_claude_code_login(&transaction, &user_id, &next_provider, raw).await?,
+        )),
+        Some(None) => Some(None),
+        None if next_provider == PROVIDER_CLAUDE_CODE => None,
+        None => Some(None),
+    };
+    let update_claude_code_login = claude_code_login_update.is_some();
+    let next_claude_code_login_id = claude_code_login_update.flatten();
 
     let next_model = match body.model {
         None => existing_model,
@@ -1198,9 +1289,10 @@ async fn update_my_agent(
                  model = $9,
                  reasoning_effort = $10,
                  bio = case when $12 then $11 else bio end,
+                 claude_code_login_id = case when $14 then $13 else claude_code_login_id end,
                  updated_at = now()
              where id = $1 and user_id = $2 and deleted_at is null
-             returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at",
+             returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, deleted_at, created_at, updated_at",
             &[
                 &agent_id,
                 &user_id,
@@ -1214,6 +1306,8 @@ async fn update_my_agent(
                 &next_reasoning_effort,
                 &next_bio,
                 &update_bio,
+                &next_claude_code_login_id,
+                &update_claude_code_login,
             ],
         )
         .await
@@ -1238,6 +1332,7 @@ async fn update_my_agent(
     let model: Option<String> = row.get("model");
     let reasoning_effort: Option<String> = row.get("reasoning_effort");
     let credential_id: Option<Uuid> = row.get("credential_id");
+    let claude_code_login_id: Option<Uuid> = row.get("claude_code_login_id");
     let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
     let created_at: DateTime<Utc> = row.get("created_at");
     let updated_at: DateTime<Utc> = row.get("updated_at");
@@ -1253,6 +1348,7 @@ async fn update_my_agent(
         model,
         reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
+        claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
         runtime_id: agent_runtime_id.map(|value| value.to_string()),
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
@@ -1476,5 +1572,15 @@ mod tests {
         let set: UpdateAgentBody = serde_json::from_str(r#"{"model": "gpt-5.5"}"#).expect("parse");
         assert_eq!(set.model, Some(Some("gpt-5.5".to_string())));
         assert_eq!(set.runtime_id, None);
+
+        // An agent's Claude Code login: absent keeps, null clears, a value sets.
+        assert_eq!(absent.claude_code_login_id, None);
+        let cleared: UpdateAgentBody =
+            serde_json::from_str(r#"{"claudeCodeLoginId": null}"#).expect("parse");
+        assert_eq!(cleared.claude_code_login_id, Some(None));
+        let login = Uuid::new_v4().to_string();
+        let set: UpdateAgentBody =
+            serde_json::from_value(json!({ "claudeCodeLoginId": login })).expect("parse");
+        assert_eq!(set.claude_code_login_id, Some(Some(login)));
     }
 }

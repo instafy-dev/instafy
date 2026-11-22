@@ -1,5 +1,5 @@
 {
-  "_comment": "Local-engine turns (docs/Local-Engine-Turns.md): the codes the runtime writes, the controller keeps and Studio words, and one lane job's payload, named once. runtime-contracts (claude_code_lane.rs) checks NOT_READY_REASONS, RUNTIME_FAILURE_CODES and STOP_AND_SWEEP_FAILURE_CODES against notReadyReasons, runtimeFailureCodes and stopAndSweepFailureCodes. The controller keeps the first two as its own lists (runtime/register.rs, claude_code_lane.rs) and checks its stop and sweep codes against the third (claude_code_lane.rs, runtime/sweeps.rs); runtime-agent checks NotReadyReason and FailureCode (claude_code/mod.rs); Studio checks runtimes.ts, claudeCodeCopy.ts and claudeCodeTurnPresentation.ts. laneJobPayload is the payload dispatch writes for a turn of an agent whose AI is Claude Code, the first in its chat: the controller's test a_lane_job_payload_is_the_one_runtime_contracts_records dispatches it to the sender's own @octo set to Claude Code and compares, and runtime-agent's lane tests run it through LaneJob::of (claude_code/job.rs). Its ids are placeholders: <project_id>, <user_id> (the sender), <conversation_id>, <prompt_id>, <run_id> and <agent_id> (the sender's own @octo). It names no runtime: a send whose every agent uses Claude Code has none until one of its person's computers leases its turn.",
+  "_comment": "Local-engine turns (docs/Local-Engine-Turns.md): the codes the runtime writes, the controller keeps and Studio words, and one lane job's payload, named once. runtime-contracts (claude_code_lane.rs) checks NOT_READY_REASONS, PROGRAM_NOT_READY_REASONS, RUNTIME_FAILURE_CODES, STOP_AND_SWEEP_FAILURE_CODES, CAPABILITY_VERSION and MAX_LOGINS against notReadyReasons, programNotReadyReasons, runtimeFailureCodes, stopAndSweepFailureCodes, capabilityVersion and maxLogins. The controller keeps the reasons and runtime codes as its own lists (runtime/register.rs, claude_code_lane.rs) and checks its stop and sweep codes against the third (claude_code_lane.rs, runtime/sweeps.rs); runtime-agent checks NotReadyReason and FailureCode (claude_code/mod.rs); Studio checks runtimes.ts, claudeCodeCopy.ts and claudeCodeTurnPresentation.ts. laneJobPayload is the payload dispatch writes for a turn of an agent whose AI is Claude Code, the first in its chat: the controller's test a_lane_job_payload_is_the_one_runtime_contracts_records dispatches it to the sender's own @octo set to Claude Code and compares, and runtime-agent's lane tests run it through LaneJob::of (claude_code/job.rs). Its ids are placeholders: <project_id>, <user_id> (the sender), <conversation_id>, <prompt_id>, <run_id> and <agent_id> (the sender's own @octo). It names no runtime: a send whose every agent uses Claude Code has none until one of its person's computers leases its turn. capability is a version 2 `claudeCode` capability as a runtime with two Claude Code logins reports it and registration keeps it (docs/Local-Engine-Turns.md 11.19): the controller's attestation keeps it unchanged, runtime-agent's capability builder gives that shape, and Studio's runtimes.ts reads both logins from it.",
   "notReadyReasons": [
     "binary_missing",
     "binary_unsafe",
@@ -8,6 +8,36 @@
     "bare_default",
     "plan_limit"
   ],
+  "programNotReadyReasons": [
+    "binary_missing",
+    "binary_unsafe",
+    "probe_failed",
+    "unsupported_version",
+    "bare_default"
+  ],
+  "capabilityVersion": 2,
+  "maxLogins": 10,
+  "capability": {
+    "version": 2,
+    "ready": true,
+    "cli": "2.1.325",
+    "verified": true,
+    "partialMessages": true,
+    "logins": {
+      "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01": {
+        "ready": true,
+        "planSignIn": true,
+        "signedIn": true
+      },
+      "0b8e5d27-91a4-4f6c-b3d2-5e7a9c1f4e02": {
+        "ready": false,
+        "reason": "plan_limit",
+        "resetsAt": "2026-11-22T18:00:00Z",
+        "planSignIn": true,
+        "signedIn": true
+      }
+    }
+  },
   "runtimeFailureCodes": [
     "not_signed_in",
     "plan_limit",
@@ -61,9 +91,13 @@
         "source": "dispatch"
       },
       "conversationVisibility": "public",
-      "input": { "kind": "person" },
+      "input": {
+        "kind": "person"
+      },
       "writeIntent": true,
-      "claudeCode": { "version": 1 },
+      "claudeCode": {
+        "version": 1
+      },
       "aiAccessMode": "claude-code",
       "managedAiUsed": false
     },

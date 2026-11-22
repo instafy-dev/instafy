@@ -36,6 +36,8 @@ const FIXTURES: &str = concat!(
     "/tests/fixtures/fake-claude-fixtures"
 );
 const USER_ID: &str = "6f1c2f6e-9d8a-4f7b-8f61-3c1f0a2b4d5e";
+/// The one login of the grant, the one every turn here runs on.
+const LOGIN: &str = "6f1c2a43-7b7e-4c51-9a0e-2d4b1f6a8c01";
 /// The session id the scenarios print, and the one a resumed turn passes.
 const SESSION: &str = "5d2a8c4e-1f3b-4c6d-9e7a-0b1c2d3e4f50";
 const PROMPT: &str = "Rename the project in README.md\n";
@@ -53,7 +55,8 @@ fn quote(value: impl AsRef<std::ffi::OsStr>) -> String {
 }
 
 /// A temporary computer with a granted `claude` (a wrapper that sets the fake's settings and
-/// execs it), a space folder, a home and a temporary folder, and its lane, probed ready.
+/// execs it), a space folder, a home and a temporary folder, and its lane, probed ready for its
+/// one login.
 struct Machine {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -62,7 +65,18 @@ struct Machine {
 }
 
 impl Machine {
+    /// A machine whose one login is Claude Code's usual folder: the child gets no
+    /// `CLAUDE_CONFIG_DIR`.
     async fn new() -> Self {
+        Self::with_login(None).await
+    }
+
+    /// A machine whose one login is the folder `home/.claude-work`.
+    async fn with_a_login_folder() -> Self {
+        Self::with_login(Some("home/.claude-work")).await
+    }
+
+    async fn with_login(login_folder: Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         for (name, mode) in [
@@ -75,6 +89,7 @@ impl Machine {
         ] {
             folder(&root.join(name), mode);
         }
+        let login_folder = login_folder.map(|name| folder(&root.join(name), 0o700));
         write_settings(&root, &[]);
         let wrapper = root.join("bin/claude");
         std::fs::write(
@@ -103,12 +118,14 @@ impl Machine {
                 _ => return None,
             })
         });
+        let logins = json!([{ "id": LOGIN, "configDir": login_folder }]);
         let grant = LaunchGrant::parse(
             RawLaunchGrant {
                 bin: Some(wrapper.into_os_string()),
                 path: None,
                 user_id: Some(USER_ID.into()),
                 env_json: None,
+                logins_json: Some(logins.to_string().into()),
             },
             snapshot,
             Confinement::new([root.join("workspace")]),
@@ -119,7 +136,7 @@ impl Machine {
         // These tests are about the turn, not the probe's own limit, which a machine busy with
         // many process tests at once can outlast.
         let lane = Lane::new(grant).with_probe_timeout(Duration::from_secs(60));
-        let readiness = lane.probe().await;
+        let readiness = lane.probe(Uuid::parse_str(LOGIN).unwrap()).await;
         let ready = readiness
             .ready()
             .unwrap_or_else(|| panic!("the fake is not ready: {readiness:?}"))
@@ -1676,6 +1693,39 @@ async fn a_miss_followed_by_more_output_starts_nothing_more() {
     assert!(!turn.outcome.started_again);
     assert_eq!(turn.outcome.ignored_lines, 1);
     assert_eq!(machine.print_calls().len(), 1);
+}
+
+/// The login's folder is checked again before the second start too, as before every spawn
+/// (11.19): one that others can now change fails the turn as `binary_unsafe`, and no second
+/// `claude` starts with it.
+#[tokio::test]
+async fn the_logins_folder_is_checked_again_before_the_second_start() {
+    use std::os::unix::fs::PermissionsExt;
+    static LATCH: AtomicBool = AtomicBool::new(false);
+    let machine = Machine::with_a_login_folder().await;
+    let login_folder = machine.root.join("home/.claude-work");
+    assert_eq!(
+        machine.ready.login().config_dir(),
+        Some(login_folder.as_path())
+    );
+    std::fs::set_permissions(&login_folder, std::fs::Permissions::from_mode(0o770)).unwrap();
+    let writable = Run::new(&machine, &LATCH)
+        .resuming(Uuid::new_v4(), "resume-miss")
+        .turn("success")
+        .await;
+    std::fs::set_permissions(&login_folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    writable.failed_with(FailureCode::BinaryUnsafe);
+    assert!(!writable.outcome.started_again);
+    assert_eq!(machine.print_calls().len(), 1);
+
+    // Checked again and passing, it starts the turn again in a new session.
+    let again = Run::new(&machine, &LATCH)
+        .resuming(Uuid::new_v4(), "resume-miss")
+        .turn("success")
+        .await;
+    again.succeeded();
+    assert!(again.outcome.started_again);
+    assert_eq!(machine.print_calls().len(), 3);
 }
 
 /// The grant's checks run again before the second start, as before every spawn (3.2): a folder

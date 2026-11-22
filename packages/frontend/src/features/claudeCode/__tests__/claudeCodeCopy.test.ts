@@ -6,6 +6,7 @@ import type { ControllerRuntimeClaudeCodeNotReadyReason } from "../../../service
 import {
   CLAUDE_CODE_COPY,
   claudeCodeDesktopProblemSentence,
+  claudeCodeLoginRefusalSentence,
   claudeCodeNotReadySentence,
   claudeCodeSignInLine,
 } from "../claudeCodeCopy";
@@ -23,8 +24,44 @@ const { notReadyReasons } = JSON.parse(
 describe("Claude Code wording outside a turn's own row", () => {
   it("never uses a word the product keeps out of these sentences", () => {
     for (const sentence of stringsIn(CLAUDE_CODE_COPY)) {
+      // The design's own sentence before Delete (docs/Settings-UI.md, Your
+      // AI) says agents "switch" to the first login: the verb, never the
+      // controller's switch the rule keeps out.
+      if (sentence === CLAUDE_CODE_COPY.yourAi.logins.deleteConfirm) {
+        expect(bannedWordIn(sentence.replace(/\bswitch to\b/u, "go to")), sentence).toBeNull();
+        continue;
+      }
       expect(bannedWordIn(sentence), sentence).toBeNull();
     }
+  });
+
+  // docs/Local-Engine-Turns.md 11.19 and docs/Settings-UI.md (Your AI).
+  it("keeps the design's words for the person's Claude Code logins", () => {
+    const logins = CLAUDE_CODE_COPY.yourAi.logins;
+    expect(logins.defaultLabel).toBe("Claude Code");
+    expect(logins.ready).toBe("Ready.");
+    expect(logins.notSignedIn).toBe(
+      "Not signed in yet. In a terminal, run claude with CLAUDE_CONFIG_DIR set to this folder and sign in with /login.",
+    );
+    expect(logins.notSignedInUsualFolder).toBe("Not signed in yet. In a terminal, run claude and sign in with /login.");
+    expect(`${logins.planLimitBefore} 6:00 PM.`).toBe("Reached its Claude plan's limit. Ready again at 6:00 PM.");
+    expect(logins.usualFolder).toBe("Claude Code's usual folder");
+    expect(logins.notSetUpHere).toBe("Not set up on this computer");
+    expect(logins.setUp).toBe("Set up on this computer");
+    expect(logins.add).toBe("Add a login");
+    expect(logins.removeHere).toBe("Remove from this computer");
+    expect(logins.deleteConfirm).toBe("Agents that use it switch to your first login.");
+    expect(CLAUDE_CODE_COPY.agentAi.firstLogin).toBe("(first login)");
+  });
+
+  it("words the controller's refusals of a change to the logins by their codes, and nothing else raw", () => {
+    const errors = CLAUDE_CODE_COPY.yourAi.logins.errors;
+    expect(claudeCodeLoginRefusalSentence("claude_code_login_label_taken")).toBe(errors.labelTaken);
+    expect(claudeCodeLoginRefusalSentence("claude_code_login_label_invalid")).toBe(errors.labelInvalid);
+    expect(claudeCodeLoginRefusalSentence("claude_code_login_limit")).toBe(errors.limit);
+    expect(claudeCodeLoginRefusalSentence("claude_code_turn_not_allowed")).toBe(errors.notAllowed);
+    expect(claudeCodeLoginRefusalSentence(null)).toBe(errors.changeFailed);
+    expect(claudeCodeLoginRefusalSentence("internal_error")).toBe(errors.changeFailed);
   });
 
   it("names Anthropic's current terms on both lines, and the plan only for a plan sign-in", () => {

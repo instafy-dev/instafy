@@ -1094,8 +1094,9 @@ pub(super) struct FailedQueuedJobs {
 /// tagged `kind`, so whoever sent the work sees why it never started. The
 /// message also names the reason a stop requeued the job, if one did
 /// (`interruptionReason`). `rows` must also carry `session_id` and
-/// `prompt_id`, and `engine` wherever they may hold a local-engine turn: its
-/// message also carries `aiAccessMode: "claude-code"` and `kind` as its
+/// `prompt_id`, and `engine` and `claude_code_login_id` wherever they may hold
+/// a local-engine turn: its message also carries `aiAccessMode:
+/// "claude-code"`, the Claude Code login its lease took, and `kind` as its
 /// `claudeCodeFailure`, which its author's Studio words
 /// (crate::claude_code_lane::stamp_failure). Publish the result with
 /// [`publish_failed_queued_jobs`] once the transaction commits.
@@ -1147,7 +1148,11 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
             .flatten()
             .is_some();
         if let (true, Some(map)) = (local_engine, metadata.as_object_mut()) {
-            crate::claude_code_lane::stamp_failure(map, kind);
+            let login = row
+                .try_get::<_, Option<Uuid>>("claude_code_login_id")
+                .ok()
+                .flatten();
+            crate::claude_code_lane::stamp_failure(map, kind, login);
         }
         let recorded = crate::conversations::record_controller_assistant_message(
             transaction,
@@ -1594,7 +1599,8 @@ async fn fail_jobs_that_can_no_longer_start(
                 crate::device_grants::run_once_job_cannot_start!("$3"),
                 "
              returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                       payload, error_message, lease_attempts, grant_ids, engine"
+                       payload, error_message, lease_attempts, grant_ids, engine,
+                       claude_code_login_id"
             ),
             &[
                 &RUN_ONCE_INTERRUPTED_MESSAGE,
@@ -1693,7 +1699,8 @@ async fn fail_claude_code_turns_whose_lease_expired(
              where jobs.id = expired.id
              returning jobs.id, jobs.project_id, jobs.run_id, jobs.conversation_id,
                        jobs.session_id, jobs.prompt_id, jobs.payload, jobs.error_message,
-                       jobs.lease_attempts, jobs.grant_ids, jobs.engine",
+                       jobs.lease_attempts, jobs.grant_ids, jobs.engine,
+                       jobs.claude_code_login_id",
             &[&RUN_ONCE_INTERRUPTED_MESSAGE],
         )
         .await
@@ -1770,7 +1777,7 @@ async fn repair_stopped_claude_code_turns(
         .await?
         .query(
             "select j.id, j.project_id, j.run_id, j.conversation_id, j.session_id,
-                    j.prompt_id, j.payload
+                    j.prompt_id, j.payload, j.claude_code_login_id
                from agent_jobs j
                join runs r on r.id = j.run_id
               where j.engine is not null
@@ -4295,7 +4302,11 @@ mod tests {
             let mut connection = fixture.pool.get().await?;
             let mut capabilities = json!({
                 "agent": true,
-                "claudeCode": { "version": 1, "ready": true },
+                "claudeCode": {
+                    "version": 2,
+                    "ready": true,
+                    "logins": { Uuid::new_v4().to_string(): { "ready": true } },
+                },
             });
             crate::runtime::set_self_hosted_access_attestation(
                 capabilities.as_object_mut().expect("capabilities object"),
