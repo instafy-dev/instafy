@@ -2398,8 +2398,16 @@ export class PersonalBrowserHost {
       ...(checked === true && !withheld ? { checked: true as const } : {}),
       ...(selected === true && !withheld ? { selected: true as const } : {}),
     });
+    // How many controls the list leaves out, and how many for each reason:
+    // numbers alone, so a withheld page says them too.
+    const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : 0);
     const omitted = Number.isSafeInteger(snapshot.omittedControls) && (snapshot.omittedControls ?? 0) > 0
-      ? { omittedControls: snapshot.omittedControls }
+      ? {
+        omittedControls: snapshot.omittedControls,
+        ...(snapshot.leftOut
+          ? { leftOut: { outsideView: count(snapshot.leftOut.outsideView), listFull: count(snapshot.leftOut.listFull) } }
+          : {}),
+      }
       : {};
     try {
       if (!snapshot.signals) {

@@ -576,7 +576,14 @@ Two steps never ask, in Ask too:
   did not finish loading, which the next message opened by its address. The
   5 seconds bound only the link being in view, still and given the click; a
   click whose load its site does not answer waits as any click's does, and
-  fails as such a load does.
+  fails as such a load does. So does a plain link whose own part takes its
+  click: when what is drawn at the link's middle is the part the link itself
+  sits in (a menu that gives its links no pointer, or lays its own backdrop
+  over them), nothing else covers it, and the refusal named that part as the
+  cover: a menu's link was said to be covered by the menu's own nav. Its
+  `done` says "The page gives a click on “Timetable” to the part it sits in,
+  not to the link, so its address was opened in this tab instead." A button in
+  such a part has no address and keeps a covered click's words.
 - **A cookie banner's accept is never listed, and refused.** In the same
   banner, a button, link or toggle whose words accept, agree or consent
   ("Accept all", "I agree", "Agree and close", "Consent", "Alle akzeptieren",
@@ -2424,7 +2431,63 @@ page's control and fields are named by their own hints only.
 the controls left out, so a list cut short by a closed menu, or by a box the
 page scrolls itself, does not read as the whole page; it counts the controls
 past the list's 200 too, and a cookie notice's accept, which is never
-listed. Every control the page has (up to 5,000) is judged
+listed. `leftOut` says how many of them there are for each reason:
+`hiddenByPage` (the page holds them and a person cannot see them: a closed
+menu or drawer, or a part not drawn yet), with how many of those are form
+fields (`hiddenFields`), `listFull` (a person can see them and the list has no
+room: scrolling reaches them), and `cookieAccept`. `listFullNames` names the
+first eight the full list left out, form fields before the rest, so a form
+under hundreds of links is known to be there. A control the page hides is
+never named: its name is nothing a person can see. One number for all of them
+could not say whether a planner's fields were among "95 left out".
+
+A reading that shows only a page's frame says so in its `message`. When every
+control it lists sits in the page's menu, header or footer, or it lists none,
+and the page hides more controls than it lists, the page is asked what its
+main part shows (its main landmark, or all of it outside those parts when it
+has none, so a chat button or a notice beside an empty main part is none of
+it): text, a picture, a frame or a canvas, judged as the reading's text is.
+When it shows nothing there, "The page is still busy: only its menu shows so
+far, and its main part is not drawn."; when the reading lists no control while
+its text names some of them (a page read while it was drawing), "none of its
+controls shows yet, though its text names some of them". The words then name
+what stands in the way, as a refused click names its cover: what is laid over
+the middle of the main part ("Something else on the page covers its main part
+(<div role="status"> named "Loading the planner"), so only its menu could be
+read."), the box that hides that part and how (its tag and role, never its
+label), with how many form fields it holds, and the scripts and frames of the
+page that did not load, each by its site and the browser's reason ("Part of
+this page did not load: a script from cdn.example
+(net::ERR_NAME_NOT_RESOLVED)."): a main part that a script from another host
+mounts stays empty when that script never came. The browser marks each script
+the page asked for that failed, an error status from another site's server
+too, and keeps a log of the requests that failed on the network, with the
+error, whether or not anything watched the page load; the page knows the
+status of what its own site answered ("HTTP 404"), and a frame whose page did
+not load holds the browser's error page. Only a script or frame the page
+itself holds counts, and only its site is kept; another site's error status
+has no reason beside it, as the page cannot know it. A load the browser's ad
+blocker stopped comes last and reads "blocked by the browser". Through the
+browser's egress proxy, a site the proxy could not reach or refused reads
+`net::ERR_TUNNEL_CONNECTION_FAILED`. `notDrawn` holds the same record: why the
+shown rule left out the controls the page hides (`notDisplayed`,
+`markedHidden`, `outOfReach`), how many of them sit outside the menu, header
+and footer, and `notLoaded`. The menu's own controls and text stay in the
+reading. A click, a `navigate` or an `open_tab` whose own reading is such a
+one, or the busy answer of a page that hides controls, waits up to 6 seconds
+for the rest and reads the page once more by itself, as soon as it reads
+otherwise, and at most twice more while the page goes on drawing in that time;
+a reading that is still so says how long the step waited ("It still read so 6
+seconds after this step: this result is the page as it is now."). A click
+whose own look already found the page reading as before it for 6 seconds waits
+no more and says the same. A reading the turn takes itself waits for nothing
+and ends "Take a snapshot in a moment." An ordinary page, whose main part
+shows anything, reads as before and waits for nothing. The busy answer's words
+are unchanged, and the not-drawn words start as it does, or as a covered
+click's: the runtime reads both as a page that was still too busy to be read,
+or covered.
+
+Every control the page has (up to 5,000) is judged
 before the list is chosen, so a closed list's hundreds of options never crowd
 a form's fields and button out of it. When a page shows more than 200, the
 ones scrolled past, above the view, are left out, then the ones the page

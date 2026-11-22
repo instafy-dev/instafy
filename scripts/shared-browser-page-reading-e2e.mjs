@@ -126,6 +126,28 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    without a prompt, in Octo's own tab too, while one whose name books
 //    asks, it and one in a form are refused in Octo's own tab, and one that
 //    opens another window is closed and the step says so.
+// 17. A reading that shows only a page's frame says so, and a click or an
+//    open reads once more by itself. A journey planner whose main part a
+//    script from another host mounts into an empty div reads with its fields,
+//    at once and when the script mounts them 3 seconds late; one whose script
+//    never came, or came with an error status, reads as its menu alone and
+//    says that, with the script's site and the browser's reason, how many
+//    controls the page hides and why, and how long the step waited, while a
+//    click whose own look already waited does not wait again, and a chat
+//    frame in a corner of the page is no part of its main part; one whose main
+//    part a curtain covers names the curtain and what hides the part. A page
+//    that reads as nothing while it hides its link is read by its open once
+//    it draws 3 seconds later. An article a click's page draws 3
+//    seconds after its address changed is read by that click, with its menu
+//    in view, with no control in view, and when the page's words show before
+//    its controls do. A reading says how many of the controls it leaves out
+//    the page hides and how many the full list has no room for, and names the
+//    first of those, form fields before the rest, never one the page hides.
+//    An ordinary page whose closed menu holds more than it lists reads as
+//    before, at once. A plain link whose own menu takes its click (the menu's
+//    backdrop lies over it) is not said to be covered by that menu: its
+//    address opens instead, while a button in such a part keeps a covered
+//    click's words.
 // Every site is a loopback fixture; Chromium resolves no other host.
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendRequire = createRequire(path.join(repositoryRoot, "packages/frontend/package.json"));
@@ -179,6 +201,74 @@ const KEY_LIKE = ["a8Fk2LmQ", "9zXw7Rt4", "Yb6Nc1Vd"].join("");
 const RECOVERY_CODES = ["4821 7730", "9912 0045"].join(" ");
 // A random-looking site, as an ad server's frames often have.
 const AD_SITE = `${["5f3c2a1b9e8d7c6b", "5a4f3e2d1c0b9a8f"].join("")}.ads.test`;
+
+// A site's header: three links a person sees, and a closed menu of twelve.
+const SITE_HEADER = `<header style="height:40px"><nav aria-label="Main">
+<a href="/tickets">Tickets</a> <a href="/timetable">Timetable</a> <a href="/service">Service</a>
+<ul hidden>${Array.from({ length: 12 }, (_, index) => `<li><a href="/menu/${index + 1}">Menu item ${index + 1}</a></li>`).join("")}</ul>
+</nav></header>`;
+// A journey planner whose main part a script from another host mounts into an
+// empty div, the script ahead of the div as on the planner page a turn read as
+// its menu alone: `script` is that script's address, and `footer` what the
+// page's footer holds.
+const MOUNTED = (script, footer = "") => `${SITE_HEADER}<main><div class="planner">
+<script src="${script}"></script>
+<div id="planner-root" data-language="en"></div>
+</div></main><footer>${footer}</footer>`;
+// A chat frame a page lays in a corner, beside its main part.
+const CHAT_BESIDE = `<div style="position:fixed;right:8px;bottom:8px"><iframe title="Chat" src="{frame}/chat" width="120" height="80"></iframe></div>`;
+// A page whose whole body draws 3 seconds after it loaded, its link hidden
+// until then, as a page's is while its script still builds it.
+const LATE_BODY = `<style>body { visibility: hidden }</style><h1>Opening hours</h1><p>Open daily from 9 to 17.</p>
+<p><a href="/reading/visit">Plan your visit</a></p>
+<script>setTimeout(() => { document.body.style.visibility = "visible"; }, 3000);</script>`;
+// The planner's script: it mounts the form once the page has parsed, or
+// `delay` ms after that.
+const MOUNT_SCRIPT = (delay) => `(() => {
+  const mount = () => {
+    document.getElementById("planner-root").innerHTML = '<form action="/route" method="post"><label>From <input name="from"></label> <label>To <input name="to"></label> <button type="button">Search connections</button></form><p>Enter two stops to see connections.</p>';
+  };
+  const start = () => (${delay} ? setTimeout(mount, ${delay}) : mount());
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
+})();`;
+// The planner drawn and turned off under a curtain that says nothing.
+const CURTAIN = `${SITE_HEADER}<div role="status" aria-label="Loading the planner" style="position:fixed;left:0;right:0;top:48px;bottom:0;background:#fff"></div>
+<main inert><form action="/route" method="post"><label>From <input name="from"></label> <label>To <input name="to"></label> <button type="button">Search connections</button></form></main>`;
+// A help site whose article link changes the address at once and draws the
+// article 3 seconds later. `shell` is what the page shows meanwhile: its
+// header ("menu"), no control at all ("bare": a header of words alone), or
+// its links' words with no control a reading lists ("words": each link is
+// drawn through its words alone until the article comes).
+const LATE_ARTICLE = (shell) => `${shell === "bare"
+  ? `<header style="height:40px">City Transit help<nav aria-label="Main" hidden><a href="/tickets">Tickets</a> <a href="/timetable">Timetable</a></nav></header>`
+  : SITE_HEADER}
+<main id="view"><h1>Returns and warranty</h1><p><a id="policy" href="/reading/warranty-policy">Limited Warranty Policy</a></p></main>
+${shell === "words" ? `<style>body.loading a { display: contents }</style><aside><h2>Related articles</h2><p><a href="/reading/returns">How to return a device</a></p><p><a href="/reading/repairs">Repairs</a></p></aside>` : ""}
+<script>
+document.getElementById("policy").addEventListener("click", (event) => {
+  event.preventDefault();
+  history.pushState({}, "", "/reading/warranty-policy");
+  const view = document.getElementById("view");
+  view.innerHTML = ${shell === "words" ? `"<p>Did you find this page helpful?</p>"` : `""`};
+  document.body.classList.add("loading");
+  setTimeout(() => {
+    document.body.classList.remove("loading");
+    view.innerHTML = "<h1>Limited Warranty Policy</h1><p>The warranty covers the device for two years.</p>";
+  }, 3000);
+});
+</script>`;
+// An ordinary page: its closed menu holds more controls than it lists, every
+// control it lists sits in its header or footer, and its main part is text.
+const PLAIN_VISIT = `${SITE_HEADER}<main><h1>Opening hours</h1><p>Monday to Friday 09:00 - 19:00. Closed on public holidays.</p></main>
+<footer><a href="/imprint">Imprint</a></footer>`;
+// A menu and a card that each lay a backdrop of their own over what they
+// hold, so the pointer over the menu's link, or the card's button, is theirs.
+const OWN_BACKDROP = `<style>.menu, .card { position: relative } .menu::after, .card::after { content: ""; position: absolute; inset: 0 }</style>
+<header><nav class="menu" aria-label="Main"><a href="/reading/visit">Timetable & Information</a> <a href="/reading/long">Service</a></nav></header>
+<main><h1>Timetable</h1><div class="card"><button type="button" onclick="document.title = 'Map shown'">Show map</button></div></main>`;
+// More links than the list holds ahead of a form's fields.
+const LONG_FORM = `${SITE_HEADER}<main><h1>Stops</h1>${Array.from({ length: 230 }, (_, index) => `<p><a href="/stop/${index + 1}">Stop ${index + 1}</a></p>`).join("")}
+<form action="/order" method="post"><label>Email <input name="email"></label><label>Notes <textarea name="notes"></textarea></label><button type="submit">Place order</button></form></main>`;
 
 function writeProtectedJson(destination, value) {
   const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -1026,7 +1116,8 @@ export async function runSharedBrowserPageReadingFixture() {
     // One server answers for both fixture sites and records each request.
     const requests = [];
     let port = 0;
-    const sites = () => ({ site: `http://site.test:${port}`, frame: `http://frame.test:${port}` });
+    // `dead` is a host that does not resolve, as every host but the two fixtures.
+    const sites = () => ({ site: `http://site.test:${port}`, frame: `http://frame.test:${port}`, dead: `http://cdn.dead.test:${port}` });
     // Key-shaped values for ROW_KEYS and WITHHELD_ROWS, made here so the
     // source holds none: random-looking ones longer and shorter than a name
     // holds, a long hex one and one of a known format.
@@ -1129,6 +1220,21 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/click-effects": page("Exhibitions", CLICK_EFFECTS(fragmentPass)),
       "site.test /reading/typed-then-click": page("Journey planner", TYPED_THEN_CLICK),
       "site.test /reading/event-cards": page("This weekend", EVENT_CARDS),
+      "site.test /reading/mounted": page("Timetable", MOUNTED("{frame}/planner.js")),
+      "site.test /reading/mounted-late": page("Timetable", MOUNTED("{frame}/planner-late.js")),
+      "site.test /reading/mounted-never": page("Timetable", MOUNTED("{dead}/planner.js")),
+      "site.test /reading/mounted-missing": page("Timetable", MOUNTED("{frame}/missing.js")),
+      "site.test /reading/mounted-never-help": page("Timetable", MOUNTED("{dead}/planner.js", '<button type="button">Help</button>')),
+      "site.test /reading/mounted-never-chat": page("Timetable", `${MOUNTED("{dead}/planner.js")}${CHAT_BESIDE}`),
+      "frame.test /chat": page("Chat", "<p>Chat with us</p>"),
+      "site.test /reading/late-body": page("Opening hours", LATE_BODY),
+      "frame.test /planner.js": { type: "text/javascript; charset=utf-8", body: MOUNT_SCRIPT(0) },
+      "frame.test /planner-late.js": { type: "text/javascript; charset=utf-8", body: MOUNT_SCRIPT(3000) },
+      "site.test /reading/curtain": page("Timetable", CURTAIN),
+      ...Object.fromEntries(["menu", "bare", "words"].map((shell) => [`site.test /reading/late-article-${shell}`, page("Help", LATE_ARTICLE(shell))])),
+      "site.test /reading/plain-visit": page("Visit", PLAIN_VISIT),
+      "site.test /reading/long-form": page("Stops", LONG_FORM),
+      "site.test /reading/own-backdrop": page("Timetable", OWN_BACKDROP),
       "frame.test /guided-cards": page("Tickets", `${GUIDED_CARDS_HTML("button")}${GUIDED_COMPONENTS}`),
       "site.test /reading/visit": page("Visit", "<h1>Plan your visit</h1>"),
       "frame.test /banner": page("Cookies", BANNER("frame_consent")),
@@ -1149,7 +1255,7 @@ export async function runSharedBrowserPageReadingFixture() {
       }
       const { type, body } = typeof entry === "string" ? { type: "text/html; charset=utf-8", body: entry } : entry;
       response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
-      response.end(body.replaceAll("{frame}", sites().frame));
+      response.end(body.replaceAll("{frame}", sites().frame).replaceAll("{dead}", sites().dead));
     });
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -2484,6 +2590,186 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.ok(jazz.stderr.includes("The step opened another window, which Octo never uses, so it was closed before it loaded anything."), jazz.stderr);
     assert.equal(context.pages().length, pagesBeforeJazz, "the card's window stayed open");
 
+    // 17. A reading that shows only a page's frame. A planner page read as its
+    // site's menu alone, 11 controls and "95 left out", in every reading of
+    // five turns, and a help article's click answered with the site's shell
+    // (a local test, Nov 20). The planner fixture is that page's shape: its
+    // main part is mounted by a script from another host into an empty div.
+    {
+      const openPage = async (pathname) => {
+        const startedAt = Date.now();
+        const result = await ok("POST", "/v1/navigate", { url: `${sites().site}${pathname}` });
+        return { ...result, ms: Date.now() - startedAt };
+      };
+      const menuLabels = ["Tickets", "Timetable", "Service"];
+      const plannerLabels = [...menuLabels, "From", "To", "Search connections"];
+      const HIDDEN_MENU = { hiddenByPage: 12, listFull: 0 };
+      // The script from another host is neither blocked nor failed by the
+      // browser's own guard of a step: the planner reads with its fields, and
+      // the record says the twelve controls left out are the closed menu's.
+      requests.length = 0;
+      let mounted = await openPage("/reading/mounted");
+      assert.ok(requests.includes(`GET ${sites().frame}/planner.js`), `the other host's script was not asked for: ${requests.join(", ")}`);
+      assert.deepEqual(labels(mounted), plannerLabels);
+      assert.deepEqual(mounted.interactiveElements.map((entry) => entry.area || ""), ["nav", "nav", "nav", "", "", ""]);
+      assert.equal(mounted.message, undefined);
+      assert.equal(mounted.notDrawn, undefined);
+      assert.equal(mounted.omittedControls, 12);
+      assert.deepEqual(mounted.leftOut, HIDDEN_MENU);
+      measurements.mountedOpenMs = mounted.ms;
+      // Mounted 3 seconds late, the fields are named by the step that opened
+      // the page: its first reading showed the menu alone, so it waited.
+      mounted = await openPage("/reading/mounted-late");
+      assert.deepEqual(labels(mounted), plannerLabels, "a planner mounted late was read before it drew");
+      assert.match(mounted.visibleText, /Enter two stops to see connections\./u);
+      assert.equal(mounted.message, undefined);
+      assert.ok(mounted.ms >= 3_000, `the late planner's step did not wait: ${mounted.ms} ms`);
+      measurements.lateMountOpenMs = mounted.ms;
+      // A script that never came: the reading keeps the menu it can show and
+      // says that nothing else is drawn, which part of the page did not load,
+      // why the controls it leaves out are hidden, and how long the step waited.
+      const NOT_DRAWN = "The page is still busy: only its menu shows so far, and its main part is not drawn.";
+      const NEVER_CAME = "Part of this page did not load: a script from cdn.dead.test (net::ERR_NAME_NOT_RESOLVED).";
+      const WAITED = "It still read so 6 seconds after this step: this result is the page as it is now.";
+      const never = await openPage("/reading/mounted-never");
+      assert.deepEqual(labels(never), menuLabels);
+      assert.equal(never.visibleText, "Tickets Timetable Service");
+      assert.equal(never.message, `${NOT_DRAWN} ${NEVER_CAME} ${WAITED}`);
+      assert.deepEqual(never.notDrawn, {
+        hidden: { notDisplayed: 12, markedHidden: 0, outOfReach: 0 },
+        hiddenOutsideMenu: 0,
+        notLoaded: [{ kind: "script", site: "cdn.dead.test", error: "net::ERR_NAME_NOT_RESOLVED" }],
+      });
+      assert.deepEqual(never.leftOut, HIDDEN_MENU);
+      assert.ok(never.ms >= 6_000, `a page that never drew was not waited for: ${never.ms} ms`);
+      // A reading the turn takes itself waits for nothing and says the same.
+      let startedReading = Date.now();
+      let again = await ok("GET", "/v1/snapshot");
+      assert.equal(again.message, `${NOT_DRAWN} ${NEVER_CAME} Take a snapshot in a moment.`);
+      assert.ok(Date.now() - startedReading < 5_000, "a reading of its own waited");
+      assert.deepEqual(again.notDrawn, never.notDrawn);
+      // A chat frame in a corner of the page is no part of its main part.
+      const chat = await openPage("/reading/mounted-never-chat");
+      assert.deepEqual(labels(chat), menuLabels);
+      assert.equal(chat.visibleText, "Tickets Timetable Service\n[frame not read: frame.test]");
+      assert.equal(chat.message, `${NOT_DRAWN} ${NEVER_CAME} ${WAITED}`);
+      // A script another site answered with an error status is named too,
+      // with no reason: the page cannot know another site's status.
+      const missing = await openPage("/reading/mounted-missing");
+      assert.deepEqual(labels(missing), menuLabels);
+      assert.equal(missing.message, `${NOT_DRAWN} Part of this page did not load: a script from frame.test. ${WAITED}`);
+      assert.deepEqual(missing.notDrawn.notLoaded, [{ kind: "script", site: "frame.test" }]);
+      // A click whose own look found its page reading as before for 6 seconds
+      // waits no more, and says so.
+      reading = await read("/reading/mounted-never-help");
+      const startedHelp = Date.now();
+      const helped = await ok("POST", "/v1/click", { index: control(reading, "Help").index, snapshotId: reading.snapshotId });
+      const helpMs = Date.now() - startedHelp;
+      assert.equal(helped.done, `Clicked "Help". ${UNCHANGED_WORDS}`);
+      assert.equal(helped.message, `${NOT_DRAWN} ${NEVER_CAME} ${WAITED}`);
+      assert.ok(helpMs < 11_000, `a click that looked waited again: ${helpMs} ms`);
+      measurements.lookedClickMs = helpMs;
+      // A page that reads as nothing while it hides the link it will show:
+      // the open waits, and reads it once it is drawn.
+      const lateBody = await openPage("/reading/late-body");
+      assert.deepEqual(labels(lateBody), ["Plan your visit"]);
+      assert.match(lateBody.visibleText, /Open daily from 9 to 17\./u);
+      assert.equal(lateBody.message, undefined);
+      assert.ok(lateBody.ms >= 2_500, `the late page's step did not wait: ${lateBody.ms} ms`);
+      measurements.lateBodyOpenMs = lateBody.ms;
+      // A curtain over the main part is named as a click's cover is, with the
+      // box that hides the part and how many form fields it holds: never their
+      // names, which no person sees.
+      const curtain = await openPage("/reading/curtain");
+      assert.deepEqual(labels(curtain), menuLabels);
+      assert.equal(
+        curtain.message,
+        `Something else on the page covers its main part (<div role="status"> named "Loading the planner"), so only its menu could be read. The page hides that part (<main>, turned off), with 2 form fields. ${WAITED}`,
+      );
+      assert.deepEqual(curtain.leftOut, { hiddenByPage: 15, hiddenFields: 2, listFull: 0 });
+      assert.deepEqual(curtain.notDrawn, { hidden: { notDisplayed: 12, markedHidden: 3, outOfReach: 0 }, hiddenOutsideMenu: 3 });
+      assert.ok(!JSON.stringify(curtain).includes("From"), "a field the page hides was named");
+      // An article its page draws 3 seconds after the click changed the
+      // address is read by that click: with the site's menu in view meanwhile,
+      // with no control in view, and with the page's words shown before its
+      // controls.
+      for (const shell of ["menu", "bare", "words"]) {
+        reading = await read(`/reading/late-article-${shell}`);
+        const startedClick = Date.now();
+        const article = await ok("POST", "/v1/click", { index: control(reading, "Limited Warranty Policy").index, snapshotId: reading.snapshotId });
+        const clickMs = Date.now() - startedClick;
+        assert.match(article.visibleText, /The warranty covers the device for two years\./u, `${shell}: the article was read before it drew`);
+        assert.equal(article.done, 'Clicked "Limited Warranty Policy": the page changed, and so did its address.', shell);
+        assert.equal(article.message, undefined, shell);
+        assert.ok(article.url.endsWith("/reading/warranty-policy"), `${shell}: ${article.url}`);
+        assert.ok(clickMs >= 2_500, `${shell}: the click did not wait for the article: ${clickMs} ms`);
+        measurements[`lateArticle${shell[0].toUpperCase()}${shell.slice(1)}ClickMs`] = clickMs;
+      }
+      // The page between the click and the article, read by the turn itself:
+      // its words show and none of its controls does.
+      reading = await read("/reading/late-article-words");
+      await runPage.evaluate(() => document.getElementById("policy").click());
+      again = await ok("GET", "/v1/snapshot");
+      assert.deepEqual(labels(again), []);
+      assert.match(again.visibleText, /How to return a device/u);
+      assert.equal(again.message, "The page is still busy: none of its controls shows yet, though its text names some of them. Take a snapshot in a moment.");
+      assert.deepEqual(again.notDrawn, { hidden: { notDisplayed: 17, markedHidden: 0, outOfReach: 0 }, hiddenOutsideMenu: 2 });
+      // A capped reading says how many controls the page hides and how many
+      // the full list left out, and names the first of those: the form's fields
+      // before the links.
+      const capped = await openPage("/reading/long-form");
+      assert.equal(capped.interactiveElements.length, 200);
+      assert.equal(capped.omittedControls, 12 + 36);
+      assert.deepEqual(capped.leftOut, {
+        hiddenByPage: 12,
+        listFull: 36,
+        listFullNames: ["Email", "Notes", "Stop 198", "Stop 199", "Stop 200", "Stop 201", "Stop 202", "Stop 203"],
+      });
+      assert.equal(capped.message, undefined);
+      // An ordinary page reads as it did, at once: its closed menu holds more
+      // than it lists and every control it lists is in its header or footer,
+      // but its main part shows its text.
+      const plain = await openPage("/reading/plain-visit");
+      assert.deepEqual(
+        plain.interactiveElements.map(({ label, tag, area, href }) => ({ label, tag, area, href })),
+        [
+          { label: "Tickets", tag: "a", area: "nav", href: "/tickets" },
+          { label: "Timetable", tag: "a", area: "nav", href: "/timetable" },
+          { label: "Service", tag: "a", area: "nav", href: "/service" },
+          { label: "Imprint", tag: "a", area: "footer", href: "/imprint" },
+        ],
+      );
+      assert.equal(plain.visibleText, "Tickets Timetable Service\nOpening hours\nMonday to Friday 09:00 - 19:00. Closed on public holidays.\nImprint");
+      assert.deepEqual(
+        Object.keys(plain).filter((key) => !["ms", "snapshotId", "browserPageId", "activity", "ok"].includes(key)).sort(),
+        ["interactiveElements", "leftOut", "omittedControls", "secretScreen", "title", "url", "visibleText"],
+      );
+      assert.equal(plain.omittedControls, 12);
+      assert.deepEqual(plain.leftOut, HIDDEN_MENU);
+      assert.ok(plain.ms < 5_000, `an ordinary page's step waited: ${plain.ms} ms`);
+      // A page that leaves nothing out says nothing of it.
+      reading = await read("/reading/visit");
+      assert.equal(reading.omittedControls, undefined);
+      assert.equal(reading.leftOut, undefined);
+      assert.equal(reading.message, undefined);
+      // A menu whose own backdrop lies over its links takes their click:
+      // nothing else covers the link, and the refusal named the menu's own
+      // nav as its cover. A plain link's address opens instead; a button in
+      // such a part has no address, and keeps a covered click's words.
+      reading = await read("/reading/own-backdrop");
+      const promptsBeforeOwn = prompts.length;
+      const taken = await runTool("POST", "/v1/click", { index: control(reading, "Show map").index, snapshotId: reading.snapshotId });
+      assert.equal(taken.code, 1, taken.stdout);
+      assert.match(taken.stderr, /Something else on the page covers "Show map" \(<div> named "Show map"\), so nothing was clicked\. Take a fresh snapshot and try once more\./u);
+      assert.equal(await runPage.title(), "Timetable", "the card's button was pressed");
+      reading = await ok("GET", "/v1/snapshot");
+      const followed = await ok("POST", "/v1/click", { index: control(reading, "Timetable & Information").index, snapshotId: reading.snapshotId });
+      assert.equal(followed.done, 'The page gives a click on "Timetable & Information" to the part it sits in, not to the link, so its address was opened in this tab instead.');
+      assert.ok(followed.url.endsWith("/reading/visit"), followed.url);
+      assert.match(followed.visibleText, /Plan your visit/u);
+      assert.equal(prompts.length, promptsBeforeOwn, "a link whose menu takes its click asked");
+    }
+
     for (const [name, ms] of [
       ["a click that changed the page", measurements.changedClickMs],
       ["a click that scrolled the page", measurements.scrolledClickMs],
@@ -2518,6 +2804,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "every click says which control it hit and what it was seen to change (a new page, the page loaded again, its address or fragment, a dialog or a list opened, a dialog closed, the page changed), and nothing of a page too busy to be read; the first click after a field showed suggestions, on no option, says the field still holds what was typed with none of them chosen, once, and never after one was chosen (a stop that reads as it was typed too), after a key pressed in the field, or of a field that showed none",
         "a guided ticket page's cards read as a reading that listed three unnamed buttons and no card's control saw them only when each card's control sits across a shadow root, never in a frame, hidden or of no control kind; those controls are named by their cards' headings, a card larger than a row's too, and are clicked and highlighted by that name, while the words slotted into such a button reach a step's checks: one that deletes is refused in Octo's own tab, and a card that is a control around one is not clicked through to it",
         "a control named as opening in a new tab is no commit button and goes without a prompt, in Octo's own tab too, while one whose name books asks, it and one in a form are refused in Octo's own tab, and one that opens another window is closed and the step says so",
+        "a planner whose main part a script from another host mounts into an empty div reads with its fields, at once and when they are mounted 3 s late; one whose script never came, or came with an error status, keeps the menu it shows and says that nothing else is drawn, the script's site and the browser's reason, why the controls it leaves out are hidden and how long the step waited, while a reading the turn takes waits for nothing, a click whose own look already waited does not wait again and a chat frame in a corner is no part of the main part; a page that reads as nothing while it hides its link is read by its open once drawn; a curtain over the main part is named with the box that hides the part and how many fields it holds, never their names; an article drawn 3 s after a click changed the address is read by that click, with the menu in view, with no control in view and with the page's words shown before its controls; a capped reading says how many controls the page hides and how many the full list left out and names the first of those, form fields first; an ordinary page whose closed menu holds more than it lists reads as before, at once, and a page that leaves nothing out says nothing of it; a plain link whose own menu takes its click opens its address instead and says so, while a button in such a part keeps a covered click's words",
       ],
       limitations: [
         "No model, Studio UI, origin or runtime shutdown guard; those are unit-tested.",

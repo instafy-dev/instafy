@@ -693,6 +693,8 @@ test("a reading says which controls are open, chosen or selected, and counts tho
     ],
   );
   assert.equal(snapshot.omittedControls, 1);
+  // The count says why: one control lies outside the view, none past the list.
+  assert.deepEqual({ ...snapshot.leftOut }, { outsideView: 1, listFull: 0 });
   // The states are no part of a target's fingerprint: a click that checks a
   // box leaves its approval as it was.
   const before = security.personalBrowserTargetSecurityFingerprint(snapshot.interactive[1].descriptor);
@@ -747,6 +749,7 @@ test("a control in view that no click reaches is not counted as outside the view
   let snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
   assert.deepEqual(Array.from(snapshot.interactive, ({ name }) => name), ["From", "Swap"]);
   assert.equal(snapshot.omittedControls, undefined);
+  assert.equal(snapshot.leftOut, undefined);
   // Below the view, which scrolling reaches, it counts.
   const next = new harness.HTMLAnchorElement({ href: "https://example.test/next", text: "Next page" });
   next.rect = { x: 10, y: 900, width: 80, height: 30 };
