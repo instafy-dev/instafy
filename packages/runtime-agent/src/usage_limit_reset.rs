@@ -48,6 +48,26 @@ fn usage_limit_reset_in_utc_with<Tz: TimeZone>(
     )
 }
 
+/// The moment a usage limit's "Try again at YYYY-MM-DD HH:MM UTC." names, as
+/// [`usage_limit_reset_in_utc`] writes it, in seconds since the epoch: what the turn's
+/// `ai/usage-limit` artifact tells the controller, so the agent's next turns move to a backup with
+/// room until then (docs/Local-Engine-Turns.md 11.20). None for any other text, and for a time that
+/// was left in the machine's own clock.
+pub(crate) fn usage_limit_resets_at(message: &str) -> Option<i64> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("usage limit") {
+        return None;
+    }
+    let start = lower.rfind(BEFORE_THE_TIME)? + BEFORE_THE_TIME.len();
+    let shown = message.get(start..)?.get(..UTC_MOMENT_LEN)?;
+    let moment =
+        NaiveDateTime::parse_from_str(shown.strip_suffix(" UTC")?, "%Y-%m-%d %H:%M").ok()?;
+    Some(moment.and_utc().timestamp())
+}
+
+/// "2026-11-14 23:03 UTC".
+const UTC_MOMENT_LEN: usize = 20;
+
 /// The time Codex wrote, in `clock`: "11:03 PM" on `now`'s day, or "Nov 14th, 2026 11:03 PM".
 /// A local time a clock change skips is no moment; one it repeats is its first.
 fn read_in_clock<Tz: TimeZone>(
@@ -81,6 +101,33 @@ mod tests {
 
     fn at<Tz: TimeZone>(clock: &Tz, y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Tz> {
         clock.with_ymd_and_hms(y, m, d, h, min, 0).single().unwrap()
+    }
+
+    #[test]
+    fn the_utc_moment_reads_back_as_seconds_since_the_epoch() {
+        assert_eq!(
+            usage_limit_resets_at(
+                "You\u{2019}ve hit your usage limit. Try again at 2026-11-14 23:03 UTC."
+            ),
+            Some(at(&Utc, 2026, 11, 14, 23, 3).timestamp())
+        );
+        // The time left in the machine's own clock, or no time at all, names no moment.
+        assert_eq!(
+            usage_limit_resets_at("You\u{2019}ve hit your usage limit. Try again at 11:03 PM."),
+            None
+        );
+        assert_eq!(
+            usage_limit_resets_at("You\u{2019}ve hit your usage limit."),
+            None
+        );
+        assert_eq!(
+            usage_limit_resets_at("Try again at 2026-11-14 23:03 UTC."),
+            None
+        );
+        assert_eq!(
+            usage_limit_resets_at("You\u{2019}ve hit your usage limit. Try again at 2026-11-"),
+            None
+        );
     }
 
     #[test]

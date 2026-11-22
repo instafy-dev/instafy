@@ -3592,8 +3592,43 @@ fn attach_job_receipts(
     task_usage: &TaskUsage,
     job_id: Uuid,
 ) -> Result<JobExecution> {
-    attach_web_search_usage(attach_task_usage(result, task_usage), job_id)
+    attach_usage_limit(attach_web_search_usage(
+        attach_task_usage(result, task_usage),
+        job_id,
+    ))
 }
+
+/// The artifact of a turn that stopped at its sign-in's plan usage limit:
+/// `{"kind": "ai/usage-limit", "resetsAt": <seconds since the epoch> | null}`. The controller
+/// records the limit on the job's own credential from it, and the agent's next turns use a backup
+/// with room until then (docs/Local-Engine-Turns.md 11.20). Codex's own classification
+/// (`CodexErrorInfo::UsageLimitExceeded`) decides, never the text; the reset is read back from the
+/// UTC sentence `usage_limit_reset::usage_limit_reset_in_utc` wrote. A lost lease reports nothing.
+fn attach_usage_limit(result: Result<JobExecution>) -> Result<JobExecution> {
+    let resets_at = match &result {
+        Err(error) if !crate::agent_executor::is_lease_lost(error) => {
+            match error.downcast_ref::<crate::codex::CodexExecutionError>() {
+                Some(codex_error)
+                    if matches!(
+                        codex_error.codex_error_info,
+                        Some(codex_protocol::protocol::CodexErrorInfo::UsageLimitExceeded)
+                    ) =>
+                {
+                    crate::usage_limit_reset::usage_limit_resets_at(&codex_error.message)
+                }
+                _ => return result,
+            }
+        }
+        _ => return result,
+    };
+    attach_artifact(
+        result,
+        json!({ "kind": USAGE_LIMIT_ARTIFACT_KIND, "resetsAt": resets_at }),
+    )
+}
+
+/// The kind of [`attach_usage_limit`]'s artifact.
+const USAGE_LIMIT_ARTIFACT_KIND: &str = "ai/usage-limit";
 
 fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Result<JobExecution> {
     let Some(receipt) = task_usage.artifact() else {
@@ -25473,6 +25508,63 @@ mod tests {
         assert_eq!(result.artifacts.len(), 2);
         assert_eq!(result.artifacts[1]["kind"], "ai/task-usage");
         assert_eq!(result.artifacts[1]["calls"][0]["usageStatus"], "unknown");
+    }
+
+    /// A turn that stopped at its sign-in's plan usage limit, as Codex classifies it, reports the
+    /// limit and its reset in an `ai/usage-limit` artifact beside what the failure already
+    /// carries; any other failure, a success and a lost lease report none (11.20).
+    #[test]
+    fn a_usage_limit_failure_reports_its_reset() {
+        let limited = || {
+            anyhow!(crate::codex::CodexExecutionError {
+                message: "You\u{2019}ve hit your usage limit. Try again at 2026-11-14 23:03 UTC."
+                    .to_string(),
+                codex_error_info: Some(
+                    codex_protocol::protocol::CodexErrorInfo::UsageLimitExceeded
+                ),
+            })
+        };
+        let error = attach_usage_limit(Err(limited())).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::codex::CodexExecutionError>()
+                .is_some()
+        );
+        assert_eq!(
+            extract_job_failure_artifacts(&error).unwrap(),
+            [json!({ "kind": "ai/usage-limit", "resetsAt": 1_794_697_380 })]
+        );
+        // The artifact joins the ones the failure had.
+        let with_evidence = limited().context(JobFailureWithArtifacts {
+            message: "stopped".to_string(),
+            artifacts: vec![json!({ "kind": "existing-evidence" })],
+        });
+        let error = attach_usage_limit(Err(with_evidence)).unwrap_err();
+        let artifacts = extract_job_failure_artifacts(&error).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[1]["kind"], "ai/usage-limit");
+        // A time left in the machine's own clock gives no reset, but still the limit.
+        let local_time = anyhow!(crate::codex::CodexExecutionError {
+            message: "You\u{2019}ve hit your usage limit. Try again at 11:03 PM.".to_string(),
+            codex_error_info: Some(codex_protocol::protocol::CodexErrorInfo::UsageLimitExceeded),
+        });
+        let error = attach_usage_limit(Err(local_time)).unwrap_err();
+        assert_eq!(
+            extract_job_failure_artifacts(&error).unwrap(),
+            [json!({ "kind": "ai/usage-limit", "resetsAt": null })]
+        );
+        // The text alone, without Codex's classification, is no usage limit.
+        let text_only = anyhow!(crate::codex::CodexExecutionError {
+            message: "You\u{2019}ve hit your usage limit. Try again at 2026-11-14 23:03 UTC."
+                .to_string(),
+            codex_error_info: None,
+        });
+        let error = attach_usage_limit(Err(text_only)).unwrap_err();
+        assert!(extract_job_failure_artifacts(&error).is_none());
+        assert!(
+            attach_usage_limit(Err(anyhow!("no model configured")))
+                .is_err_and(|error| { extract_job_failure_artifacts(&error).is_none() })
+        );
     }
 
     #[test]

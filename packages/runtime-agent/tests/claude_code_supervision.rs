@@ -1535,7 +1535,9 @@ async fn sign_in_and_plan_limit_failures_are_classified() {
     assert_eq!(failure.resets_at, Some(1_763_060_400));
     assert_eq!(
         failure.artifact(),
-        Some(json!({"kind": "claude-code/failure", "code": "plan_limit"}))
+        Some(
+            json!({"kind": "claude-code/failure", "code": "plan_limit", "resetsAt": 1_763_060_400})
+        )
     );
 }
 
