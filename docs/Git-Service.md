@@ -226,6 +226,7 @@ A model turn may edit a repository nested inside the canonical workspace. The mo
 Which paths the checkpoint receives:
 
 - **The files the model reported** in its final output. This is the normal source.
+  - A reported deletion is left out when the disk takes its name for a file the same reply keeps (creates or changes) under another spelling, as a disk that ignores case takes `foo.txt` for `Foo.txt`. Carried out, it would delete the file the reply just wrote, so that a rename of `Foo.txt` to `foo.txt` with new content would lose the content in the folder and the file in the saved version. The file keeps the name the disk holds it by, and the reply's file is listed under that name, as changed, so the checkpoint saves the new content there. On a disk that tells case apart the two names are two files, and the deletion goes ahead.
 - **The `git status` delta, as a fallback.** The runtime takes a bounded `git status` snapshot before and after the turn only when the turn was expected to change files (`runtimeExpectations.workspaceFileChanges`) or is read-only. It uses the delta as the path list only when a turn that was expected to change files reported none. In that delta, an already-dirty tracked or untracked nested file still counts when its content changes during the turn. The snapshot needs a git checkout of the workspace: the canonical `.instafy/.git`, which the origin creates only when the space has a git remote, or the workspace's own `.git`. Without either there is no delta.
 - **The files `/skills import` installed**, with or without `--start`, behind the gates a model turn's files pass: the job commits to the workspace, its write scope is not read-only, and it has a verified workspace token bound to its run. That token alone does not prove the run may write, because a job without the separate workspace token falls back to its controller token, so the controller checks write permission again when the checkpoint asks for a lease. The import records the checkpoint's outcome as an `origin/apply` artifact tagged `lane: "skills/import"`, or as `origin/apply-skipped` or `origin/apply-error`. A failed checkpoint does not fail the import.
 
@@ -243,6 +244,7 @@ Regression coverage:
 - `packages/origin-http-server/src/untrusted_git.rs` covers configured process/filter isolation, `core.worktree` escape resistance, unusual filenames, and unsafe `.git` rejection.
 - `packages/origin-http-server/src/git.rs` verifies embedded `.git` restoration and canonical sync behavior.
 - `packages/origin-http-server/src/git.rs` also pins the low-speed values on every server git command and proves that fetch, push and ls-remote against a remote that accepts the connection and then stalls (silent, or headers then silence) fail with `Operation too slow` within a test-shortened window.
+- `packages/runtime-agent/src/jobs/mod.rs` and `packages/runtime-agent/src/jobs/workspace_commit.rs` cover a reported case-only rename, with inline content or done by the turn's tools, on a disk of either kind, in the folder and through a real origin.
 
 Recommended (no token copy/paste):
 
