@@ -1037,6 +1037,60 @@ fn a_browser_turn_names_a_value_it_did_not_find_in_its_missing_line_never_under_
     }
 }
 
+/// A browser turn's reply is all the person reads when the browser answers them, and each fact
+/// in it has the link of the page it came from and the day it was read, and a status its time
+/// too. "Finding a page" said only how a finding's fact is written, which later turns read: a
+/// reply gave a museum's opening hours, right for the two pages it had read, with no link and
+/// no day, and another a line's status with the day and neither a time nor a link (a local
+/// test, Nov 20). The sentence follows the finding's in the browser skill the turn carries, so
+/// a turn that answers and one whose findings go back to a build both read it, once.
+#[test]
+fn a_browser_turns_reply_gives_each_facts_page_and_the_day_it_was_read() {
+    let reply = "A reply's fact has its page's link and the day read; a status, the time too.";
+    let finding = BROWSER_SKILL
+        .split_once("\n## Finding a page\n")
+        .map(|(_, rest)| {
+            rest.split_once("\n## ")
+                .map_or(rest, |(section, _)| section)
+        })
+        .expect("the section");
+    let line = finding
+        .lines()
+        .find(|line| line.starts_with("- In Instafy's browser, write a finding's fact"))
+        .expect("the line on how a fact is written");
+    assert!(
+        line.ends_with(&format!(
+            "saying which of its values you chose, not the page. {reply}"
+        )),
+        "{line}"
+    );
+    assert_eq!(BROWSER_SKILL.matches(reply).count(), 1);
+
+    let tmp = space();
+    let routed = |hands_back: bool| {
+        json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": hands_back,
+            "browserCardTurn": {
+                "version": 1,
+                "cardJobId": "00000000-0000-4000-8000-0000000000a1",
+                "routed": true,
+            },
+            "writeScope": {"mode": "read_only"},
+        })
+    };
+    let request = "Open www.belvedere.at in your browser and find this Sunday's opening hours.";
+    for hands_back in [false, true] {
+        let (prompt, _) = prompt_for_request(tmp.path(), request, routed(hands_back), None);
+        assert_eq!(
+            prompt.matches(reply).count(),
+            1,
+            "hands back {hands_back}: {prompt}"
+        );
+    }
+}
+
 /// A browser turn whose findings go back to the building turn ends its reply with a finding line
 /// per page, and the replies guide it reads never tells it to keep its findings out of a reply:
 /// one that ended with none handed back nothing, and nothing was built (a local test, Nov 3). The

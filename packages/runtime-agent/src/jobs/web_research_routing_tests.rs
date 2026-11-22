@@ -527,15 +527,17 @@ fn the_browser_skill_leaves_cookie_banners_to_the_browser() {
 /// turn, never to the same address, then to another official source. The earlier lines took one more snapshot of a
 /// busy page and waited for two failed pages on one site, and a turn that read a tourism site's 504 only offered the
 /// venue's own site, which the person then had to ask for. Every way a page ends (it has no page, fails, is refused
-/// or covered, or keeps changing) now goes on by one list, which the browser's own steps point to: each step's own
-/// list of the next source disagreed with the others.
+/// or covered, reads as only its menu or keeps changing) now goes on by one list, which the browser's own steps
+/// point to: each step's own list of the next source disagreed with the others. A page that reads as only its menu
+/// is one of them: a journey planner and a support article each read as their site's menu and nothing else, and
+/// the turns ended there (a local test, Nov 20).
 #[test]
 fn a_page_that_fails_sends_the_turn_to_the_places_own_site_in_the_same_turn() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let start = BROWSER_SKILL.find("## Finding a page").expect("section");
     let end = start + BROWSER_SKILL[start..].find("\n## ").expect("next section");
     let section = flat(&BROWSER_SKILL[start..end]);
-    let failed = "- A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.";
+    let failed = "- A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again: a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.";
     assert_eq!(
         section.matches("- A page that").count(),
         1,
@@ -740,7 +742,18 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
         !BROWSER_SKILL[start + 1..].contains("\n## "),
         "the routing section is the skill's last"
     );
-    let section = BROWSER_SKILL[start..].trim_end();
+    // As written, with its marks, it fits too: a runtime from before the marks reads it so, in
+    // every state, braces and all, with no mark left out.
+    let as_written =
+        extract_markdown_h2_section(BROWSER_SKILL, "Routing preflight").expect("routing section");
+    let as_written = format_routing_skill_snapshot(
+        "browser",
+        learn::BROWSER_AUTOMATION_RELATIVE_PATH,
+        &as_written,
+        BROWSER_SKILL_ROUTING_MAX_CHARS,
+    );
+    assert!(!as_written.contains("(truncated)"), "{as_written}");
+    let section = routing_section(BROWSER_SKILL);
     assert!(
         section.chars().count() <= BROWSER_SKILL_ROUTING_MAX_CHARS,
         "{} chars",
@@ -772,7 +785,7 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
     assert!(!section.contains("attachments"), "{section}");
     let tmp = tempdir().expect("temp dir");
     learn::ensure_project_memory_scaffold(tmp.path());
-    let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
+    let snapshot = format_browser_routing_preflight_snapshot(tmp.path(), false).expect("snapshot");
     assert!(snapshot.contains(section), "{snapshot}");
     assert!(!snapshot.contains("(truncated)"), "{snapshot}");
 }
@@ -788,11 +801,7 @@ fn the_browser_skill_routing_section_sits_after_the_carried_bytes_and_fits_its_b
 /// carries on whether or not it found the answer.
 #[test]
 fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = &BROWSER_SKILL[start..];
+    let section = routing_section(BROWSER_SKILL);
     let line = |route: &str| {
         section
             .lines()
@@ -828,7 +837,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
 
     let tmp = scaffolded_space();
     // The routing step reads all of it.
-    let snapshot = format_browser_routing_preflight_snapshot(tmp.path()).expect("snapshot");
+    let snapshot = format_browser_routing_preflight_snapshot(tmp.path(), false).expect("snapshot");
     assert!(snapshot.contains(section.trim_end()), "{snapshot}");
     assert!(!snapshot.contains("(truncated)"), "{snapshot}");
 }
@@ -842,11 +851,7 @@ fn making_something_is_a_build_and_research_that_ends_in_a_page_browses_first() 
 /// with no site to use first, stays `direct`. The routing step reads the whole section.
 #[test]
 fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = &BROWSER_SKILL[start..];
+    let section = routing_section(BROWSER_SKILL);
     let stay = section
         .lines()
         .find(|line| line.starts_with("- Stay `direct`, even when"))
@@ -891,11 +896,7 @@ fn a_follow_up_on_the_chats_browser_work_browses_even_when_it_needs_a_page_here(
 /// exception, so none of them reads as one of `browser_then_build`'s.
 #[test]
 fn a_follow_up_goes_to_the_browser_only_with_what_its_browser_work_found() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = &BROWSER_SKILL[start..];
+    let section = routing_section(BROWSER_SKILL);
     assert!(section.contains(
         "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
     ));
@@ -1101,11 +1102,7 @@ fn anything_not_read_on_a_page_says_not_checked_or_stays_out() {
 /// routing step reads the whole section with the line, within its budget.
 #[test]
 fn a_bare_keep_going_carries_on_what_the_chat_left_open() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let browser = section
         .lines()
         .find(|line| line.starts_with("- `browser`:"))
@@ -1817,7 +1814,7 @@ fn the_browser_skill_says_how_to_find_a_page_and_the_research_skill_points_to_it
         "For direct readers and browsers (the AI's own web search follows `instafy-web-research`):",
         "Open an address the person or a skill gave, or a link on a page you read (print a page's links with its text), else the official site of what the task names and its links and search box.",
         "Never invent a page path.",
-        "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task.",
+        "A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task.",
         "a link on a page you read; then that site's home page, menu and search box, unless it didn't answer, is closed to Octo (link-only, declined) or is a search engine nobody named; then the official site of what the task names; then another official source.",
         "A sight, stop, opening hours or price comes from its own page (the venue's, operator's or shop's), not a listing or a kiosk page",
     ] {
@@ -1906,7 +1903,7 @@ fn a_failed_page_ends_that_page_and_never_the_research() {
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     for needle in [
         "an explicit workspace policy refusal ends that page, not the task: \"Finding a page\" says what comes next. Never retry that page another way.",
-        "A page that ends without what you need (it has no page, fails, is refused or covered, or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again:",
+        "A page that ends without what you need (it has no page, fails, is refused or covered, reads as only its menu or keeps changing) ends that page, not the task. Go on in this turn, never to the same address again:",
     ] {
         assert!(carried.contains(needle), "{needle}");
     }
@@ -2244,8 +2241,8 @@ fn a_browser_turn_on_a_restored_thread_is_given_finding_a_page() {
 
     let skill = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
     let edited = BROWSER_SKILL.replace(
-        "not the page.\n\n## Shared Browser command",
-        "not the page.\n- Start from the city's open-data portal.\n\n## Shared Browser command",
+        "the time too.\n\n## Shared Browser command",
+        "the time too.\n- Start from the city's open-data portal.\n\n## Shared Browser command",
     );
     assert_ne!(edited, BROWSER_SKILL);
     fs::write(&skill, &edited).unwrap();
@@ -2681,11 +2678,7 @@ fn the_research_skill_reads_finding_a_page_with_one_short_command() {
 /// messages.
 #[test]
 fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an_undo() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let rules: Vec<&str> = section
         .lines()
         .filter(|line| line.starts_with("- "))
@@ -2742,11 +2735,7 @@ fn research_that_ends_in_a_page_reaches_its_build_and_keep_going_never_undoes_an
 /// routing step reads it whole for each message.
 #[test]
 fn a_map_request_is_a_build_and_keep_going_carries_on_what_is_not_confirmed() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let rule = |route: &str| {
         section
             .lines()
@@ -3144,11 +3133,7 @@ fn a_value_nobody_found_says_where_it_was_looked_for() {
 /// reads the section whole.
 #[test]
 fn research_ending_in_a_page_browses_first_and_keep_going_with_a_page_builds() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let rule = |route: &str| {
         section
             .lines()
@@ -3248,11 +3233,7 @@ fn a_card_is_a_reader_only_in_a_reply_only_turn() {
 /// within its budget, for each of these messages.
 #[test]
 fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_first() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     assert!(
         section.contains(
             "A routed browser turn sees only the person's words, this chat's browser turns and your `summary`: name the items, place or site this chat names (by name; a page a reply here linked, by address, whatever they call it) and what to find."
@@ -3315,11 +3296,7 @@ fn a_routed_browser_part_is_told_what_to_find_and_an_unconfirmed_page_browses_fi
 /// couldn't be read. A turn that answers in a reply opens the browser by its own contract.
 #[test]
 fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let line = |start: &str| {
         section
             .lines()
@@ -3402,11 +3379,7 @@ fn a_change_that_needs_a_web_page_browses_first_and_a_map_is_a_change_of_files()
 /// step reads the whole section, within its budget.
 #[test]
 fn a_change_in_the_persons_own_words_stays_direct() {
-    let start = BROWSER_SKILL
-        .find("\n## Routing preflight\n")
-        .expect("routing section")
-        + 1;
-    let section = BROWSER_SKILL[start..].trim_end();
+    let section = routing_section(BROWSER_SKILL);
     let rules: Vec<&str> = section
         .lines()
         .filter(|line| line.starts_with("- "))
@@ -3862,14 +3835,27 @@ fn a_direct_change_named_a_topic_skill_is_pointed_to_web_read() {
     }
 }
 
-/// A copy of the browser skill's routing section, which only the routing step reads.
-fn routing_section(skill: &str) -> &str {
+/// A copy of the browser skill's routing section, which only the routing step reads, as that
+/// step reads it where research that ends in a page doesn't search first, without search too:
+/// its words, without the braces around those that hold only until such research searches first
+/// (`browser_routing_section_for_search_state`).
+fn routing_section(skill: &str) -> &'static str {
+    Box::leak(routing_section_where(skill, false).into_boxed_str())
+}
+
+/// The same, as the routing step reads it for a message whose research that ends in a page
+/// searches first (`pages_search_first`) or doesn't.
+fn routing_section_where(skill: &str, pages_search_first: bool) -> String {
     let start = skill
         .find("\n## Routing preflight\n")
         .expect("routing section")
         + 1;
-    skill[start..].trim_end()
+    browser_routing_section_for_search_state(skill[start..].trim_end(), pages_search_first)
 }
+
+/// How the routing input opens the browser skill's routing section: the search lines, when a
+/// message has them, sit right above it.
+const SECTION_OPENS: &str = "\nFocused browser routing skill snapshot:\n- Source: `.agents/skills/instafy-browser-automation/SKILL.md` (routing excerpt)\n```markdown\n";
 
 /// The routing step reads every line of the section for `request`, whole, from a new space's copy.
 fn assert_the_routing_step_reads(section: &str, request: &str) {
@@ -3934,7 +3920,7 @@ fn a_page_with_values_the_chats_replies_did_not_confirm_browses_first() {
 /// change of files whose building turn can't ask for the browser (`browser_choice_applies`), and
 /// on an AI with no web search of its own it reads only pages whose addresses it already knows.
 /// When Octo can search the web for the message, which its routing input then says in one line
-/// after the section, availability for dates at places nobody named is research answered in a
+/// above the section, availability for dates at places nobody named is research answered in a
 /// reply, which stays `direct` and searches first; put on a page, it is research that ends in a
 /// page, which stays `direct` only where it searches first, which a second line says, or that it
 /// doesn't. A site that must be
@@ -3994,7 +3980,7 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
     ] {
         assert_the_routing_step_reads(section, request);
         // The routing input says whether Octo can search the web for the message, once, right
-        // after the section, and only when it can; whether research that ends in a page searches
+        // above the section, and only when it can; whether research that ends in a page searches
         // first is the line after it, only with the first: that it does, or that it doesn't.
         let tmp = scaffolded_space();
         let job = test_lease_job(
@@ -4012,18 +3998,13 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
                 "{request}"
             );
             assert_eq!(
-                prompt.contains(&format!("```\n{ROUTING_SEARCH_FACT}")),
-                searches,
-                "{request}"
-            );
-            assert_eq!(
                 prompt.matches(ROUTING_SEARCH_FIRST_FACT).count(),
                 usize::from(searches && pages_first),
                 "{request}"
             );
             assert_eq!(
                 prompt.contains(&format!(
-                    "```\n{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}"
+                    "```\n\n{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}{SECTION_OPENS}"
                 )),
                 searches && pages_first,
                 "{request}"
@@ -4035,9 +4016,15 @@ fn news_on_a_page_browses_first_and_the_persons_account_is_the_browsers() {
             );
             assert_eq!(
                 prompt.contains(&format!(
-                    "```\n{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}"
+                    "```\n\n{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}{SECTION_OPENS}"
                 )),
                 searches && !pages_first,
+                "{request}"
+            );
+            // Without search the section follows the collaboration skill's, as it did.
+            assert_eq!(
+                prompt.contains(&format!("```\n{SECTION_OPENS}")),
+                !searches,
                 "{request}"
             );
         }
@@ -4082,8 +4069,8 @@ fn research_pages_search_first_only_where_the_runtime_setting_is_on() {
 /// search, the build line's sentence on research that ends in a page says where it searches and
 /// that a map isn't such research, and the line that keeps a map `direct` keeps its research
 /// there too. The second line is as it was where such research searches first, and where it
-/// doesn't, the line in its place says so. The routing step reads the whole section, then the
-/// lines, for each message.
+/// doesn't, the line in its place says so. The routing step reads the lines, then the section
+/// as its search state reads it, for each message.
 #[test]
 fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
     assert_eq!(
@@ -4142,11 +4129,10 @@ fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
             let prompt =
                 routing_preflight_request(&job, tmp.path(), request, None, true, pages_first)
                     .prompt;
-            let at = prompt.find(section).expect("the routing section, whole");
+            let read = routing_section_where(BROWSER_SKILL, pages_first);
+            let at = prompt.find(&read).expect("the routing section, whole");
             assert!(
-                prompt[at + section.len()..]
-                    .trim_start_matches('\n')
-                    .starts_with(&format!("```\n{lines}")),
+                prompt[..at].ends_with(&format!("```\n\n{lines}{SECTION_OPENS}")),
                 "{request}: {prompt}"
             );
             assert_eq!(
@@ -4161,7 +4147,7 @@ fn with_search_research_pages_and_maps_search_in_octos_own_turn() {
 /// Where Octo can search the web for a message but research that ends in a page doesn't search
 /// first, which is every message on a person's own ChatGPT login while
 /// `INSTAFY_RESEARCH_PAGES_SEARCH_FIRST` is off, the routing step reads that it doesn't, in the
-/// line after the one that says Octo can search. The section sends such research to the browser
+/// line after the one that says Octo can search, above the section. The section sends such research to the browser
 /// first "unless it searches first", and left to answer that from the request, the routing step
 /// answered it itself: for news put on a page it wrote "This requires searching first, then
 /// creating a page from the findings, so route to browser_then_build" (a local test, Nov 20),
@@ -4204,12 +4190,23 @@ fn where_research_pages_do_not_search_first_the_routing_step_reads_so() {
             let prompt =
                 routing_preflight_request(&job, tmp.path(), request, None, searches, pages_first)
                     .prompt;
-            let at = prompt.find(section).expect("the routing section, whole");
-            let after = prompt[at + section.len()..].trim_start_matches('\n');
-            let after = after.strip_prefix("```\n").expect("the section's end");
+            let read = routing_section_where(BROWSER_SKILL, searches && pages_first);
+            let at = prompt.find(&read).expect("the routing section, whole");
+            let above = prompt[..at]
+                .strip_suffix(SECTION_OPENS)
+                .expect("the section's start");
+            let gap = if lines.is_empty() { "" } else { "\n" };
             assert!(
-                after.starts_with(&lines),
-                "search {searches}, research pages searching first {pages_first}: {after}"
+                above.ends_with(&format!("```\n{gap}{lines}")),
+                "search {searches}, research pages searching first {pages_first}: {above}"
+            );
+            // The sentence that sends such research to the browser first is read wherever it
+            // doesn't search first, and only there.
+            assert_eq!(
+                prompt
+                    .contains("unless it searches first (in Octo's own turn: the browser can't)."),
+                !(searches && pages_first),
+                "search {searches}, research pages searching first {pages_first}"
             );
             // Each line is read once, in its own state, and never both of the last two.
             for (line, read) in [
@@ -4225,6 +4222,264 @@ fn where_research_pages_do_not_search_first_the_routing_step_reads_so() {
             }
         }
     }
+}
+
+/// Where research that ends in a page searches first, the routing step reads only that state's
+/// words. The section said both that such research stays `direct` "when it searches first" and
+/// that it goes to the browser first "unless it searches first", in every state, with a line
+/// after it saying which holds; news put on a page whose routing input had both lines still went
+/// to the browser first, after each of three rewordings, its reason "This asks for current news
+/// research that must happen before creating a shareable page, so use browser_then_build" (a
+/// local test, Nov 20). The section now puts in braces the words that hold only until such
+/// research searches first, and where it does the routing step is given the section without
+/// them: the first rule says plainly that such research stays `direct`, the sentence that sends
+/// it to the browser first is not there, the lines that say so come above the section, and
+/// `browser_then_build`'s own line stops at the build ("a build from what it found" is the shape
+/// of research put on a page). Where such research doesn't search first the step reads every
+/// word as before, with the two lines above the section, and without search its input is byte
+/// for byte what it was. What must use a site first, what the browser's routes are for and what
+/// stays `direct` are the same lines in every state.
+#[test]
+fn where_research_pages_search_first_the_routing_step_reads_only_that_states_words() {
+    const CONDITION: &str = " when it searches first";
+    const BROWSES_FIRST: &str = " So is research that ends in a page (a comparison, prices, a route; not a map), unless it searches first (in Octo's own turn: the browser can't).";
+    let written = BROWSER_SKILL
+        .split_once("\n## Routing preflight\n")
+        .map(|(_, section)| section.trim_end())
+        .expect("routing section");
+    // The section marks these two, and the skill has no other brace.
+    for marked in [CONDITION, BROWSES_FIRST] {
+        assert_eq!(
+            written.matches(&format!("{{{marked}}}")).count(),
+            1,
+            "{marked}"
+        );
+    }
+    assert_eq!(BROWSER_SKILL.matches('{').count(), 2);
+    assert_eq!(BROWSER_SKILL.matches('}').count(), 2);
+
+    let as_before = routing_section(BROWSER_SKILL);
+    let plain = routing_section_where(BROWSER_SKILL, true);
+    assert_eq!(
+        as_before,
+        format!("## Routing preflight\n{}", written.replace(['{', '}'], ""))
+    );
+    assert_eq!(
+        plain,
+        as_before
+            .replacen(CONDITION, "", 1)
+            .replacen(BROWSES_FIRST, "", 1)
+    );
+    let line = |section: &str, start: &str| {
+        section
+            .lines()
+            .find(|line| line.starts_with(start))
+            .unwrap_or_else(|| panic!("no line starting {start}"))
+            .to_string()
+    };
+    assert_eq!(
+        line(&plain, "- Research whose answer is a reply"),
+        "- Research whose answer is a reply (facts, a price, opening hours, reviews, a rule or policy, even beside an order number or email; when Octo can search the web, availability for dates at places nobody named), or that ends in a page, stays `direct` unless the message names the browser, it carries on this chat's browser work or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner)."
+    );
+    assert_eq!(
+        line(&plain, "- `browser_then_build`:"),
+        "- `browser_then_build`: the same, then Octo makes or changes something here (a page, a map, a table). So is a page or change with values this chat's replies said weren't found or confirmed: the browser looks again first. So is a bare \"keep going\" when a page here marks something not checked or not confirmed, or a page asked for here isn't made yet: it carries that on. So is a change that needs what a web page says."
+    );
+    assert!(!plain.contains("searches first"), "{plain}");
+    // Every other line is the same in each state: what the browser's routes are for, a site
+    // that must be used first, a map, the person's own words, another chat's page, a site that
+    // runs here and a person who says not to use the browser.
+    assert_eq!(as_before.lines().count(), plain.lines().count());
+    for (before, now) in as_before.lines().zip(plain.lines()) {
+        if !before.starts_with("- Research whose answer is a reply")
+            && !before.starts_with("- `browser_then_build`:")
+        {
+            assert_eq!(before, now);
+        }
+    }
+
+    let tmp = scaffolded_space();
+    for request in [
+        "What's the news about Airbus today? Put it on a small page I can share.",
+        "Compare the three latest Garmin Forerunner watches: battery life, weight, screen, price, with two independent reviews each, as a comparison page.",
+        "Make a page of good hotels in Tallinn's old town.",
+        "Put the tram route from Zurich main station to the Kunsthaus on a small page I can share.",
+        "Has my IKEA order 123-4567 shipped yet? My email is ana@example.com.",
+    ] {
+        let job = test_lease_job(
+            Some("feature"),
+            json!({ "prompt_text": request, "metadata": {} }),
+        );
+        let input = |searches: bool, pages_first: bool| {
+            routing_preflight_request(&job, tmp.path(), request, None, searches, pages_first)
+        };
+        // Without search the setting changes nothing, and every word is read, with no brace.
+        let off = input(false, false);
+        assert_eq!(input(false, true).prompt, off.prompt, "{request}");
+        assert_eq!(input(false, true).shared_start, off.shared_start);
+        assert!(off.prompt.contains(as_before), "{request}");
+        assert!(
+            off.prompt
+                .contains("- `browser_then_build`: the same, then a build from what it found.\n"),
+            "{request}"
+        );
+        // Where research that ends in a page doesn't search first: the same input, and the two
+        // lines above the section.
+        let browses_first = input(true, false);
+        let lines = format!("\n{ROUTING_SEARCH_FACT}{ROUTING_NO_SEARCH_FIRST_FACT}");
+        assert_eq!(
+            browses_first.prompt.replacen(&lines, "", 1),
+            off.prompt,
+            "{request}"
+        );
+        assert!(
+            browses_first
+                .prompt
+                .contains(&format!("```\n{lines}{SECTION_OPENS}{as_before}")),
+            "{request}"
+        );
+        // Where it searches first: the second line says so, and the words for the other states
+        // are not read.
+        let searches_first = input(true, true);
+        assert_eq!(
+            searches_first.prompt,
+            browses_first
+                .prompt
+                .replacen(ROUTING_NO_SEARCH_FIRST_FACT, ROUTING_SEARCH_FIRST_FACT, 1)
+                .replacen(CONDITION, "", 1)
+                .replacen(BROWSES_FIRST, "", 1)
+                .replacen("then a build from what it found.\n", "then a build.\n", 1),
+            "{request}"
+        );
+        assert!(
+            searches_first.prompt.contains(&format!(
+                "```\n\n{ROUTING_SEARCH_FACT}{ROUTING_SEARCH_FIRST_FACT}{SECTION_OPENS}{plain}"
+            )),
+            "{request}"
+        );
+        for gone in [
+            "unless it searches first",
+            "when it searches first",
+            "then a build from what it found",
+        ] {
+            assert!(!searches_first.prompt.contains(gone), "{request}: {gone}");
+        }
+        for input in [&off, &browses_first, &searches_first] {
+            assert!(!input.shared_start.contains(['{', '}']), "{request}");
+            // The section is read whole, not cut at the step's budget.
+            assert!(input.shared_start.contains(SECTION_OPENS), "{request}");
+            assert!(input.prompt.starts_with(&input.shared_start), "{request}");
+        }
+        // A site that must be used first still sends its message to the browser where such
+        // research searches first: the rule's exception is read whole there.
+        assert!(
+            searches_first.prompt.contains(
+                "or a site must be used first (availability at a place named, a sign-in or their account, an order's own status or items, a form or planner)."
+            ),
+            "{request}"
+        );
+    }
+}
+
+/// Only words in braces are left out, only where research that ends in a page searches first,
+/// and never on a guess: a section with no braces reads as written in every state (a space's
+/// own copy, or one from before the marks), a brace in inline code is text, inside the marked
+/// words too, and a brace with no partner on its line, or one inside another, leaves the section
+/// as written. Inside the marked words, a brace in inline code ended them there, or left the
+/// section as written: with search off, "- A{ answer `}` now}." was read "- A answer `` now}."
+/// (a local test of the reader, Nov 22).
+#[test]
+fn only_marked_words_are_left_out_and_never_on_a_guess() {
+    let read = browser_routing_section_for_search_state;
+    let unmarked = "## Routing preflight\n\n- Stay `direct` for a map.\n- `browser`: the work happens on a website.\n";
+    assert_eq!(read(unmarked, false), unmarked);
+    assert_eq!(read(unmarked, true), unmarked);
+
+    let marked = "- A{ when B}, stays `direct`.{ So is C, unless B.} So is D.\n- E.\n";
+    assert_eq!(
+        read(marked, false),
+        "- A when B, stays `direct`. So is C, unless B. So is D.\n- E.\n"
+    );
+    assert_eq!(read(marked, true), "- A, stays `direct`. So is D.\n- E.\n");
+
+    let code = "- Answer `{\"route\": \"direct\"}`{ unless B}.\n";
+    assert_eq!(
+        read(code, false),
+        "- Answer `{\"route\": \"direct\"}` unless B.\n"
+    );
+    assert_eq!(read(code, true), "- Answer `{\"route\": \"direct\"}`.\n");
+    let holds_code = "- A{ stays `direct`}.\n";
+    assert_eq!(read(holds_code, false), "- A stays `direct`.\n");
+    assert_eq!(read(holds_code, true), "- A.\n");
+    for (holds_brace, as_written) in [
+        ("- A{ answer `}` now}.\n", "- A answer `}` now.\n"),
+        ("- A{ answer `{x}` now}.\n", "- A answer `{x}` now.\n"),
+    ] {
+        assert_eq!(read(holds_brace, false), as_written);
+        assert_eq!(read(holds_brace, true), "- A.\n");
+    }
+
+    for broken in [
+        "- A{ when B, stays.\n- C}\n",
+        "- A} when B{\n",
+        "- A{ when {B} }.\n",
+        "- A when B}.\n",
+        "- A{ when B",
+        "- A{ answer `x}.\n",
+    ] {
+        assert_eq!(read(broken, false), broken);
+        assert_eq!(read(broken, true), broken);
+    }
+}
+
+/// A space's own copy of the routing section is read for the message's search state too, from
+/// the copy as it is: one from before the marks reads the same in every state, a brace in a
+/// fenced block marks nothing (the snapshot leaves such blocks out, before the marks are read:
+/// a block's braces on lines of their own, as JSON is written, would otherwise leave the section
+/// as written, its marks too), and the routing step's budget counts what the step reads, after
+/// the marked words are left out.
+#[test]
+fn a_spaces_own_routing_section_is_read_for_its_search_state() {
+    let tmp = scaffolded_space();
+    let path = tmp.path().join(learn::BROWSER_AUTOMATION_RELATIVE_PATH);
+    let snapshot = |pages_first: bool| {
+        format_browser_routing_preflight_snapshot(tmp.path(), pages_first).expect("snapshot")
+    };
+    // The shipped copy: every word without search first, the marked ones left out with it.
+    assert!(snapshot(false).contains(routing_section(BROWSER_SKILL)));
+    assert!(snapshot(true).contains(&routing_section_where(BROWSER_SKILL, true)));
+
+    fs::write(&path, BROWSER_SKILL.replace(['{', '}'], "")).unwrap();
+    assert_eq!(snapshot(true), snapshot(false));
+    assert!(snapshot(true).contains(routing_section(BROWSER_SKILL)));
+
+    fs::write(
+        &path,
+        "# Browser\n\n## Routing preflight\n\n- Stay `direct`{ unless it browses first}.\n\n```json\n{\n  \"route\": \"browser\"\n}\n```\n",
+    )
+    .unwrap();
+    for (pages_first, rule) in [
+        (false, "- Stay `direct` unless it browses first.\n"),
+        (true, "- Stay `direct`.\n"),
+    ] {
+        let snapshot = snapshot(pages_first);
+        assert!(snapshot.contains(rule), "{snapshot}");
+        assert!(
+            snapshot.contains("- JSON action shape omitted from this excerpt"),
+            "{snapshot}"
+        );
+        assert!(!snapshot.contains(['{', '}']), "{snapshot}");
+    }
+
+    let long = "x".repeat(BROWSER_SKILL_ROUTING_MAX_CHARS);
+    fs::write(
+        &path,
+        format!("# Browser\n\n## Routing preflight\n\n- Stay `direct`{{ {long}}}.\n"),
+    )
+    .unwrap();
+    assert!(snapshot(false).contains("(truncated)"));
+    assert!(!snapshot(true).contains("(truncated)"));
+    assert!(snapshot(true).contains("- Stay `direct`.\n"));
 }
 
 /// The section says only what the routing step's own instructions don't: that the step can send
