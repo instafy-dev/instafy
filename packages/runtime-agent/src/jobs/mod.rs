@@ -18991,28 +18991,28 @@ fn format_collaboration_routing_preflight_snapshot(
 /// before creating a shareable page"). In the two other states, without search and where such
 /// research doesn't search first, the step is given the words and not the braces: with search off
 /// its input is byte for byte what it was. Which words are marked is the skill's; this only
-/// leaves them out. A brace in inline code is text. A brace with no partner on its line, or one
-/// inside another, leaves the section as it is written: nothing is left out on a guess.
+/// leaves them out. A brace in inline code is text, inside the marked words too. A brace with no
+/// partner on its line, or one inside another, leaves the section as it is written: nothing is
+/// left out on a guess.
 fn browser_routing_section_for_search_state(section: &str, pages_search_first: bool) -> String {
     let mut read = String::with_capacity(section.len());
     let (mut in_code, mut marked) = (false, false);
     for ch in section.chars() {
         match ch {
             '\n' if marked => return section.to_string(),
-            '\n' => {
-                in_code = false;
-                read.push(ch);
-            }
-            '`' if !marked => {
-                in_code = !in_code;
-                read.push(ch);
-            }
+            '\n' => in_code = false,
+            '`' => in_code = !in_code,
+            '{' | '}' if in_code => {}
             '{' if marked => return section.to_string(),
-            '{' if !in_code => marked = true,
-            '}' if marked => marked = false,
-            '}' if !in_code => return section.to_string(),
-            _ if marked && pages_search_first => {}
-            _ => read.push(ch),
+            '}' if !marked => return section.to_string(),
+            '{' | '}' => {
+                marked = ch == '{';
+                continue;
+            }
+            _ => {}
+        }
+        if !(marked && pages_search_first) {
+            read.push(ch);
         }
     }
     if marked { section.to_string() } else { read }
