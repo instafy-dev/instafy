@@ -1,5 +1,12 @@
 # @instafy/cli
 
+## 0.5.14
+
+### Patch Changes
+
+- c337718: `instafy web search` without a search key no longer carries a key card (`offer`) or a line about one: its `no_provider` answer says only how to go on without a key. A turn asked for a score put the card it carried into its reply. The card now comes from `instafy web search-key --json`, which Octo runs only for a person who asks to set up search: the `request_secret` action for the key a search tries first, with its provider's words and the searches a day its entry allows. It reads the provider list built into the CLI, as a search does, so it works in every space, and a provider the space switched off is skipped.
+- 85f6fe2: `instafy bind check` fails a page that says "checked <date>" or "seen <date>" in typed words, linked or not, and names each such line (`TYPED:`, and `typed` in `--json`). `site.trust` and `site.cite` write those words themselves, from how a fact's page was read (its `viewer`). A page captioned a journey planner whose form was never sent "<planner> · checked 20 Nov 2026; no connection result", typed as a link's words, and the check passed it because the line linked a page. The check reads the words in a page's HTML, its own scripts and `data.json`, never in a file a command writes (a check's records, a map's layers), and never words put together while the page runs. It names a caption only: never a fact `site.trust` or `site.cite` draws, whatever its value says ("Large bags must be checked"), a line that says the opposite ("never checked 20 Nov") or a sentence that tells a visitor when ("can be seen 3 Oct to 15 Jan"). A colon or a weekday before the date changes nothing ("Last checked: Thu 20 Nov"), and the line it names always holds the words it found.
+
 ## 0.5.13
 
 ### Patch Changes

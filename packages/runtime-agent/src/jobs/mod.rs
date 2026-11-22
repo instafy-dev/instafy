@@ -78,6 +78,7 @@ mod isolated_workspace;
 mod learn;
 /// Where a space keeps its copy of the web-research skill's link-only list.
 pub(crate) use learn::WEB_RESEARCH_LINK_ONLY_RELATIVE_PATH;
+pub(crate) use learn::clear_scaffold_only_folder;
 mod mcp;
 mod page_cards;
 pub(crate) mod preview_pictures;

@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-`instafy bind check` fails a page that says "checked <date>" or "seen <date>" in typed words, linked or not, and names each such line (`TYPED:`, and `typed` in `--json`). `site.trust` and `site.cite` write those words themselves, from how a fact's page was read (its `viewer`). A page captioned a journey planner whose form was never sent "<planner> · checked 20 Nov 2026; no connection result", typed as a link's words, and the check passed it because the line linked a page. The check reads the words in a page's HTML, its own scripts and `data.json`, never in a file a command writes (a check's records, a map's layers), and never words put together while the page runs. It names a caption only: never a fact `site.trust` or `site.cite` draws, whatever its value says ("Large bags must be checked"), a line that says the opposite ("never checked 20 Nov") or a sentence that tells a visitor when ("can be seen 3 Oct to 15 Jan"). A colon or a weekday before the date changes nothing ("Last checked: Thu 20 Nov"), and the line it names always holds the words it found.

@@ -57,13 +57,19 @@ export type ConversationBrowserState = {
   pageTitle?: string | null;
   /** The agent using the browser now, or null. */
   agentName?: string | null;
+  /**
+   * Closes the chat's Browser view, never the browser or a turn in it. It
+   * works with the chat's panel off screen too: the chat keeps it closed.
+   */
+  close?: () => void;
 };
 
 const NO_CONVERSATION_BROWSER: ConversationBrowserState = { available: false, attention: false };
 
 function sameConversationBrowser(left: ConversationBrowserState | undefined, right: ConversationBrowserState): boolean {
   return Boolean(left) && left!.available === right.available && left!.attention === right.attention &&
-    (left!.pageTitle ?? null) === (right.pageTitle ?? null) && (left!.agentName ?? null) === (right.agentName ?? null);
+    (left!.pageTitle ?? null) === (right.pageTitle ?? null) && (left!.agentName ?? null) === (right.agentName ?? null) &&
+    left!.close === right.close;
 }
 
 interface WorkspaceTabsContextValue {

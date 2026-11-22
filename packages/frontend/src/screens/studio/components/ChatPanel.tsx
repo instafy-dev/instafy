@@ -402,7 +402,7 @@ import { ConversationMessageContext, openConversationMessageReference, type Conv
 import { useConversationMessageMetadata } from "../../../conversations/ConversationMessageMetadata";
 import { ConversationPreviewContext, type ConversationPreviewOpener } from "../../../workspace/ConversationPreviewContext";
 import { browserViewTabDetails } from "../../../workspace/browserViewTab";
-import { conversationSurfaceScope, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
+import { conversationSurfaceScope, closeConversationBrowser, closeConversationFile, closeConversationPreview, conversationFileLabel, conversationResourceId, openConversationFile, openConversationPreview, selectConversationView, visibleSitePreviewId } from "../../../workspace/conversationSurfaces";
 import { SitePreviewPanel } from "./SitePreviewPanel";
 import { askOutcomesFromRuns, composerAskSender, siteAskAccess } from "./previewHost/siteAsks";
 import type { SiteAskHost } from "./previewHost/useSiteAsks";
@@ -776,6 +776,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserSessionStateHydrated,
     exactBrowserRuntimeId,
     browserSessionExpandRequestToken,
+    browserViewClosed,
+    closeBrowserView,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,
     handleHiddenBrowserSessionUnavailable,
@@ -814,6 +816,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const browserSubtab = surfaces.activeId;
   const [surfaceWidth, setSurfaceWidth] = useState(0);
   const hasBrowserView = browserSessionOpen || hasHiddenBrowserSession;
+  // The Browser tab's close: only the view closes, never the browser or a
+  // turn Octo runs in it, and Chat comes forward if Browser was in front. The
+  // view bar's own tab calls this too (setConversationBrowser).
+  const closeBrowserTab = useCallback(() => {
+    updateSurfaces(surfaceScope, closeConversationBrowser);
+    closeBrowserView();
+  }, [closeBrowserView, surfaceScope, updateSurfaces]);
   // Each preview tab shows its site's 📍 while that site has the person's location.
   useLocationSitesVersion();
   const hasResources = hasBrowserView || surfaces.files.length > 0 || surfaces.previews.length > 0;
@@ -3425,6 +3434,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         attention: browserApprovalAttention,
         pageTitle: browserActivePageTitle,
         agentName: browserAgentActive ? browserAgentName : null,
+        close: closeBrowserTab,
       });
     }
   }, [
@@ -3432,6 +3442,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     browserAgentActive,
     browserAgentName,
     browserApprovalAttention,
+    closeBrowserTab,
     conversationWorkspace,
     hasBrowserView,
     setConversationBrowser,
@@ -5139,6 +5150,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       markBrowserAutoStartDeclined(browserRequestIdentity);
     }
   }, [browserRequestIdentity, browserSessionOpen, browserSessionStateHydrated]);
+  // Nor while the person keeps its view closed: closed from the view bar with
+  // this chat off screen, or before a reload.
+  useEffect(() => {
+    if (browserSessionStateHydrated && browserViewClosed) markBrowserAutoStartDeclined(browserRequestIdentity);
+  }, [browserRequestIdentity, browserSessionStateHydrated, browserViewClosed]);
   const browserRunStatusRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     const controllerId = activeConversationEntry?.controllerId ?? null;
@@ -6441,6 +6457,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       id: "browser", label: "Browser", panelId: browserPanelId, icon: <Globe className="h-3.5 w-3.5" />,
       ...browserViewTabDetails({ pageTitle: browserActivePageTitle, agentName: browserAgentActive ? browserAgentName : null }),
       attention: browserApprovalAttention ? <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-400/15 dark:text-amber-200" data-testid="shared-browser-approval-attention">Approve</span> : undefined,
+      onClose: closeBrowserTab,
     }] : []),
     ...surfaces.files.map(file => ({
       id: file.id, label: conversationFileLabel(file, surfaces.files), title: file.path,

@@ -27,6 +27,14 @@ export type ConversationSurface = {
   onClose?: () => void;
 };
 
+/**
+ * With a mouse, a view's close shows on the selected tab, and on another tab
+ * while it is hovered or holds keyboard focus. A touch screen has no hover, so
+ * there it always shows. Hidden by opacity, so a tab keeps its width, and with
+ * no transition of its own, which would replace the button's colour fades.
+ */
+const CLOSE_ON_HOVER_CLASS = "pointer-fine:opacity-0 pointer-fine:group-hover/view-tab:opacity-100 pointer-fine:group-focus-within/view-tab:opacity-100";
+
 type ConversationSurfaceTabsProps = {
   presentation?: "header" | "composer";
   chatPanelId: string;
@@ -57,7 +65,8 @@ export function ConversationSurfaceTabs({
   useLayoutEffect(() => {
     if (!restoreFocus.current) return;
     restoreFocus.current = false;
-    const target = tabs.current.get(selected) ?? document.getElementById(chatPanelId);
+    // With its last view closed the tab list is hidden: Chat itself takes focus.
+    const target = (resources.length ? tabs.current.get(selected) : null) ?? document.getElementById(chatPanelId);
     target?.focus();
   }, [selected, resources.length, chatPanelId]);
   const close = (view: ConversationSurface) => {
@@ -80,7 +89,7 @@ export function ConversationSurfaceTabs({
           )}
         >
           {views.map((view, index) => (
-            <div key={view.id} data-tab-id={view.id} className={tabItemStyles(tabPreset, selected === view.id)}>
+            <div key={view.id} data-tab-id={view.id} className={`group/view-tab ${tabItemStyles(tabPreset, selected === view.id)}`}>
               <button
                 ref={node => { if (node) tabs.current.set(view.id, node); else tabs.current.delete(view.id); }}
                 type="button" role="tab" aria-controls={view.panelId}
@@ -103,7 +112,8 @@ export function ConversationSurfaceTabs({
                 {view.busyLabel ? <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-500 dark:bg-violet-400" data-testid={`conversation-subtab-${view.id}-busy`} /> : null}
                 {view.attention}
               </TabLabel></span>{view.description ? <span hidden id={`${view.panelId}-${view.id}-description`}>{view.description}</span> : null}</button>
-              {view.onClose ? <TabCloseButton label={`Close ${view.label} view`} onClose={() => close(view)} className="mr-1 text-inherit" /> : null}
+              {view.onClose ? <TabCloseButton label={`Close ${view.label} view`} onClose={() => close(view)}
+                className={`mr-1 text-inherit ${selected === view.id ? "" : CLOSE_ON_HOVER_CLASS}`} /> : null}
             </div>
           ))}
         </HorizontalTabStrip>

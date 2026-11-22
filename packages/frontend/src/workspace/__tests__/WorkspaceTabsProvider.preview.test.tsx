@@ -9,7 +9,7 @@ import { createInitialConversation, type ConversationState } from "../../convers
 import type { StudioPanel } from "../../screens/studio/types";
 import { publishChatParticipants, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../../screens/studio/components/chatParticipantsStore";
 import { ConversationWorkspaceViews } from "../ConversationWorkspaceViews";
-import { openConversationPreview } from "../conversationSurfaces";
+import { closeConversationBrowser, openConversationPreview } from "../conversationSurfaces";
 import { ownPresentation, rememberOwnPresentation, resetFollowStoreForTests } from "../../screens/studio/components/previewHost/followStore";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
@@ -201,6 +201,26 @@ describe("conversation preview tabs", () => {
     expect(composer().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Browser");
     await act(async () => composer().querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-chat"]')?.click());
     expect(api.conversationSurfaces.read(api.conversationWorkspaceScope).activeId).toBe("chat");
+  });
+
+  it("closes a chat's Browser view from the view bar: the tab goes at once and Chat comes forward", async () => {
+    showViewBar = true;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    const scope = api.conversationWorkspaceScope;
+    const header = () => container.querySelector('[data-testid="header-view-host"]')!;
+    // As ChatPanel's close does with its panel off screen: Chat comes forward, the view stays closed.
+    const close = vi.fn(() => api.conversationSurfaces.update(scope, closeConversationBrowser));
+    await act(async () => api.setConversationBrowser(scope, { available: true, attention: false, agentName: "Octo", close }));
+    await act(async () => header().querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-browser"]')?.click());
+    expect(api.conversationSurfaces.read(scope).activeId).toBe("browser");
+    expect(header().querySelector('[data-testid="conversation-subtab-browser"]')?.getAttribute("aria-label")).toBe("Browser, Octo is using the browser");
+
+    await act(async () => header().querySelector<HTMLButtonElement>('[aria-label="Close Browser view"]')?.click());
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(api.conversationBrowser).toMatchObject({ available: false, agentName: "Octo" });
+    expect(header().querySelector('[data-testid="conversation-subtab-browser"]')).toBeNull();
+    expect(api.conversationSurfaces.read(scope)).toMatchObject({ activeId: "chat", resourceId: "browser" });
+    expect(header().querySelector('[data-testid="conversation-subtab-chat"]')?.getAttribute("aria-selected")).toBe("true");
   });
 
   it("keeps a run's selected view and file navigation in the compact composer switcher", async () => {

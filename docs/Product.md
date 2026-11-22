@@ -516,12 +516,23 @@ existing workspace draft store when switching resources or conversations. These 
 do not store copies of files, pages, cookies or browser credentials.
 
 Resource tabs use the workspace tab icon, dirty marker and close control, with a quieter
-underline to distinguish them from the outer workspace tabs. Reopening a file keeps its place;
+underline to distinguish them from the outer workspace tabs. With a mouse, a view's close control
+shows on the selected tab, and on another tab while it is hovered or holds keyboard focus; on a
+touch screen, which has no hover, it always shows. Reopening a file keeps its place;
 closing the selected file selects the next neighbor, then the previous one. Closing a background
 file keeps the current selection. Arrow keys, Home and End select views; Delete closes a focused
 file view and restores focus to the selected view. Duplicate filenames include their parent path,
 and overflow arrows reveal additional views. Divider movement previews live, saving the width
 when the drag ends; keyboard adjustments save immediately.
+
+The Browser view tab has the same close control, and Delete closes it too. Closing it closes only
+the chat's view: the browser, its pages and any turn Octo is running in it go on, and the machine
+it runs on stays the chat's for the next open. Chat comes forward when Browser was in front and
+the next view takes its place beside Chat; focus moves to the selected view, or to the chat itself
+when no other view remains. The chat keeps the view closed, after a reload or in a new window too,
+until the browser is opened there again: **Open browser** in the composer's "+" menu, a turn's or
+a card's browser button, or Octo pausing on the person's own fields brings it back. While it stays
+closed, Octo opens no browser there by itself; its browser cards wait for a press.
 
 An explicitly shared native browser tab keeps sharing when its resource pane is hidden. A new
 share still starts from the visible browser; stopping it, releasing its owner, switching account

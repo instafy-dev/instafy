@@ -3,8 +3,17 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TurnEngineTurnOwner } from "../../../../conversations/runFailurePresentation";
+import {
+  buildRunFailureRetryMetadata,
+  type TurnEngineTurnOwner,
+} from "../../../../conversations/runFailurePresentation";
 import type { ChatMessage } from "../../types";
+import type { AssistantAgentIdentity } from "../chatAssistantIdentity";
+import {
+  collapseLifecycleMessages,
+  shouldDisplayChatMessage,
+  synthesizeAgentJobThreadMessages,
+} from "../chatMessagePresentation";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider, type RunFailureRetryContextValue } from "../RunFailureNotice";
 
@@ -133,5 +142,173 @@ describe("a turn-engine reply whose header the chat leaves out", () => {
     await render([reply("reply-1", 0, { aiAccessMode: "claude-code" }), reply("reply-2", 1, {})], "solo");
     expect(container.querySelectorAll('[data-testid="turn-engine-speaker-line"]')).toHaveLength(0);
     expect(container.querySelector('[data-testid="chat-speaker-inline"]')).toBeNull();
+  });
+});
+
+// Local trial, Nov 20: @cctrial, an agent its person set to Claude Code, took
+// a turn whose pre-flight failed. Its failure, its "Trying again…" after Try
+// again and the reply of the second try all read as Octo's, with Octo's face:
+// a turn's row named no agent, so the chat fell back to Octo. Each message of
+// the turn names the agent, as the controller stamps it from the job
+// (docs/Local-Engine-Turns.md 5.7, 11.14).
+describe("a Claude Code turn of an agent of the person's own", () => {
+  const CCTRIAL = { id: "agent-cctrial", handle: "cctrial", displayName: "CC Trial", avatarSeed: "hatchling:5" };
+  const WORDS = "@cctrial Hi! In one short sentence, say which AI you are.";
+  const FAILED_JOB = "job-failed";
+  const FAILED_RUN = "run-failed";
+  const RETRY_JOB = "job-retry";
+  const RETRY_RUN = "run-retry";
+
+  function at(minute: number): number {
+    return AT + minute * 60_000;
+  }
+
+  const prompt: ChatMessage = {
+    id: "prompt",
+    role: "user",
+    authorId: "user-1",
+    content: WORDS,
+    timestamp: at(0),
+    files: null,
+    messageType: null,
+    metadata: { runId: FAILED_RUN },
+  };
+  const failure: ChatMessage = {
+    id: "failure",
+    role: "assistant",
+    authorId: null,
+    content: "Instafy couldn't check this space's folder: git couldn't list this space's files.",
+    timestamp: at(1),
+    files: null,
+    messageType: "error",
+    metadata: {
+      ...STAMPED,
+      source: "agent",
+      outcome: "failed",
+      messageType: "error",
+      provider: "claude-code",
+      jobId: FAILED_JOB,
+      runId: FAILED_RUN,
+      claudeCodeFailure: "preflight_failed",
+      agent: CCTRIAL,
+    },
+  };
+  const resend: ChatMessage = {
+    id: "resend",
+    role: "user",
+    authorId: "user-1",
+    content: WORDS,
+    timestamp: at(2),
+    files: null,
+    messageType: null,
+    metadata: { runId: RETRY_RUN, prompt_metadata: buildRunFailureRetryMetadata(failure) },
+  };
+  const retryReply: ChatMessage = {
+    id: "retry-reply",
+    role: "assistant",
+    authorId: null,
+    content: "I'm Claude, working in the folder of this space.",
+    timestamp: at(3),
+    files: null,
+    messageType: null,
+    metadata: {
+      ...STAMPED,
+      source: "agent",
+      outcome: "succeeded",
+      provider: "claude-code",
+      jobId: RETRY_JOB,
+      runId: RETRY_RUN,
+      agent: CCTRIAL,
+    },
+  };
+
+  let container: HTMLDivElement;
+  let root: Root;
+  let faces: Array<AssistantAgentIdentity | null>;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    faces = [];
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  // The chat's rows as ChatPanel builds them from the conversation's messages.
+  async function renderChat(messages: ChatMessage[]) {
+    const all = collapseLifecycleMessages(messages);
+    const rows = synthesizeAgentJobThreadMessages(all, all.filter((message) => shouldDisplayChatMessage(message)));
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={ownerContext({ isViewer: true, name: null })}>
+          <ConversationMessageRows
+            identityLayout="participants"
+            messages={rows}
+            currentUserId="user-1"
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={(_metadata, identity) => {
+              faces.push(identity ?? null);
+              return <span data-testid="assistant-avatar" />;
+            }}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={vi.fn()}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={vi.fn()}
+          />
+        </RunFailureRetryProvider>,
+      );
+    });
+    return rows;
+  }
+
+  function speakerNames(): Array<string | null> {
+    return [...container.querySelectorAll('[data-testid="chat-speaker-name"]')].map((node) => node.textContent);
+  }
+
+  it("names and draws its failure as that agent's", async () => {
+    await renderChat([prompt, failure]);
+
+    expect(speakerNames()).toEqual(["cctrial"]);
+    expect(faces.map((face) => face?.id)).toEqual([CCTRIAL.id]);
+    expect(container.textContent).toContain(
+      "Instafy couldn't check this space's folder on this computer, so Claude Code didn't start.",
+    );
+  });
+
+  it("names its failure as that agent's while Try again's resend waits", async () => {
+    const rows = await renderChat([prompt, failure, resend]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${FAILED_JOB}`]);
+    expect(container.textContent).toContain("Trying again…");
+    expect(speakerNames()).toEqual(["cctrial"]);
+    expect(faces.map((face) => face?.id)).toEqual([CCTRIAL.id]);
+  });
+
+  it("names and draws the reply of its second try as that agent's", async () => {
+    const rows = await renderChat([prompt, failure, resend, retryReply]);
+
+    expect(rows.map((row) => row.id)).toEqual(["prompt", `agent-job-thread:${RETRY_JOB}`]);
+    expect(container.textContent).toContain("Took two tries");
+    expect(container.textContent).toContain("I'm Claude, working in the folder of this space.");
+    expect(speakerNames()).toEqual(["cctrial"]);
+    expect(faces.map((face) => face?.id)).toEqual([CCTRIAL.id]);
+    expect(
+      [...container.querySelectorAll('[data-testid="turn-engine-speaker-line"]')].map((node) => node.textContent),
+    ).toEqual(["Ran on your own Claude Code, on your computer"]);
   });
 });
