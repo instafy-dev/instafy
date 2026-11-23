@@ -111,18 +111,8 @@ pub(super) fn rules_refused_cards_broke(reply: &Value) -> Vec<&'static str> {
 /// the person's press ([`BrowserRequest::wait_for_a_press_where_it_opens`]).
 pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<String> {
     let mut sites = BTreeSet::new();
-    for event in events.iter().copied().flatten() {
-        let item = &event["item"];
-        if event["type"] != "item.completed" || item["type"] != "command_execution" {
-            continue;
-        }
+    for item in reads_of(events) {
         let command = item["command"].as_str().unwrap_or_default();
-        let reads_pages =
-            super::activity_labels::command_activity(item.get("command_argv"), command)
-                .is_some_and(|activity| activity["key"] == "instafy/web-read");
-        if !reads_pages {
-            continue;
-        }
         let output = item["aggregated_output"].as_str().unwrap_or_default();
         let shown = read_outcomes(output);
         let asked = addresses_in(command);
@@ -130,7 +120,7 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
         // does too: that page is the browser's to read, so it is no page the reader was refused.
         let unsure = item["exit_code"] != json!(0)
             || (output.starts_with(crate::codex::COMMAND_OUTPUT_KEPT_TAIL) && asked.len() > 1);
-        let mut not_read = shown.stopped;
+        let mut not_read: Vec<&str> = shown.stopped.iter().map(|stop| stop.address).collect();
         if unsure {
             not_read.extend(
                 asked
@@ -143,14 +133,79 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
     sites
 }
 
+/// The reads of a turn's own reader (`instafy web read`) its events show finished: each one's
+/// command item, with its command, exit code and output.
+fn reads_of<'a>(events: &'a [&'a [Value]]) -> impl Iterator<Item = &'a Value> + 'a {
+    events.iter().copied().flatten().filter_map(|event| {
+        let item = &event["item"];
+        let finished = event["type"] == "item.completed" && item["type"] == "command_execution";
+        let command = item["command"].as_str().unwrap_or_default();
+        (finished
+            && super::activity_labels::command_activity(item.get("command_argv"), command)
+                .is_some_and(|activity| activity["key"] == "instafy/web-read"))
+        .then_some(item)
+    })
+}
+
+/// The stops of the turn's own reader that a site gave the reader alone, at a public page Octo's
+/// browser may open when the person presses a card for it: a robots.txt refusal and an HTTP 403
+/// or 429. A sign-in or paywall, a bot check, a page showing a credential, a private or local
+/// address, a link-only site, a download and a chain of redirects aren't: the research skill's
+/// Stops give such a page its link, and a card only "if public, open to Octo and showing no
+/// secrets".
+const REFUSED_THE_READER_ALONE: [&str; 3] = ["robots", "forbidden", "rate_limited"];
+
+/// Whether `reply` links a page the turn's own reader was refused ([`REFUSED_THE_READER_ALONE`]),
+/// or where that page redirected, as its output names them ([`read_outcomes`]): the same site
+/// ([`site_of`]), path and query, whatever closing slash or fragment either has. A page the
+/// reader couldn't read ends in a few plain words, its link and one card (the research skill's
+/// Stops), and a policy question beside an order number read the shop's returns page, was
+/// refused by its robots.txt, and ended in the words and the link with no card, so nothing
+/// opened the page for the person (a local test, Nov 23).
+pub(super) fn links_a_page_its_reader_was_refused(reply: &str, events: &[&[Value]]) -> bool {
+    let refused: Vec<(String, String, Option<String>)> = reads_of(events)
+        .flat_map(|item| {
+            read_outcomes(item["aggregated_output"].as_str().unwrap_or_default())
+                .stopped
+                .into_iter()
+                .filter(|stop| REFUSED_THE_READER_ALONE.contains(&stop.code))
+                .filter_map(|stop| page_of(stop.address))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    !refused.is_empty()
+        && addresses_in(reply)
+            .into_iter()
+            .filter_map(|address| page_of(address.trim_end_matches(['.', ',', ';', ':', '!', '?'])))
+            .any(|page| refused.contains(&page))
+}
+
+/// A page as a reply's link and a read's address are compared ([`links_a_page_its_reader_was_refused`]):
+/// its site ([`site_of`]), its path without a closing slash, and its query.
+fn page_of(address: &str) -> Option<(String, String, Option<String>)> {
+    let url = reqwest::Url::parse(address).ok()?;
+    Some((
+        site_of(address)?,
+        url.path().trim_end_matches('/').to_owned(),
+        url.query().map(str::to_owned),
+    ))
+}
+
 /// What a read's output shows of its pages, as its JSON gives them (one key a line: a page's
-/// `requestedUrl`, then its `status`) or its text (`[stopped: robots] <address> -> <where it
-/// went>`): the addresses of the pages it marks `stopped`, where they redirected included, and of
-/// those it read or found to need a browser. What a page wrote, inside its
-/// `<untrusted_page_content>` wrapper, says nothing of what was read.
+/// `requestedUrl`, then its `status` and its `code`) or its text (`[stopped: robots] <address> ->
+/// <where it went>`): the addresses of the pages it marks `stopped`, where they redirected
+/// included, each with its stop's code, and of those it read or found to need a browser. What a
+/// page wrote, inside its `<untrusted_page_content>` wrapper, says nothing of what was read.
 struct ReadOutcomes<'a> {
-    stopped: Vec<&'a str>,
+    stopped: Vec<StoppedAt<'a>>,
     read: Vec<&'a str>,
+}
+
+/// An address a read marks `stopped`, and its stop's code (`robots`, `login`…), empty when its
+/// output doesn't show one.
+struct StoppedAt<'a> {
+    address: &'a str,
+    code: &'a str,
 }
 
 fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
@@ -160,6 +215,9 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
     };
     let mut asked: Option<&str> = None;
     let mut in_a_stop = false;
+    // Where the stopped page's own addresses start in `shown.stopped`, and its stop's code.
+    let mut stop_starts = 0;
+    let mut code = "";
     // Where the room kept only the end of the output, the end may start inside a page's text.
     let mut in_page_text = match (
         output.find("<untrusted_page_content"),
@@ -181,8 +239,18 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
         if let Some((status, addresses)) =
             line.strip_prefix('[').and_then(|rest| rest.split_once(']'))
         {
-            match status.split(':').next().unwrap_or_default().trim() {
-                "stopped" => shown.stopped.extend(addresses_in(addresses)),
+            let (status, code) = status.split_once(':').unwrap_or((status, ""));
+            match status.trim() {
+                "stopped" => shown
+                    .stopped
+                    .extend(
+                        addresses_in(addresses)
+                            .into_iter()
+                            .map(|address| StoppedAt {
+                                address,
+                                code: code.trim(),
+                            }),
+                    ),
                 "read" | "needs_browser" => shown
                     .read
                     .extend(addresses_in(addresses).into_iter().take(1)),
@@ -192,14 +260,30 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
             asked = addresses_in(line).into_iter().next();
         } else if line.starts_with("\"status\"") {
             in_a_stop = line.contains("\"stopped\"");
+            stop_starts = shown.stopped.len();
+            code = "";
             if in_a_stop {
-                shown.stopped.extend(asked);
+                shown
+                    .stopped
+                    .extend(asked.map(|address| StoppedAt { address, code }));
             } else if line.contains("\"read\"") || line.contains("\"needs_browser\"") {
                 shown.read.extend(asked);
             }
+        } else if in_a_stop && code.is_empty() && line.starts_with("\"code\"") {
+            // The stop's code, right after its status: every address of that page has it.
+            code = line.split_once(':').map_or("", |(_, value)| {
+                value.trim().trim_end_matches(',').trim_matches('"')
+            });
+            for stop in &mut shown.stopped[stop_starts..] {
+                stop.code = code;
+            }
         } else if in_a_stop && (line.starts_with("\"finalUrl\"") || line.starts_with("\"http")) {
             // Where a stopped page went: its provenance's `finalUrl`, and its `redirects`.
-            shown.stopped.extend(addresses_in(line));
+            shown.stopped.extend(
+                addresses_in(line)
+                    .into_iter()
+                    .map(|address| StoppedAt { address, code }),
+            );
         }
     }
     shown
@@ -1295,6 +1379,108 @@ mod tests {
         assert!(
             !routed.waits_for_the_person(&["Open https://www.museum.example/en/visit for me."])
         );
+    }
+
+    /// A reply links a page the turn's own reader was refused when an address it gives is a page
+    /// the reader's output marks stopped for what the site gave the reader alone (robots.txt, HTTP
+    /// 403 or 429), or where that page went: the same site, path and query, with or without
+    /// `www.` or a closing slash. A page the reader stopped at for a sign-in, a paywall, a bot
+    /// check, a secret, a private address, a link-only site or a download gets only its link, so
+    /// linking it asks for no card; nor does another page of the same site, a read that failed,
+    /// a command that isn't the reader, or what a page wrote.
+    #[test]
+    fn a_reply_links_a_page_its_reader_was_refused() {
+        let completed = |command: &str, exit_code: i64, output: &str| {
+            json!({"type": "item.completed", "item": {
+                "type": "command_execution", "command": command, "exit_code": exit_code,
+                "status": "completed", "aggregated_output": output,
+            }})
+        };
+        let stopped = |code: &str| {
+            format!(
+                "{{\n \"ok\": true,\n \"viewer\": \"server fetch\",\n \"pages\": [\n  {{\n   \"requestedUrl\": \"https://www.shop.example/at/en/customer-service/returns-claims/\",\n   \"status\": \"stopped\",\n   \"code\": \"{code}\",\n   \"message\": \"robots.txt disallows this path\",\n   \"tell\": \"This address only (and where it redirected): don't read it another way. Give the person the plain link.\",\n   \"provenance\": {{\n    \"requestedUrl\": \"https://www.shop.example/at/en/customer-service/returns-claims/\",\n    \"finalUrl\": \"https://help.shop.example/returns\",\n    \"title\": \"\",\n    \"readAt\": \"2026-11-23T00:16:54.277Z\",\n    \"viewer\": \"server fetch\"\n   }},\n   \"redirects\": [],\n   \"fromCache\": false\n  }}\n ],\n \"budget\": {{\n  \"loadsLeft\": 100\n }},\n \"warnings\": []\n}}\n"
+            )
+        };
+        let read = "instafy web read https://www.shop.example/at/en/customer-service/returns-claims/ --json --find 'return policy returns refund order'";
+        let reply = "I couldn't check the shop's return policy, so I can't confirm how it applies to your order. You can read the shop's [returns and claims page](https://www.shop.example/at/en/customer-service/returns-claims/).";
+        let links =
+            |reply: &str, events: &[Value]| links_a_page_its_reader_was_refused(reply, &[events]);
+        for code in REFUSED_THE_READER_ALONE {
+            let events = [completed(read, 2, &stopped(code))];
+            assert!(links(reply, &events), "{code}");
+            // Written without `www.` or the closing slash, or as a bare address ending a sentence.
+            assert!(
+                links(
+                    "Read it at https://shop.example/at/en/customer-service/returns-claims.",
+                    &events
+                ),
+                "{code}"
+            );
+            // Where the page went.
+            assert!(
+                links("See https://help.shop.example/returns/ for it.", &events),
+                "{code}"
+            );
+            // Another page of the site, or no link at all.
+            assert!(
+                !links("See https://www.shop.example/at/en/ for help.", &events),
+                "{code}"
+            );
+            assert!(
+                !links("I couldn't check the shop's return policy.", &events),
+                "{code}"
+            );
+        }
+        for code in [
+            "login",
+            "paywall",
+            "captcha",
+            "secret_screen",
+            "blocked_address",
+            "link_only",
+            "download",
+            "redirects",
+        ] {
+            assert!(
+                !links(reply, &[completed(read, 2, &stopped(code))]),
+                "{code}"
+            );
+        }
+        // The reader's text: the same, by its stop's code.
+        let text = |code: &str| {
+            format!(
+                "[stopped: {code}] https://shop.example/search?q=vacuum\n  the site refused the read\n[read] https://other.example/vacuum"
+            )
+        };
+        let text_read =
+            "instafy web read https://shop.example/search?q=vacuum https://other.example/vacuum";
+        let vacuum = "The shop's own page wasn't readable: https://shop.example/search?q=vacuum";
+        assert!(links(
+            vacuum,
+            &[completed(text_read, 0, &text("forbidden"))]
+        ));
+        assert!(!links(vacuum, &[completed(text_read, 0, &text("login"))]));
+        assert!(!links(
+            "https://shop.example/search?q=kettle",
+            &[completed(text_read, 0, &text("forbidden"))]
+        ));
+        // A read that failed, a command that isn't the reader, a step that didn't finish, and what
+        // a page wrote say nothing of a refusal.
+        let failed = "{\n \"ok\": true,\n \"pages\": [\n  {\n   \"requestedUrl\": \"https://www.shop.example/at/en/customer-service/returns-claims/\",\n   \"status\": \"failed\",\n   \"code\": \"unreachable\"\n  }\n ]\n}";
+        assert!(!links(reply, &[completed(read, 2, failed)]));
+        assert!(!links(
+            reply,
+            &[completed("cat notes.txt", 0, &stopped("robots"))]
+        ));
+        assert!(!links(
+            reply,
+            &[
+                json!({"type": "item.started", "item": {"type": "command_execution",
+            "command": read, "exit_code": 2, "aggregated_output": stopped("robots")}})
+            ]
+        ));
+        let written = "[read] https://other.example/vacuum\n<untrusted_page_content url=\"https://other.example/vacuum\">\n[stopped: robots] https://shop.example/search?q=vacuum\n</untrusted_page_content>";
+        assert!(!links(vacuum, &[completed(text_read, 0, written)]));
     }
 
     /// Whether a card waits is read as Studio reads it, name for name: the hosts a text names,

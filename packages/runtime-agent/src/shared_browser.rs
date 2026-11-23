@@ -44,6 +44,12 @@ pub const APPROVAL_TIMEOUT_MS_ENV: &str = "INSTAFY_SHARED_BROWSER_APPROVAL_TIMEO
 /// controller enforces the sites and wrappers it adds on top of the bundled
 /// list; it can never remove one.
 pub const SPACE_LINK_ONLY_FILE_ENV: &str = "INSTAFY_SHARED_BROWSER_SPACE_LINK_ONLY_FILE";
+/// Set to `1` for a turn whose findings go back to the building turn
+/// (`jobs::browser_hand_back::hands_back`). Only the words of a step the person
+/// said no to depend on it ([`terminal_consent_call_result`]): the build's reply
+/// ends in the runtime's line for that step, and any other turn's reply is the
+/// person's answer, which says it.
+pub const HANDS_BACK_ENV: &str = "INSTAFY_SHARED_BROWSER_HANDS_BACK";
 pub const MCP_COMMAND: &str = "shared-browser-mcp";
 pub(crate) const DEFAULT_ACTIONS_FILE: &str = "/tmp/instafy/playwright/actions.jsonl";
 const DEFAULT_AGENT_CONTROL_FILE: &str = "/run/instafy/browser/agent-control.json";
@@ -3383,12 +3389,14 @@ fn terminal_consent_status(code: &'static str) -> JsonValue {
 
 /// A terminal consent result, with the step's kind (`activity.step`) when the
 /// controller said what the step was before it asked: the turn's line then
-/// says "you said no to a search", not "a form".
+/// says "you said no to a search", not "a form". `hands_back`: the turn's
+/// findings go back to the building turn ([`HANDS_BACK_ENV`]).
 fn terminal_consent_call_result_with_step(
     code: &'static str,
     step: Option<&'static str>,
+    hands_back: bool,
 ) -> CallToolResult {
-    let mut result = terminal_consent_call_result(code);
+    let mut result = terminal_consent_call_result(code, hands_back);
     if let Some(step) = step
         && let Some(JsonValue::Object(structured)) = result.structured_content.as_mut()
     {
@@ -3400,8 +3408,10 @@ fn terminal_consent_call_result_with_step(
 /// The result of a call that ends the run, or of any call after it. Its words
 /// are in its structured content too (`message`): a model that calls the tools
 /// one at a time, not from code, reads only that, so a sign-in pause told it
-/// only the code, and never to end the turn.
-fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
+/// only the code, and never to end the turn. `hands_back`: the turn's findings
+/// go back to the building turn ([`HANDS_BACK_ENV`]), which only a no's words
+/// depend on.
+fn terminal_consent_call_result(code: &'static str, hands_back: bool) -> CallToolResult {
     let (message, is_error) = match code {
         "human_input_required" => (
             "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.".to_string(),
@@ -3434,11 +3444,18 @@ fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
         // The person said no: the words a turn repeats in its note, and why it tries nothing
         // else. Told the run's consent was blocked and to start a fresh run, a browser part
         // repeated those words in its Details note (a local test, Nov 8). A later call reads
-        // [`terminal_consent_later_call_result`]. The runtime's one line under the reply says
-        // the step didn't happen and asks what to try instead: a turn that said so too ended a
-        // denied submit with two endings and two next steps (a local test, Nov 20).
-        "approval_denied" => (
+        // [`terminal_consent_later_call_result`]. A turn whose findings go back to the building
+        // turn says neither that the step didn't happen nor what to try: the build's reply ends
+        // in the runtime's one line for it (`jobs::end_with_the_step_not_done`). Any other turn's
+        // reply is the person's answer, and it says so itself, once: with the runtime's line
+        // under it too, a denied order ended in two endings and two next steps, though its turn
+        // was told to say neither (local tests, Nov 20 and Nov 22).
+        "approval_denied" if hands_back => (
             "The person said no, so this step didn't happen. Don't try it another way. Instafy tells them so and asks what to try instead: your reply says neither.".to_string(),
+            true,
+        ),
+        "approval_denied" => (
+            "The person said no, so this step didn't happen. Don't try it another way. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.".to_string(),
             true,
         ),
         _ => (
@@ -3470,7 +3487,8 @@ fn terminal_consent_later_call_result(code: &'static str) -> CallToolResult {
     let message = if code == "approval_denied" {
         "The person said no to an earlier step, so the browser is done for this turn. End this turn now.".to_string()
     } else {
-        let first = terminal_consent_call_result(code);
+        // Only a no's words depend on whether the turn hands back.
+        let first = terminal_consent_call_result(code, false);
         first
             .structured_content
             .as_ref()
@@ -3511,6 +3529,8 @@ struct SharedBrowserMcpServer {
     /// Steps in a row that the page changed under
     /// ([`PAGE_CHANGED_STREAK_LIMIT`]).
     page_changed_streak: Arc<AtomicU32>,
+    /// The turn's findings go back to the building turn ([`HANDS_BACK_ENV`]).
+    hands_back: bool,
 }
 
 /// Whether a step that answered starts the count of steps the page changed
@@ -3539,7 +3559,15 @@ impl SharedBrowserMcpServer {
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
             changed_after_yes: Arc::new(AtomicU32::new(0)),
             page_changed_streak: Arc::new(AtomicU32::new(0)),
+            hands_back: false,
         }
+    }
+
+    /// The server of a turn whose findings go back to the building turn, as its environment
+    /// says ([`HANDS_BACK_ENV`]).
+    fn handing_back(mut self, hands_back: bool) -> Self {
+        self.hands_back = hands_back;
+        self
     }
 
     /// Latches `code` unless a code is already latched, and answers with the
@@ -3714,7 +3742,7 @@ impl ServerHandler for SharedBrowserMcpServer {
                 Ok(if self.terminal_answered.swap(true, Ordering::SeqCst) {
                     terminal_consent_later_call_result(code)
                 } else {
-                    terminal_consent_call_result_with_step(code, step)
+                    terminal_consent_call_result_with_step(code, step, self.hands_back)
                 }
                 .into())
             }
@@ -3938,6 +3966,7 @@ pub async fn run_mcp_stdio() -> Result<()> {
     crate::mcp_process_groups::register_current_process_group()
         .context("Shared Browser MCP could not record its process group")?;
     let running = SharedBrowserMcpServer::new()
+        .handing_back(std::env::var(HANDS_BACK_ENV).is_ok_and(|value| value == "1"))
         .serve((tokio::io::stdin(), tokio::io::stdout()))
         .await
         .context("failed to start the Shared Browser MCP server")?;

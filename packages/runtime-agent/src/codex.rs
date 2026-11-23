@@ -88,8 +88,8 @@ use crate::shared_browser::{
     APPROVAL_DIR_ENV as SHARED_BROWSER_APPROVAL_DIR_ENV,
     APPROVAL_TIMEOUT_MS_ENV as SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
     BROWSER_SESSION_ENV as SHARED_BROWSER_SESSION_ENV, CDP_PORT_ENV as SHARED_BROWSER_CDP_PORT_ENV,
-    CDP_URL_ENV as SHARED_BROWSER_CDP_URL_ENV, MCP_COMMAND as SHARED_BROWSER_MCP_COMMAND,
-    PAGE_ID_ENV as SHARED_BROWSER_PAGE_ID_ENV,
+    CDP_URL_ENV as SHARED_BROWSER_CDP_URL_ENV, HANDS_BACK_ENV as SHARED_BROWSER_HANDS_BACK_ENV,
+    MCP_COMMAND as SHARED_BROWSER_MCP_COMMAND, PAGE_ID_ENV as SHARED_BROWSER_PAGE_ID_ENV,
     PLAYWRIGHT_MODULE_PATH_ENV as SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
     SPACE_LINK_ONLY_FILE_ENV as SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV,
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
@@ -344,6 +344,10 @@ pub(crate) enum CodexFallbackSummaryKind {
     /// (`jobs::refused_browser_card`). Its summary is the model's own, so
     /// `classify_internal_codex_fallback_summary` never returns it.
     RefusedBrowserCard,
+    /// The answer links a page the turn's own reader was refused and posts no `request_browser`
+    /// card (`jobs::no_card_for_a_page_it_couldnt_read`). Its summary is the model's own, so
+    /// `classify_internal_codex_fallback_summary` never returns it.
+    NoCardForAPageItCouldntRead,
 }
 
 pub(crate) fn classify_internal_codex_fallback_summary(
@@ -1167,6 +1171,12 @@ pub struct CodexRunOptions {
     pub personal_browser: bool,
     pub shared_browser: bool,
     pub shared_browser_page_id: Option<String>,
+    /// The Shared Browser turn's findings go back to the building turn
+    /// (`jobs::browser_hand_back::hands_back`): its browser's answer to a step the person said no
+    /// to tells it to say neither that the step didn't happen nor what to try, since the build's
+    /// reply ends in the runtime's line for it; any other turn's reply says so itself
+    /// (`crate::shared_browser::HANDS_BACK_ENV`).
+    pub shared_browser_hands_back: bool,
     /// A run of another chat held the Shared Browser page last: this turn
     /// starts on that chat's page (see
     /// `crate::shared_browser::page_left_by_another_conversation`). The turn
@@ -2312,6 +2322,7 @@ impl CodexClient {
                 options.personal_browser,
                 shared_browser_mode,
                 options.shared_browser_page_id.as_deref(),
+                options.shared_browser_hands_back,
                 local_browser_config.as_ref(),
                 self.workspace_dir(),
             )?;
@@ -4434,17 +4445,22 @@ fn scope_configured_mcp_server_environment(servers: &mut HashMap<String, McpServ
     }
 }
 
-/// The Shared Browser MCP relay's explicit environment: the page, the
-/// runtime's browser settings (a lazy host's CDP port, private Playwright and
-/// Node among them) and the session flag the relay checks.
+/// The Shared Browser MCP relay's explicit environment: the page, whether the
+/// turn's findings go back to the building turn (`hands_back`), the runtime's
+/// browser settings (a lazy host's CDP port, private Playwright and Node among
+/// them) and the session flag the relay checks.
 fn shared_browser_mcp_environment(
     page_id: String,
     workspace: &Path,
+    hands_back: bool,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<HashMap<String, String>> {
     let mut environment =
         HashMap::from([(SHARED_BROWSER_SESSION_ENV.to_string(), "1".to_string())]);
     environment.insert(SHARED_BROWSER_PAGE_ID_ENV.to_string(), page_id);
+    if hands_back {
+        environment.insert(SHARED_BROWSER_HANDS_BACK_ENV.to_string(), "1".to_string());
+    }
     // The space's copy of the web-research skill's link-only list: the
     // controller adds what it lists to the bundled list (it never removes).
     environment.insert(
@@ -4491,6 +4507,7 @@ fn install_browser_mcp_servers(
     personal_enabled: bool,
     shared_enabled: bool,
     shared_page_id: Option<&str>,
+    shared_hands_back: bool,
     local_browser: Option<&crate::local_browser::LocalBrowserConfig>,
     workspace: &Path,
 ) -> Result<Option<crate::mcp_process_groups::McpProcessGroupRegistry>> {
@@ -4554,7 +4571,8 @@ fn install_browser_mcp_servers(
             .parent()
             .context("runtime-agent executable has no trusted parent directory")?
             .to_path_buf();
-        let mut environment = shared_browser_mcp_environment(page_id, workspace, optional_env)?;
+        let mut environment =
+            shared_browser_mcp_environment(page_id, workspace, shared_hands_back, optional_env)?;
         let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
         environment.insert(
             crate::mcp_process_groups::REGISTRY_ENV.to_string(),
@@ -9428,12 +9446,19 @@ mod tests {
             ("RUNTIME_ACCESS_TOKEN", "runtime-secret"),
         ]);
         let workspace = Path::new("/workspace/space");
-        let environment = shared_browser_mcp_environment("page-1".to_string(), workspace, |key| {
-            lazy_environment.get(key).map(|value| value.to_string())
-        })
-        .expect("relay environment");
+        let lookup = |key: &str| lazy_environment.get(key).map(|value| value.to_string());
+        let environment =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, false, lookup)
+                .expect("relay environment");
         assert_eq!(environment[SHARED_BROWSER_SESSION_ENV], "1");
         assert_eq!(environment[SHARED_BROWSER_PAGE_ID_ENV], "page-1");
+        // Only a turn whose findings go back to the building turn says so to its browser, whose
+        // answer to a step the person said no to then tells it to say neither.
+        assert!(!environment.contains_key(SHARED_BROWSER_HANDS_BACK_ENV));
+        let handing_back =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, true, lookup)
+                .expect("relay environment");
+        assert_eq!(handing_back[SHARED_BROWSER_HANDS_BACK_ENV], "1");
         // The controller reads the space's own copy of the link-only list.
         assert_eq!(
             environment[SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV],
@@ -9456,7 +9481,8 @@ mod tests {
         assert!(!environment.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
         assert!(!environment.contains_key("RUNTIME_ACCESS_TOKEN"));
 
-        let missing = shared_browser_mcp_environment("page-1".to_string(), workspace, |_| None);
+        let missing =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, false, |_| None);
         assert!(
             missing.is_err(),
             "the trusted Playwright paths are required"

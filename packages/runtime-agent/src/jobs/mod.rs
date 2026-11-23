@@ -5101,6 +5101,36 @@ fn refused_browser_card(
         .then_some(CodexFallbackSummaryKind::RefusedBrowserCard)
 }
 
+/// An answer that links a page this turn's own reader was refused for what the site gave the
+/// reader alone (robots.txt, HTTP 403 or 429: `browser_request::links_a_page_its_reader_was_refused`)
+/// and posts no `request_browser` card, on a turn that may ask for the browser. Such a page ends
+/// in a few plain words, its link and one card the person may press (the research skill's Stops),
+/// and a policy question with search on ended in the words and the link alone: "I couldn't check
+/// the shop's return policy… You can read its returns and claims page", with nothing to open it
+/// (a local test, Nov 23). The turn runs once more, as after a refused card, on the first
+/// attempt's own thread with no new search or read, asked only for the card
+/// ([`no_card_retry_prompt`], [`refused_card_retry_options`]); its words are a true account, so
+/// they stay until the retry's replace them ([`retry_withdraws_the_first_answer`]). A turn with a
+/// card, or one that changed files, keeps its answer. A card the retry writes opens a page the
+/// reader didn't read, so it waits for the person's press
+/// (`hold_cards_for_pages_its_reader_did_not_read`), with the retry's words above it.
+fn no_card_for_a_page_it_couldnt_read(
+    job: &LeaseJob,
+    outcome: &CodexOutcome,
+    events: &[JsonValue],
+    changed_files: bool,
+) -> Option<CodexFallbackSummaryKind> {
+    let card_left = outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)));
+    (!card_left
+        && !changed_files
+        && !browser_request_unsupported(job)
+        && browser_request::links_a_page_its_reader_was_refused(&outcome.summary, &[events]))
+    .then_some(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead)
+}
+
 fn clean_decline_final_json(value: &JsonValue) -> bool {
     let Some(object) = value.as_object() else {
         return false;
@@ -8980,6 +9010,12 @@ impl JobProcessor {
             personal_browser: explicit_personal_browser_execution,
             shared_browser: explicit_shared_browser_execution,
             shared_browser_page_id,
+            // After a step the person said no to, its build's reply says so, never this turn's
+            // ([`end_on_the_persons_answer`]).
+            shared_browser_hands_back: job
+                .payload
+                .get("metadata")
+                .is_some_and(browser_hand_back::hands_back),
             shared_browser_page_left_by_other_chat,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
             reasoning_effort: sequential_job_reasoning_effort(
@@ -9737,11 +9773,20 @@ impl JobProcessor {
         )
         .await?
             == 0;
-        // An answer whose card was refused for what its task says was written for that card: the
-        // turn runs once more, unless it changed files of its own ([`refused_browser_card`]).
+        // An answer whose card was refused for what its task says was written for that card, and
+        // one that links a page its reader was refused has no card for it: the turn runs once
+        // more, unless it changed files of its own ([`refused_browser_card`],
+        // [`no_card_for_a_page_it_couldnt_read`]).
         if codex_fallback_summary_kind.is_none() {
-            codex_fallback_summary_kind =
-                refused_browser_card(job, &output.final_json, &outcome, !own_files_empty);
+            codex_fallback_summary_kind = refused_browser_card(
+                job,
+                &output.final_json,
+                &outcome,
+                !own_files_empty,
+            )
+            .or_else(|| {
+                no_card_for_a_page_it_couldnt_read(job, &outcome, &output.events, !own_files_empty)
+            });
         }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
@@ -9971,19 +10016,28 @@ impl JobProcessor {
             // The retry after a refused card fixes the card: its line and prompt name the rules
             // the card broke, and it runs on the first attempt's thread, with no search and no
             // read of its own after an attempt that searched or read
-            // ([`refused_card_retry_options`]).
+            // ([`refused_card_retry_options`]). So does the one that adds the card a page its
+            // reader was refused has none of ([`no_card_for_a_page_it_couldnt_read`]).
+            let plain_text_write = final_output_mode == RuntimeFinalOutputMode::PlainTextWrite;
             let fixes_a_refused_card = retry_reason
                 == codex_fallback_retry_reason(CodexFallbackSummaryKind::RefusedBrowserCard)
-                && final_output_mode != RuntimeFinalOutputMode::PlainTextWrite;
+                && !plain_text_write;
+            let adds_a_missing_card = retry_reason
+                == codex_fallback_retry_reason(
+                    CodexFallbackSummaryKind::NoCardForAPageItCouldntRead,
+                )
+                && !plain_text_write;
             let refused_card_rules = if fixes_a_refused_card {
                 rules_its_refused_cards_broke(&output.final_json)
             } else {
                 Vec::new()
             };
-            let first_attempt_searched_or_read = fixes_a_refused_card
+            let first_attempt_searched_or_read = (fixes_a_refused_card || adds_a_missing_card)
                 && attempt_searched_or_read(&codex_run_options, &output.events);
             let retry_message = if fixes_a_refused_card {
                 refused_card_retry_message(&refused_card_rules).to_string()
+            } else if adds_a_missing_card {
+                NO_CARD_RETRY_LINE.to_string()
             } else if personal_browser_execution_missing {
                 PERSONAL_BROWSER_NOT_USED_RETRY_STATUS.to_string()
             } else if shared_browser_execution_missing {
@@ -10132,6 +10186,9 @@ impl JobProcessor {
                         &refused_card_rules,
                         first_attempt_searched_or_read,
                     ),
+                    CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => {
+                        no_card_retry_prompt(&prompt, first_attempt_searched_or_read)
+                    }
                     CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
                     | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer => {
                         codex_fallback_retry_prompt(&prompt, kind)
@@ -10171,7 +10228,7 @@ impl JobProcessor {
                 {
                     retry_codex_run_options.disable_shell_tool = true;
                 }
-            } else if fixes_a_refused_card {
+            } else if fixes_a_refused_card || adds_a_missing_card {
                 refused_card_retry_options(
                     &mut retry_codex_run_options,
                     output_provider_conversation_state.as_ref(),
@@ -16108,7 +16165,8 @@ fn retry_status_activity(retry_reason: &str) -> Option<JsonValue> {
         | "missing_context_retrieval"
         | "missing_context_and_observation"
         // The card was never posted: to the person the turn is still at work.
-        | "refused_browser_card" => activity_labels::evidence_retry_activity(),
+        | "refused_browser_card"
+        | "no_card_for_a_page_it_couldnt_read" => activity_labels::evidence_retry_activity(),
         _ => activity_labels::runtime_status_activity("codex_retry"),
     }
 }
@@ -16123,6 +16181,9 @@ fn codex_fallback_retry_reason(kind: CodexFallbackSummaryKind) -> &'static str {
             "declined_a_turn_that_needs_an_answer"
         }
         CodexFallbackSummaryKind::RefusedBrowserCard => "refused_browser_card",
+        CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => {
+            "no_card_for_a_page_it_couldnt_read"
+        }
     }
 }
 
@@ -16141,6 +16202,7 @@ fn codex_fallback_retry_message(kind: CodexFallbackSummaryKind) -> &'static str 
         // The retry's own line names the rule its card broke ([`refused_card_retry_message`]):
         // this is the line for a card whose rules aren't known.
         CodexFallbackSummaryKind::RefusedBrowserCard => refused_card_retry_message(&[]),
+        CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => NO_CARD_RETRY_LINE,
     }
 }
 
@@ -16256,6 +16318,35 @@ fn refused_card_retry_prompt(prompt: &str, broken: &[&str], searched_or_read: bo
     )
 }
 
+/// The line under the turn as the retry that adds a missing card begins
+/// ([`no_card_for_a_page_it_couldnt_read`]).
+const NO_CARD_RETRY_LINE: &str = "Retrying: the answer links a page Octo couldn't read, with no card to open it in Instafy's browser. The retry adds only the card.";
+
+/// What the retry that adds the card of a page its reader was refused reads
+/// ([`no_card_for_a_page_it_couldnt_read`]): only the card is missing, for the page its answer
+/// links, and after an attempt that searched or read (`searched_or_read`), as every such attempt
+/// did, nothing is searched or read again: it runs on the first attempt's thread with no web
+/// search and no shell ([`refused_card_retry_options`]). Its words may stay as they were, and
+/// they never say the page is handed over or queued: the card says what happens next. A card
+/// that is refused leaves the words alone, so they stand alone.
+fn no_card_retry_prompt(prompt: &str, searched_or_read: bool) -> String {
+    let found = if searched_or_read {
+        "\n- This turn's searches and reads are done: do not search or read any page again."
+    } else {
+        ""
+    };
+    format!(
+        "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
+        - Your previous answer links a page this turn's reader couldn't read, and has no `request_browser` card for it. Add only that card: it names the page by the address your answer links and what to do there. Keep your words, with the link.{found}\n\
+        - Never say how the reader was stopped, that you hand the page to the browser or that it is queued: the card says what happens next.\n\
+        - Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused, only your words show: make them stand alone.\n\
+        - Do not send an interim progress/status update as the final assistant message.\n\
+        - Finish with exactly one final assistant message that is valid JSON matching the required schema.\n\
+        - Include a concrete `summary`, and include any `files` entries that describe the actual workspace changes.\n\n\
+        Write the answer and its card now."
+    )
+}
+
 /// The options of the retry after a refused card ([`refused_card_retry_prompt`]): the first
 /// attempt's own thread, which holds what that attempt searched and read and the answer whose card
 /// was refused. After an attempt that searched or read (`searched_or_read`,
@@ -16300,6 +16391,9 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         CodexFallbackSummaryKind::RefusedBrowserCard => {
             return refused_card_retry_prompt(prompt, &[], true);
         }
+        CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => {
+            return no_card_retry_prompt(prompt, true);
+        }
     };
     let observation_requirement = match kind {
         CodexFallbackSummaryKind::MissingFinalAssistantMessage => {
@@ -16307,7 +16401,8 @@ fn codex_fallback_retry_prompt(prompt: &str, kind: CodexFallbackSummaryKind) -> 
         }
         CodexFallbackSummaryKind::InvalidFinalAssistantMessageJson
         | CodexFallbackSummaryKind::DeclinedATurnThatNeedsAnAnswer
-        | CodexFallbackSummaryKind::RefusedBrowserCard => "",
+        | CodexFallbackSummaryKind::RefusedBrowserCard
+        | CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => "",
     };
     format!(
         "{prompt}\n\nIMPORTANT RETRY REQUIREMENT:\n\
@@ -16866,6 +16961,12 @@ fn codex_fallback_failure_message(kind: CodexFallbackSummaryKind, summary: &str)
         // is left out, and its words stand.
         CodexFallbackSummaryKind::RefusedBrowserCard => {
             "Codex's browser card named no page it opens, or held an e-mail address, again after retry."
+                .to_string()
+        }
+        // Never a retry's own kind either (`no_card_for_a_page_it_couldnt_read` reads the first
+        // answer only): the retry's words stand, with or without a card.
+        CodexFallbackSummaryKind::NoCardForAPageItCouldntRead => {
+            "Codex's answer linked a page its reader was refused with no browser card for it, again after retry."
                 .to_string()
         }
     }
@@ -17446,8 +17547,9 @@ fn apply_terminal_shared_browser_summary(
 /// The runtime's line for that step ([`terminal_shared_browser_summary`]) goes
 /// under its words, unless a build answers after it
 /// (`browser_hand_back::its_build_answers`): that build's reply ends in the
-/// same line ([`end_with_the_step_not_done`]). Replaced with that line, the words of a turn that
-/// had read what it was asked reached no one, and held back as a pause, the
+/// same line ([`end_with_the_step_not_done`]). Nor does it after a no in a turn
+/// whose words say it ([`says_the_persons_no_itself`]). Replaced with that line, the words of a
+/// turn that had read what it was asked reached no one, and held back as a pause, the
 /// page its message asked for was never made (a local test, Nov 19).
 fn end_on_the_persons_answer(
     job: &LeaseJob,
@@ -17461,9 +17563,29 @@ fn end_on_the_persons_answer(
         summary.clear();
     }
     browser_hand_back::add_the_pages_it_opened(summary, pages);
-    if !browser_hand_back::its_build_answers(job.payload.get("metadata"), summary) {
+    let metadata = job.payload.get("metadata");
+    if !browser_hand_back::its_build_answers(metadata, summary)
+        && !says_the_persons_no_itself(metadata, summary, code)
+    {
         browser_hand_back::add_under_the_words(summary, terminal_shared_browser_summary(code));
     }
+}
+
+/// Whether a turn's own words end it after the person said no to one of its steps
+/// (`approval_denied`), with no line of the runtime's under them: its findings don't go back to
+/// the building turn, so its reply is the person's answer, and its browser's answer to that step
+/// told it to say once that nothing from it was sent and to ask what to try instead
+/// (`shared_browser::HANDS_BACK_ENV`). Under the runtime's line, which the turn was told to leave
+/// to it, a denied order ended twice, in the turn's words ("it was not submitted because the
+/// submit step was declined… let me know if you want to try again") and then the runtime's
+/// (local tests, Nov 20 and Nov 22). The step's row still says it ("you said no to a click"). A
+/// turn that wrote no words of its own ends in the runtime's line alone, and one whose findings
+/// go back to the building turn, told to say neither, keeps the line where no build answers
+/// after it.
+fn says_the_persons_no_itself(metadata: Option<&JsonValue>, summary: &str, code: &str) -> bool {
+    code == "approval_denied"
+        && !metadata.is_some_and(browser_hand_back::hands_back)
+        && !browser_hand_back::words_of(summary).is_empty()
 }
 
 /// Ends the reply of the build after a browser part whose step a person's answer to its prompt
@@ -33254,6 +33376,140 @@ mod tests {
         );
     }
 
+    /// A page the turn's own reader couldn't read ends with its waiting card in every search
+    /// state. With search on, a policy question beside an order number read the shop's returns
+    /// page, was refused by its robots.txt, and ended "I couldn't check the shop's return policy…
+    /// You can read its returns and claims page" with no card, so no retry ran and nothing opened
+    /// the page (a local test, Nov 23). An answer that links a page its reader was refused for
+    /// what the site gave the reader alone, and posts no card, now runs once more, as after a
+    /// refused card: unbilled, on the first attempt's thread, with no new search or read, asked
+    /// only for the card. Its words stay while the retry runs, as a true account, and the line
+    /// under the turn reads "Working…". The card the retry writes waits for the person's press,
+    /// with the words above it. A turn with a card is untouched, and so are one that changed
+    /// files, one that may not ask for the browser, one whose reply links no such page, and a
+    /// sign-in page's link.
+    #[test]
+    fn an_answer_that_links_a_page_its_reader_was_refused_runs_once_more_for_its_card() {
+        let request = "My email is ana@example.com and my order is 123-4567. What is the shop's return policy for it?";
+        let page = "https://www.shop.example/at/en/customer-service/returns-claims/";
+        let job = chat_turn(json!([]), request, 1);
+        let read = |code: &str| {
+            json!({"type": "item.completed", "item": {
+                "type": "command_execution",
+                "command": format!("instafy web read {page} --json --find 'return policy returns refund order'"),
+                "exit_code": 2, "status": "completed",
+                "aggregated_output": format!(
+                    "{{\n \"ok\": true,\n \"pages\": [\n  {{\n   \"requestedUrl\": \"{page}\",\n   \"status\": \"stopped\",\n   \"code\": \"{code}\",\n   \"tell\": \"This address only (and where it redirected): don't read it another way. Give the person the plain link.\"\n  }}\n ]\n}}\n"
+                ),
+            }})
+        };
+        let words = format!(
+            "I couldn't check the shop's return policy, so I can't confirm how it applies to your order. You can read the shop's [returns and claims page]({page})."
+        );
+        let answer = |actions: JsonValue| json!({"summary": words, "code": null, "files": [], "actions": actions});
+        let card = json!([{
+            "type": "request_browser",
+            "task": format!("Open {page} and read the return policy that may apply to an order."),
+        }]);
+        let kind = |job: &LeaseJob, raw: &JsonValue, events: &[JsonValue], changed_files: bool| {
+            let outcome = extract_codex_outcome(raw).expect("extract outcome");
+            refused_browser_card(job, raw, &outcome, changed_files).or_else(|| {
+                no_card_for_a_page_it_couldnt_read(job, &outcome, events, changed_files)
+            })
+        };
+        let no_card = answer(json!([]));
+        let robots = [read("robots")];
+        let missing = Some(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead);
+        assert_eq!(kind(&job, &no_card, &robots, false), missing);
+        assert_eq!(kind(&job, &no_card, &[read("forbidden")], false), missing);
+        // A turn with a card is untouched, and so is one that changed files or may not ask for
+        // the browser.
+        assert_eq!(kind(&job, &answer(card.clone()), &robots, false), None);
+        assert_eq!(kind(&job, &no_card, &robots, true), None);
+        let browser_turn = test_lease_job(
+            Some("feature"),
+            json!({"metadata": {"browserTransport": "shared"}}),
+        );
+        assert_eq!(kind(&browser_turn, &no_card, &robots, false), None);
+        // A reply that links no page its reader was refused, and a sign-in page, which gets only
+        // its link.
+        let unlinked = json!({"summary": "I couldn't check the shop's return policy.", "files": [], "actions": []});
+        assert_eq!(kind(&job, &unlinked, &robots, false), None);
+        assert_eq!(kind(&job, &no_card, &[read("login")], false), None);
+        assert_eq!(kind(&job, &no_card, &[], false), None);
+
+        // The retry: "Working…", the first answer's words kept as it begins, only the card asked
+        // for, never "queued", and no new search or read after the attempt's read, with search on.
+        let reason =
+            codex_fallback_retry_reason(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead);
+        assert_eq!(reason, "no_card_for_a_page_it_couldnt_read");
+        assert_eq!(
+            retry_status_activity(reason),
+            activity_labels::evidence_retry_activity()
+        );
+        assert!(!retry_withdraws_the_first_answer(missing, false));
+        assert_eq!(
+            codex_fallback_retry_message(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead),
+            NO_CARD_RETRY_LINE
+        );
+        assert!(
+            !NO_CARD_RETRY_LINE.contains("browser card"),
+            "{NO_CARD_RETRY_LINE}"
+        );
+        let retry = no_card_retry_prompt("Latest user request: the return policy", true);
+        for words in [
+            "Your previous answer links a page this turn's reader couldn't read, and has no `request_browser` card for it. Add only that card: it names the page by the address your answer links and what to do there. Keep your words, with the link.",
+            "This turn's searches and reads are done: do not search or read any page again.",
+            "Never say how the reader was stopped, that you hand the page to the browser or that it is queued: the card says what happens next.",
+            "Never put the person's details, such as an order number or an e-mail address, in a card. If this card is refused, only your words show: make them stand alone.",
+        ] {
+            assert!(retry.contains(words), "{words}\n{retry}");
+        }
+        for gone in [
+            "search first",
+            "Retry the latest user request",
+            "do that tool work first",
+        ] {
+            assert!(!retry.contains(gone), "{gone}");
+        }
+        assert_eq!(
+            codex_fallback_retry_prompt(
+                "Latest user request: the return policy",
+                CodexFallbackSummaryKind::NoCardForAPageItCouldntRead
+            ),
+            retry
+        );
+        use crate::managed_web_search::{ManagedWebSearch, SEARCHES_PER_MESSAGE};
+        let first = CodexRunOptions {
+            managed_web_search: Some(Arc::new(ManagedWebSearch::new(SEARCHES_PER_MESSAGE))),
+            persist_conversation_thread: true,
+            require_first_tool_call: true,
+            ..Default::default()
+        };
+        assert!(attempt_searched_or_read(&first, &robots));
+        let mut options = first.clone();
+        refused_card_retry_options(&mut options, None, true);
+        assert!(
+            options.disable_native_web_search
+                && options.disable_shell_tool
+                && options.disable_local_browser,
+            "no new search or read"
+        );
+
+        // The retry's card opens the page its reader was refused: it waits for the person's
+        // press, and the words stay above it, one card in all.
+        let mut retried = extract_codex_outcome(&answer(card)).expect("extract outcome");
+        hold_cards_for_pages_its_reader_did_not_read(&mut retried, &[&robots]);
+        post_only_the_card(&job, &mut retried);
+        assert_eq!(retried.summary, words);
+        let posted = build_final_messages_from_outcome(&retried, None);
+        assert_eq!(posted.len(), 1, "{posted:?}");
+        assert_eq!(
+            posted[0].metadata.as_ref().unwrap()["details"]["browserRequest"]["waitsForThePerson"],
+            json!(true)
+        );
+    }
+
     /// The retry after a refused card runs on the first attempt's own thread, which holds what
     /// that attempt searched and read and the answer whose card was refused, with no web search
     /// of the AI's own and no shell for `instafy web read` or `instafy web search`: it adds no
@@ -34975,7 +35231,10 @@ mod tests {
 
             // Under a controller that hands such a turn back, the answer ended that step, not
             // the turn: a question's turn keeps its own words, and the line under them always
-            // says the step didn't happen; a fallback in place of its words reads the line alone.
+            // says a prompt that ran out or a page that changed after the yes. After a no, the
+            // step's own answer asked the turn to say it once, so its words end it alone, and
+            // the step's row says it too ("you said no to a click"). A fallback in place of its
+            // words reads the line alone.
             let question = test_lease_job(
                 Some("feature"),
                 json!({
@@ -34984,14 +35243,21 @@ mod tests {
                 }),
             );
             assert!(browser_hand_back::ends_only_its_step(&question, code));
-            let mut words = "Done — the requested browser action succeeded.".to_string();
-            let mut no_fallback = None;
-            end_on_the_persons_answer(&question, &mut words, &mut no_fallback, code, &[]);
-            assert_eq!(
-                words,
-                format!("Done — the requested browser action succeeded.\n\n{expected}"),
-                "terminal consent must always say the step didn't happen"
-            );
+            if code == "approval_denied" {
+                let said = "I filled in the order, but nothing was sent: you said no to sending it. What would you like me to try instead?";
+                let mut words = said.to_string();
+                end_on_the_persons_answer(&question, &mut words, &mut None, code, &[]);
+                assert_eq!(words, said, "one ending, in the turn's words");
+            } else {
+                let mut words = "Done — the requested browser action succeeded.".to_string();
+                let mut no_fallback = None;
+                end_on_the_persons_answer(&question, &mut words, &mut no_fallback, code, &[]);
+                assert_eq!(
+                    words,
+                    format!("Done — the requested browser action succeeded.\n\n{expected}"),
+                    "terminal consent must always say the step didn't happen"
+                );
+            }
             let mut summary = "internal no-final fallback".to_string();
             let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
             end_on_the_persons_answer(&question, &mut summary, &mut fallback, code, &[]);
@@ -35143,7 +35409,8 @@ mod tests {
             assert_eq!(artifact["metadata"]["step"], "search");
             assert_eq!(artifact["metadata"]["host"], "transit.example");
 
-            // A question's turn answers the person: its words, then the line.
+            // A question's turn answers the person: its words, then the line, but after a no,
+            // which its words say themselves, as the step's answer asked.
             let question = test_lease_job(
                 Some("feature"),
                 json!({
@@ -35153,7 +35420,13 @@ mod tests {
             );
             let mut summary = answer.clone();
             end_on_the_persons_answer(&question, &mut summary, &mut None, code, &[]);
-            assert_eq!(summary, format!("{words}\n\n{line}\n\n{lines}"), "{code}");
+            let posted = if code == "approval_denied" {
+                assert_eq!(summary, answer, "{code}: its answer as it wrote it");
+                words.to_string()
+            } else {
+                assert_eq!(summary, format!("{words}\n\n{line}\n\n{lines}"), "{code}");
+                format!("{words}\n\n{line}")
+            };
             let mut execution = JobExecution {
                 summary,
                 suggested_replies: Vec::new(),
@@ -35165,7 +35438,7 @@ mod tests {
                 final_messages: Vec::new(),
             };
             browser_hand_back::move_findings_into_details(&question, &mut execution);
-            assert_eq!(execution.summary, format!("{words}\n\n{line}"));
+            assert_eq!(execution.summary, posted, "{code}");
         }
     }
 
@@ -35278,13 +35551,14 @@ mod tests {
 
     /// One ending for a step that didn't run, in one voice: the build after a browser part whose
     /// step a person's answer ended has the runtime's own line for that answer under its reply,
-    /// once, as a browser turn with no build after it has. The build is asked only to write "not
-    /// checked" where that step's value would go and never to try it again: asked to say which
-    /// step didn't run and to offer to ask again, an expired prompt's build wrote "the browser's
-    /// form step wasn't completed because it received no answer, so those reviews remain not
-    /// checked", with no offer (a local test, Nov 20). And a denied turn with no build after
-    /// it says it once: its own account and next step ("submit the order on the page yourself")
-    /// came right above the runtime's, which read "Tell Octo what to try instead."
+    /// once, as a browser turn with no build after it has for a prompt that ran out. The build is
+    /// asked only to write "not checked" where that step's value would go and never to try it
+    /// again: asked to say which step didn't run and to offer to ask again, an expired prompt's
+    /// build wrote "the browser's form step wasn't completed because it received no answer, so
+    /// those reviews remain not checked", with no offer (a local test, Nov 20). And a denied turn
+    /// with no build after it says it once, in its own words: with the runtime's line under
+    /// them, its own account and next step ("submit the order on the page yourself") came right
+    /// above the runtime's (local tests, Nov 20 and Nov 22).
     #[test]
     fn a_step_that_didnt_run_ends_a_reply_in_the_runtimes_one_line() {
         let expired = "Your OK didn't come in time, so I didn't do that step. Send a message when you're ready and I'll ask again.";
@@ -35361,8 +35635,13 @@ mod tests {
             assert_eq!(summary, reply);
         }
 
-        // A denied turn with no build after it: its words, then the line, once; a turn that
-        // wrote the line itself has it once too.
+        // A denied turn with no build after it ends once, in its own words, which say that
+        // nothing was sent and ask what to try instead, as the step's answer asked
+        // (`shared_browser`'s `mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result`):
+        // with the runtime's line under them, its own account and next step came right above
+        // Instafy's. A turn that wrote the line itself has it once. With no words of its own,
+        // the line stands alone; a part whose findings go back to the building turn was told to
+        // say neither, and the line goes under its words where no build answers after it.
         let question = test_lease_job(
             Some("feature"),
             json!({
@@ -35370,17 +35649,107 @@ mod tests {
                 "metadata": { "browserTransport": "shared" },
             }),
         );
-        let words = "I filled in the order form with a medium pizza and the delivery time.";
+        let words = "I filled in the order form with a medium pizza and the delivery time, but it wasn't sent: you said no to sending it. What would you like to try instead?";
         for wrote in [words.to_string(), format!("{words}\n\n{denied}")] {
-            let mut summary = wrote;
+            let mut summary = wrote.clone();
             end_on_the_persons_answer(&question, &mut summary, &mut None, "approval_denied", &[]);
-            assert_eq!(summary, format!("{words}\n\n{denied}"));
+            assert_eq!(summary, wrote);
         }
+        let order = r#"{"url":"https://forms.example/order","title":"Order","facts":["The form has a Submit order button."]}"#;
+        let mut summary = order.to_string();
+        end_on_the_persons_answer(&question, &mut summary, &mut None, "approval_denied", &[]);
+        assert_eq!(summary, format!("{denied}\n\n{order}"));
+        let part = browser_then_build_job();
+        let mut summary = words.to_string();
+        end_on_the_persons_answer(&part, &mut summary, &mut None, "approval_denied", &[]);
+        assert_eq!(summary, format!("{words}\n\n{denied}"));
         assert!(!denied.contains("Octo"), "{denied}");
-        // Nothing the turn reads asks it for an ending of its own: its run instructions say only
-        // that the step is final (`codex`'s `a_step_that_ran_out_of_its_own_time_goes_on_from_a_snapshot`),
-        // and the step's own answer says that Instafy tells the person
-        // (`shared_browser`'s `mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result`).
+        // Nothing else the turn reads asks it for an ending of its own: its run instructions say
+        // only that the step is final (`codex`'s `a_step_that_ran_out_of_its_own_time_goes_on_from_a_snapshot`).
+    }
+
+    /// One ending after a Deny. A form's browser turn with no build after it filled in a test
+    /// order, the person said no to its submit, and the reply ended twice: the turn's "it was not
+    /// submitted because the submit step was declined… let me know if you want to try again",
+    /// then Instafy's "You said no, so that step didn't happen, and nothing from it was sent.
+    /// Tell me what to try instead." (local tests, Nov 20 and Nov 22). Its browser now tells it
+    /// to say that once (`shared_browser::HANDS_BACK_ENV` unset), and it ends in its own words:
+    /// the person reads them alone, and the step's row still says "you said no to a click". A
+    /// build's reply after a part's Deny keeps the runtime's line, since the build writes about
+    /// the page, and the part was told to say neither.
+    #[test]
+    fn a_deny_in_a_browser_only_turn_ends_once_in_octos_words() {
+        let form = test_lease_job(
+            Some("feature"),
+            json!({
+                "browser_hand_back_after_a_prompt": true,
+                "metadata": { "browserTransport": "shared" },
+            }),
+        );
+        assert!(!browser_hand_back::hands_back(&form.payload["metadata"]));
+        let words = "I filled in the made-up medium pizza order with extra cheese, a delivery time and instructions, but nothing was sent: you said no to submitting it. What would you like me to try instead?";
+        let page = r#"{"url":"https://forms.example/post","title":"Order","facts":["The form has a Submit order button."]}"#;
+        let missing = r#"{"missing":[]}"#;
+        let mut summary = format!("{words}\n{page}\n{missing}");
+        end_on_the_persons_answer(
+            &form,
+            &mut summary,
+            &mut None,
+            "approval_denied",
+            &["https://forms.example/post".to_string()],
+        );
+        let click = step_that_ended_the_run(
+            "approval_denied",
+            json!({ "step": "click", "host": "forms.example", "approval": "denied" }),
+        );
+        let mut execution = JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: Vec::new(),
+            provider_conversation_state: None,
+            messages: vec![click],
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        browser_hand_back::move_findings_into_details(&form, &mut execution);
+        assert_eq!(execution.summary, words, "one ending, in Octo's words");
+        assert!(!execution.summary.contains("Tell me what to try instead"));
+        // The step's own facts say the no, from its code, whatever the reply says: the turn's
+        // row and done line read "you said no to a click" from them.
+        let facts = crate::shared_browser_activity::browser_step_facts(
+            "click",
+            Some(&json!({ "index": 4, "snapshotId": "snap" })),
+            None,
+            Some("approval_denied"),
+            &mut Some("forms.example".to_string()),
+        )
+        .expect("a browser step");
+        assert_eq!(facts["approval"], "denied");
+        assert_eq!(facts["step"], "click");
+
+        // The build after a part whose step the person said no to ends in the runtime's line.
+        let denied = "You said no, so that step didn't happen, and nothing from it was sent. Tell me what to try instead.";
+        let build = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Continue with the browser's findings.",
+                "metadata": { "browserHandBack": {
+                    "version": 1,
+                    "verified": true,
+                    "reply": "",
+                    "personRequest": "Fill in the order and send it, then put it on a page.",
+                    "findings": [{ "url": "https://forms.example/post", "title": "Order" }],
+                    "stepNotDone": { "answer": "denied", "step": "click", "host": "forms.example" },
+                } },
+            }),
+        );
+        let mut reply = "Made the order page from the form's fields.".to_string();
+        end_with_the_step_not_done(&build, &mut reply);
+        assert_eq!(
+            reply,
+            format!("Made the order page from the form's fields.\n\n{denied}")
+        );
     }
 
     /// The run's artifact names the step that ended it, never a later call, which asked the
