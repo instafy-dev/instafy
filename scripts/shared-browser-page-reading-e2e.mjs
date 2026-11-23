@@ -1026,6 +1026,9 @@ day.addEventListener("input", () => {
 });
 calendar.addEventListener("mousedown", (event) => event.preventDefault());
 </script>`;
+// The same day field saying only that it opens something
+// (aria-haspopup="true"), as many do, while it names its calendar.
+const PLAIN_NAMED_CALENDAR = NAMED_CALENDAR.replace('aria-haspopup="dialog"', 'aria-haspopup="true"');
 // A box that names the list it filters (aria-controls), 50 rows of plain
 // text, over 170 links and a form. Once the box was ticked and kept the
 // focus, every reading listed the rows as controls, first, and left the
@@ -1263,6 +1266,7 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/plain-rows": page("Journey planner", PLAIN_ROWS),
       "site.test /reading/row-controls": page("Journey planner", ROW_CONTROLS),
       "site.test /reading/named-calendar": page("Journey planner", NAMED_CALENDAR),
+      "site.test /reading/plain-named-calendar": page("Journey planner", PLAIN_NAMED_CALENDAR),
       "site.test /reading/ticked-list": page("Stops", TICKED_LIST),
       "site.test /reading/filtered-list": page("Stations", FILTERED_LIST),
       "site.test /reading/moving-link": page("Museum", MOVING_LINK),
@@ -2311,6 +2315,14 @@ export async function runSharedBrowserPageReadingFixture() {
       typedNamedDay.interactiveElements.map((entry) => entry.label), ["Day", "Plan journey"],
       "a named calendar's weeks were listed as controls",
     );
+    // The calendar of a day field that says only that it opens something is
+    // no list that opened empty either: a route turn would read those words
+    // as a planner's stop list that failed.
+    reading = await read("/reading/plain-named-calendar");
+    const typedPlainDay = await ok("POST", "/v1/type", { index: control(reading, "Day").index, snapshotId: reading.snapshotId, text: "20.11.2026" });
+    assert.equal(await runPage.evaluate(() => document.getElementById("day").getAttribute("aria-expanded")), "true", "the calendar never said it opened");
+    assert.doesNotMatch(typedPlainDay.done, /suggestion/u, `a named calendar was said to be a list with no suggestion: ${typedPlainDay.done}`);
+    assert.equal(typedPlainDay.emptyList, undefined, "an open calendar was said to be a list that opened");
     // A stop's row that holds two controls is named by the one that draws
     // the stop, not the "Save" before it, with the index a click takes: the
     // stop is chosen once, with the focus left in the field, and nothing is

@@ -2676,11 +2676,12 @@ answers with: "Typed 7 characters into
 (index 5). Click one. Nothing was sent yet." A field whose list opened and
 stayed empty (the field, or the combobox it sits in, still says
 `aria-expanded="true"` after the whole 3 seconds, for a popup that is no dialog
-or grid, and no row of its list shows) says so, then the page's requests that
-failed from the first key to the end of the look, by site and the browser's
-reason: what its own code asks for (fetch, XHR, an event stream, a socket), its
-scripts and frames, never a picture, a style or a font, nor a request the page
-dropped itself (`net::ERR_ABORTED`). The result keeps them too
+or grid and no list it names that is one or holds a grid or a table, as a day
+field's calendar does, and no row of its list shows) says so, then the page's
+requests that failed from the first key to the end of the look, by site and the
+browser's reason: what its own code asks for (fetch, XHR, an event stream, a
+socket), its scripts and frames, never a picture, a style or a font, nor a
+request the page dropped itself (`net::ERR_ABORTED`). The result keeps them too
 (`emptyList.notLoaded`, each by kind, site and reason, never a path or query):
 "… Its list opened, but no suggestion came within 3 s. Meanwhile, these
 failed: a request to api.example (net::ERR_TUNNEL_CONNECTION_FAILED). Nothing

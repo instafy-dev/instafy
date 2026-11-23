@@ -3078,7 +3078,9 @@ const MAX_FIELD_LIST_NAME_CHARS = 80;
 // the page's own that a filter box names. `listOf(field, true)` leaves that
 // last check out: what stood at the field before a step typed. It answers too
 // whether the field, or the combobox it sits in, says its list is open now
-// (`expanded`: aria-expanded is "true", for a popup that is no dialog or grid).
+// (`expanded`: aria-expanded is "true", for a popup that is no dialog or grid,
+// and no list it names is one or holds a grid or a table: a day field's
+// calendar).
 // `focusedField` is the focused element when a person types text into it (a
 // box that is ticked is none, whatever it names). `standIns(rows, elements,
 // fields)` gives, for each row, the element of `elements` that stands for it:
@@ -3202,6 +3204,14 @@ function fieldListRulesInPage() {
       const active = activeId ? byId(activeId) : null;
       if (active) named.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
       if (node === combobox && combobox !== field) answer.lists.push(combobox);
+    }
+    // Nor is a list it names that is a dialog or a grid, or holds a grid or a
+    // table: a day field's calendar, where the field says only that it opens
+    // something.
+    if (answer.expanded && named.some((list) =>
+      ["dialog", "alertdialog", "grid"].includes(String(list.getAttribute("role") || "").toLowerCase().trim()) ||
+      list.querySelector("[role=grid], table") !== null)) {
+      answer.expanded = false;
     }
     answer.lists.unshift(...named);
     const plain = (list) => {
