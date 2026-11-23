@@ -1338,6 +1338,15 @@ fn given_sites_in_text(text: &str) -> Vec<String> {
 /// address, each site name with a path written without one, read as `https`, and, with
 /// `bare_sites`, each site's name written alone, read as its root.
 fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
+    addresses_named_in(text, bare_sites)
+        .into_iter()
+        .map(|(_, url)| url)
+        .collect()
+}
+
+/// The addresses `text` names, as [`urls_named_in`] reads them, each with where it is written
+/// in `text` (its byte range, without the sentence's marks around it).
+fn addresses_named_in(text: &str, bare_sites: bool) -> Vec<(std::ops::Range<usize>, reqwest::Url)> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -1363,16 +1372,26 @@ fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
             )
     };
     let mut urls = Vec::new();
-    for word in text[..end].split(delimiter) {
+    let scanned = &text[..end];
+    for word in scanned.split(delimiter) {
+        // Where the word starts in `text`: `split` hands back slices of it.
+        let at = word.as_ptr() as usize - scanned.as_ptr() as usize;
         let lower = word.to_ascii_lowercase();
         let scheme_at = ["http://", "https://"]
             .iter()
             .filter_map(|scheme| lower.find(scheme))
             .min();
         let address = match scheme_at {
-            Some(start) => reqwest::Url::parse(address_end(&word[start..])).ok(),
+            Some(start) => {
+                let written = address_end(&word[start..]);
+                reqwest::Url::parse(written)
+                    .ok()
+                    .map(|url| (at + start..at + start + written.len(), url))
+            }
             None if !word.contains("://") => {
-                let word = address_end(word.trim_start_matches('('));
+                let opened = word.trim_start_matches('(');
+                let start = word.len() - opened.len();
+                let word = address_end(opened);
                 let host = word.split('/').next().unwrap_or_default();
                 let labels: Vec<&str> = host.split('.').collect();
                 let site_name = (bare_sites || word.contains('/'))
@@ -1389,12 +1408,206 @@ fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
                 site_name
                     .then(|| reqwest::Url::parse(&format!("https://{word}")).ok())
                     .flatten()
+                    .map(|url| (at + start..at + start + word.len(), url))
             }
             None => None,
         };
         urls.extend(address);
     }
     urls
+}
+
+/// Whether an address is on a public site by its name: not an IP address, nor a local name
+/// (`localhost`, a single label, `*.local`, `*.internal` …). The controller script refuses no
+/// such address as one nobody gave (`refuseUngivenAddress`): the browser's own network rules
+/// judge it.
+fn on_a_public_site(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !(host.starts_with('[')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.contains('.')
+        || [
+            ".localhost",
+            ".local",
+            ".internal",
+            ".lan",
+            ".home",
+            ".intranet",
+            ".localdomain",
+            ".arpa",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix)))
+}
+
+/// A card's task with its site's home page in place of each address of it that nothing gave the
+/// turn that wrote it (`given`: the fingerprints of the turn's record, [`given_address_key`]), or
+/// None when it names none. The browser takes every address a card's task names as given
+/// ([`given_addresses_from_payload`]): a reply's card carried a product address no page had
+/// given, which the browser would have opened as the shop's own page. A site's root stays, as it
+/// always opens, and so does an address on no public site by its name ([`on_a_public_site`]). An
+/// address is replaced where it is written, so the rest of the task keeps its words.
+pub(crate) fn with_home_pages_where_not_given(
+    task: &str,
+    given: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut written = String::with_capacity(task.len());
+    let mut at = 0;
+    for (span, url) in addresses_named_in(task, false) {
+        let Some(key) = given_address_key(&url) else {
+            continue;
+        };
+        let root = given_site_and_path(&url).is_some_and(|(_, path)| path == "/");
+        if root || !on_a_public_site(&url) || given.contains(&key) {
+            continue;
+        }
+        written.push_str(&task[at..span.start]);
+        written.push_str(&url.origin().ascii_serialization());
+        written.push('/');
+        at = span.end;
+    }
+    if at == 0 {
+        return None;
+    }
+    written.push_str(&task[at..]);
+    Some(written)
+}
+
+/// The variable that names a turn's record of the addresses it was given (`instafy web read`'s
+/// `TURN_GIVEN_ENV`): a folder of the job's own, outside the workspace. The runtime starts it
+/// with [`TURN_GIVEN_SEED`] before the turn starts ([`given_addresses_for_a_turn`]) and adds the
+/// pages each of the AI's own web searches found ([`keep_what_a_search_found`]); `instafy web
+/// read` adds each page it reads (its own address, its links and the addresses its text spells
+/// out) and `instafy web search` its results, each in files of their own, so no writer waits for
+/// another. The reader reads no address past a site's root that the record doesn't hold, and a
+/// card's task names its site's home page in place of one ([`with_home_pages_where_not_given`]).
+/// Kept as [`given.json`](GIVEN_ADDRESSES_FILE) keeps a run's: fingerprints, never an address.
+pub(crate) const TURN_GIVEN_ENV: &str = "INSTAFY_TURN_GIVEN_DIR";
+/// The record's first file, the runtime's: without it there is no record, and the reader refuses
+/// nothing.
+pub(crate) const TURN_GIVEN_SEED: &str = "seed.json";
+/// The most files of a turn's record read, the seed first, and the largest one read.
+const MAX_TURN_GIVEN_FILES: usize = 1_000;
+const MAX_TURN_GIVEN_FILE_BYTES: u64 = 512 * 1024;
+
+/// What a turn of `chat` starts its record of given addresses with: the addresses and sites its
+/// request and its chat's history name ([`given_addresses_from_payload`]), and what the chat's
+/// earlier turns on this runtime were given, its browser runs' and its other turns' alike
+/// ([`keep_a_turns_given_addresses_for_its_chat`]).
+pub(crate) fn given_addresses_for_a_turn(payload: &JsonValue, chat: Option<Uuid>) -> Vec<String> {
+    given_addresses_for_a_turn_at(&approval_dir_path(), payload, chat)
+}
+
+/// [`given_addresses_for_a_turn`], with the chats' records kept under `approval_dir`.
+fn given_addresses_for_a_turn_at(
+    approval_dir: &Path,
+    payload: &JsonValue,
+    chat: Option<Uuid>,
+) -> Vec<String> {
+    let earlier = chat
+        .map(|chat| given_addresses_of(approval_dir, chat))
+        .unwrap_or_default();
+    newest_given_addresses(
+        earlier
+            .into_iter()
+            .chain(given_addresses_from_payload(payload)),
+    )
+}
+
+/// Keeps what a turn of `chat` was given (its record's fingerprints, oldest first) for the chat's
+/// next turns and browser runs on this runtime: a card's browser run opens a page the card's own
+/// turn read or found by a search, and the chat's next turn reads it again.
+pub(crate) fn keep_a_turns_given_addresses_for_its_chat(chat: Uuid, addresses: Vec<String>) {
+    remember_given_addresses(&approval_dir_path(), chat, addresses);
+}
+
+/// Writes one file of a turn's record (`name`, in the record's folder `dir`): `addresses`, as
+/// fingerprints. The file is published whole, under a temporary name the reader skips first.
+pub(crate) fn write_turn_given(dir: &Path, name: &str, addresses: &[String]) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({ "version": 1, "addresses": addresses }))?;
+    let temporary = dir.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
+    std::fs::write(&temporary, payload)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    std::fs::rename(&temporary, dir.join(name)).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })?;
+    Ok(())
+}
+
+/// Every fingerprint a turn's record holds (`dir`), the seed's first, or None when it has no seed.
+pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".json") && name != TURN_GIVEN_SEED)
+        .collect();
+    names.sort();
+    names.insert(0, TURN_GIVEN_SEED.to_string());
+    names.truncate(MAX_TURN_GIVEN_FILES);
+    let mut addresses = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        let record = std::fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_TURN_GIVEN_FILE_BYTES)
+            .and_then(|_| std::fs::read(&path).ok())
+            .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
+            .filter(|record| record.get("version") == Some(&json!(1)));
+        let Some(entries) = record
+            .as_ref()
+            .and_then(|record| record.get("addresses"))
+            .and_then(JsonValue::as_array)
+        else {
+            if name == TURN_GIVEN_SEED {
+                return None;
+            }
+            continue;
+        };
+        addresses.extend(
+            entries
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .filter(|address| {
+                    address.len() == 32
+                        && address
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                .map(str::to_string),
+        );
+    }
+    Some(addresses)
+}
+
+/// Keeps the pages one of the AI's own web searches found (`results`, its `url` entries, as the
+/// search bridge and a person's own login's search answer) in the turn's record (`dir`), so the
+/// turn reads them with `instafy web read`. A result gives its own address, never its site.
+pub(crate) fn keep_what_a_search_found(dir: &Path, results: &[JsonValue]) {
+    let mut addresses: Vec<String> = Vec::new();
+    for key in results
+        .iter()
+        .filter_map(|result| result.get("url").and_then(JsonValue::as_str))
+        .filter_map(|url| reqwest::Url::parse(url.trim()).ok())
+        .filter_map(|url| given_address_key(&url))
+    {
+        if !addresses.contains(&key) {
+            addresses.push(key);
+        }
+    }
+    if addresses.is_empty() {
+        return;
+    }
+    if let Err(error) =
+        write_turn_given(dir, &format!("search-{}.json", Uuid::new_v4()), &addresses)
+    {
+        tracing::warn!(
+            ?error,
+            "could not keep what a web search found in the turn's record"
+        );
+    }
 }
 
 /// An address as a sentence holds it, less the sentence's own marks after it

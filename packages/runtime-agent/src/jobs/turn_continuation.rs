@@ -53,6 +53,12 @@ pub(super) struct TurnFiles {
     dir: PathBuf,
     timings: PathBuf,
     continue_note: Option<PathBuf>,
+    /// The turn's record of the addresses it was given (`shared_browser::TURN_GIVEN_ENV`), for a
+    /// turn whose tools read pages: None for a browser turn, which has none, and where it could
+    /// not be started.
+    given: Option<PathBuf>,
+    /// The chat the record is kept for when the turn ends.
+    chat: Option<Uuid>,
     /// A team lane's turn: it is told to wrap up before its hard limit.
     lane: bool,
     budget: TurnBudget,
@@ -66,14 +72,25 @@ impl TurnFiles {
             team_deadline(&job.payload),
             chrono::Utc::now(),
         );
-        Self::in_dir_with(
+        let mut files = Self::in_dir_with(
             env::temp_dir()
                 .join("instafy-turns")
                 .join(job.id.to_string()),
             is_multi_agent_worker_payload(&job.payload),
             job_turn_can_continue(&job.payload) && budget.room_for_another,
             budget,
-        )
+        );
+        // A browser turn reads pages only in its browser, which keeps its own record.
+        let in_a_browser = crate::shared_browser::payload_requests_shared_browser(&job.payload)
+            || crate::personal_browser::payload_requests_personal_browser(&job.payload);
+        if !in_a_browser {
+            let chat = shared_browser_chat(job);
+            files.start_given(
+                &crate::shared_browser::given_addresses_for_a_turn(&job.payload, chat),
+                chat,
+            );
+        }
+        files
     }
 
     #[cfg(test)]
@@ -91,6 +108,8 @@ impl TurnFiles {
         Self {
             timings: dir.join("step-timings.ndjson"),
             continue_note: continuable.then(|| dir.join("continue.md")),
+            given: None,
+            chat: None,
             dir,
             lane,
             deadline: budget.limit.map(|limit| {
@@ -98,6 +117,55 @@ impl TurnFiles {
                 now.checked_add(limit).unwrap_or(now)
             }),
             budget,
+        }
+    }
+
+    /// Starts the turn's record of the addresses it was given with `given` (its seed, written
+    /// before the turn starts), kept for `chat` when the turn ends. Without it the turn's tools
+    /// refuse no address as not given: one whose seed cannot be written has none.
+    fn start_given(&mut self, given: &[String], chat: Option<Uuid>) {
+        let folder = self.dir.join("given");
+        let started = fs::create_dir_all(&folder)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                crate::shared_browser::write_turn_given(
+                    &folder,
+                    crate::shared_browser::TURN_GIVEN_SEED,
+                    given,
+                )
+            });
+        match started {
+            Ok(()) => {
+                self.given = Some(folder);
+                self.chat = chat;
+            }
+            Err(error) => warn!(
+                ?error,
+                "could not start the turn's record of the addresses it was given"
+            ),
+        }
+    }
+
+    /// The folder of the turn's record of the addresses it was given, when it has one.
+    pub(super) fn given_dir(&self) -> Option<PathBuf> {
+        self.given.clone()
+    }
+
+    /// What the turn's record holds now: what its request and chat gave, the pages it read and
+    /// what its searches found. None when the turn has no record.
+    pub(super) fn given_addresses(&self) -> Option<std::collections::HashSet<String>> {
+        let dir = self.given.as_ref()?;
+        crate::shared_browser::read_turn_given(dir).map(|addresses| addresses.into_iter().collect())
+    }
+
+    /// Keeps what the turn was given for its chat's next turns and browser runs on this runtime,
+    /// before the folder goes with the job.
+    fn keep_given_for_the_chat(&self) {
+        let (Some(dir), Some(chat)) = (self.given.as_ref(), self.chat) else {
+            return;
+        };
+        if let Some(addresses) = crate::shared_browser::read_turn_given(dir) {
+            crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(chat, addresses);
         }
     }
 
@@ -143,6 +211,13 @@ impl TurnFiles {
                     EnvOverride::apply("INSTAFY_TURN_CONTINUE_FILE", &path.to_string_lossy())
                 }
                 None => EnvOverride::remove("INSTAFY_TURN_CONTINUE_FILE"),
+            },
+            match self.given.as_ref() {
+                Some(dir) => EnvOverride::apply(
+                    crate::shared_browser::TURN_GIVEN_ENV,
+                    &dir.to_string_lossy(),
+                ),
+                None => EnvOverride::remove(crate::shared_browser::TURN_GIVEN_ENV),
             },
         ]
     }
@@ -479,6 +554,7 @@ pub(super) fn attach_turn_records(
     let steps = files.step_timings();
     let note = files.continuation_note();
     let continuable = files.continuable();
+    files.keep_given_for_the_chat();
     files.remove();
     let add = |artifacts: &mut Vec<JsonValue>, ended_by: Option<&str>| {
         if !steps.is_empty() {
@@ -863,6 +939,70 @@ mod tests {
             !dir.path().join("job").exists(),
             "the turn's files are removed"
         );
+    }
+
+    /// A building turn's tools get its record of the addresses it was given, in a folder of the
+    /// job's own (`INSTAFY_TURN_GIVEN_DIR`): started with what its request and chat named, it
+    /// holds what its reads and searches add, and when the turn ends it is kept for its chat, so
+    /// the chat's next turn and a card's browser run start with it. A browser turn, whose pages
+    /// only its browser reads, has none.
+    #[tokio::test]
+    async fn a_building_turns_tools_get_its_record_of_the_addresses_it_was_given() {
+        let chat = Uuid::new_v4();
+        let job = |metadata: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "conversation_id": chat,
+                "payload": {
+                    "prompt_text": "Compare https://shop.example/products/real-1 with its rivals.",
+                    "metadata": metadata,
+                },
+            }))
+            .expect("lease job")
+        };
+        let read = "0123456789abcdef0123456789abcdef".to_string();
+        let files = TurnFiles::for_job(&job(json!({})));
+        let dir = files.given_dir().expect("a building turn's record");
+        let seed = crate::shared_browser::read_turn_given(&dir).expect("its seed");
+        assert_eq!(
+            seed,
+            crate::shared_browser::given_addresses_from_payload(&json!({
+                "prompt_text": "Compare https://shop.example/products/real-1 with its rivals.",
+            }))
+        );
+        {
+            let _env = JOB_PROCESS_ENV_LOCK.lock().await;
+            let set = files.env_overrides();
+            assert_eq!(
+                std::env::var(crate::shared_browser::TURN_GIVEN_ENV).ok(),
+                Some(dir.to_string_lossy().into_owned())
+            );
+            drop(set);
+        }
+        // What a read adds is the record's too.
+        crate::shared_browser::write_turn_given(&dir, "read-1.json", std::slice::from_ref(&read))
+            .unwrap();
+        assert!(files.given_addresses().unwrap().contains(&read));
+        // The turn ends: the folder goes, and its chat keeps what it held.
+        attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
+        assert!(!dir.exists());
+        let next = crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(chat));
+        assert!(next.contains(&read), "{next:?}");
+        assert!(seed.iter().all(|address| next.contains(address)));
+        // Another chat's turn starts without it.
+        let other =
+            crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(Uuid::new_v4()));
+        assert!(!other.contains(&read));
+        // A browser turn has none, and its tools are told of none.
+        for metadata in [
+            json!({"browserTransport": "shared"}),
+            json!({"browserTransport": "desktop-personal"}),
+        ] {
+            let browser = TurnFiles::for_job(&job(metadata.clone()));
+            assert!(browser.given_dir().is_none(), "{metadata}");
+            assert!(browser.given_addresses().is_none(), "{metadata}");
+            browser.remove();
+        }
     }
 
     #[test]

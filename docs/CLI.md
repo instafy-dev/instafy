@@ -832,10 +832,10 @@ Each page comes back with:
 
 | Field | Meaning |
 |---|---|
-| `status` | `read`, `needs_browser` (the text needs JavaScript; use another source or a visible browser turn), `stopped`, `skipped` (budget or time) or `failed` (missing page, error, no answer) |
+| `status` | `read`, `needs_browser` (the text needs JavaScript; use another source or a visible browser turn), `stopped`, `skipped` (budget or time, or `not_given`: an address nobody gave the turn, below) or `failed` (missing page, error, no answer) |
 | `code`, `message`, `tell` | Why it stopped, was skipped or failed, and what to do instead. When the address asked for does not answer (`unreachable` or `timeout`, not after a redirect), the `tell` names the same address with `www.` added or removed, once a turn: not when that one did not answer either |
 | `provenance` | `{requestedUrl, finalUrl, title, readAt, viewer: "server fetch"}`, to cite the page |
-| `text` | The page text, at most `--max-chars` (default 4,000, at most 12,000), wrapped in `<untrusted_page_content url=… read_at=… viewer=…>`. With `--find`, a page of up to 12,000 characters comes back whole, so a line that names no term (a place's hours under its name) is never cut away from the lines around it; only a longer page is cut to the passages that mention the terms (at most `--max-chars`) |
+| `text` | The page text, at most `--max-chars` (default and most 12,000), wrapped in `<untrusted_page_content url=… read_at=… viewer=…>`. A page cut there has `truncated: true` and, unless its HTML was too large to read whole, its whole length in `pageChars`; the text output says on the page's `read` line that it is not the whole page. With `--find`, a page of up to 12,000 characters comes back whole, so a line that names no term (a place's hours under its name) is never cut away from the lines around it; only a longer page is cut to the passages that mention the terms (at most `--max-chars`, default 4,000) |
 | `find` | With `--find`: the `terms`, how many `passages` mention them and how many lines (`matchedLines`). A passage is each matching line with the two lines above it and the one below. On a page of up to 12,000 characters, `find.text` holds the passages, wrapped like `text` and ahead of it, its links and its data, so a reader that keeps only the start and the end of the output still sees them; `whole: true` when `text` is all of the page, and not when the page's HTML was too large to read whole (`truncated: true`) |
 | `links` | Plain `<a href>` links (`--links`, default 30, at most 200), each marked `linkOnly` or `noReuse` when an explicit configured site rule applies, including configured wrapper copies |
 | `noReuse` | `{site, reason, via?}` when an explicit `no-reuse` rule applies to the page or a configured wrapper copy; `tell` then says how its content may be used |
@@ -889,6 +889,19 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   `*.internal`, `*.local`, `*.lan`, single labels) are refused. The connection goes to the address that was checked,
   never to a second DNS answer, so DNS rebinding cannot swap it. Only ports 80 and 443, at most 5 redirects, and never
   a URL with a user name or password.
+- **Addresses nobody gave.** In an Instafy turn, an address past a site's home page is read only when a message,
+  a page read or a search result gave the turn that address. The runtime names the turn's record of them in
+  `INSTAFY_TURN_GIVEN_DIR`, a folder of the job's own, kept as Instafy's browser keeps its runs' (`given.json`,
+  [Shared-Browser.md](Shared-Browser.md)): fingerprints of each address's site and path, never an address. It starts
+  with what the person's messages, the turn's request, the chat's browser turns and the chat's earlier turns on that
+  runtime gave, and the AI's own web searches add what they found; each page this command reads adds its own address,
+  its links and the addresses its text spells out, and `instafy web search` adds its results. Any other address is
+  `skipped` with `code: "not_given"`: nothing is fetched for it, not even robots.txt, no stop is remembered, and the
+  `tell` names the site's home page to read instead, never the plain link. A search address (one with a query) on a
+  site nobody gave names no home page. A site's home page, a link-only site (its own refusal answers) and an address
+  on no public site by its name (the private-network rule answers) are never refused so. Without that folder and its
+  `seed.json`, as on a person's own computer, nothing is refused. A reader asked for a product address no page had
+  given read it, and the turn's reply and card passed it on as the shop's own page.
 - **Stops.** A login (HTTP 401 or a sign-in form), HTTP 403, HTTP 429, a CAPTCHA or bot check, a paywall
   (`isAccessibleForFree: false` or paywall markup), a download (a file or attachment rather than a page) or a page
   that shows a credential (`secret_screen`) stops that URL. A CAPTCHA or bot check is never solved or worked around.

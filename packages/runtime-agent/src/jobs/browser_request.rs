@@ -132,11 +132,13 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
             || (output.starts_with(crate::codex::COMMAND_OUTPUT_KEPT_TAIL) && asked.len() > 1);
         let mut not_read = shown.stopped;
         if unsure {
-            not_read.extend(
-                asked
-                    .into_iter()
-                    .filter(|address| !shown.read.iter().any(|read| same_page(address, read))),
-            );
+            not_read.extend(asked.into_iter().filter(|address| {
+                !shown
+                    .read
+                    .iter()
+                    .chain(&shown.not_given)
+                    .any(|shown| same_page(address, shown))
+            }));
         }
         sites.extend(not_read.into_iter().filter_map(site_of));
     }
@@ -146,20 +148,25 @@ pub(super) fn sites_its_reader_did_not_read(events: &[&[Value]]) -> BTreeSet<Str
 /// What a read's output shows of its pages, as its JSON gives them (one key a line: a page's
 /// `requestedUrl`, then its `status`) or its text (`[stopped: robots] <address> -> <where it
 /// went>`): the addresses of the pages it marks `stopped`, where they redirected included, and of
-/// those it read or found to need a browser. What a page wrote, inside its
-/// `<untrusted_page_content>` wrapper, says nothing of what was read.
+/// those it read or found to need a browser, and of those it read nothing of because nothing gave
+/// the turn their address (`[skipped: not_given]`): no site refused those, and the turn reads the
+/// site's home page instead. What a page wrote, inside its `<untrusted_page_content>` wrapper,
+/// says nothing of what was read.
 struct ReadOutcomes<'a> {
     stopped: Vec<&'a str>,
     read: Vec<&'a str>,
+    not_given: Vec<&'a str>,
 }
 
 fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
     let mut shown = ReadOutcomes {
         stopped: Vec::new(),
         read: Vec::new(),
+        not_given: Vec::new(),
     };
     let mut asked: Option<&str> = None;
     let mut in_a_stop = false;
+    let mut in_a_skip = false;
     // Where the room kept only the end of the output, the end may start inside a page's text.
     let mut in_page_text = match (
         output.find("<untrusted_page_content"),
@@ -181,10 +188,14 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
         if let Some((status, addresses)) =
             line.strip_prefix('[').and_then(|rest| rest.split_once(']'))
         {
-            match status.split(':').next().unwrap_or_default().trim() {
+            let (status, code) = status.split_once(':').unwrap_or((status, ""));
+            match status.trim() {
                 "stopped" => shown.stopped.extend(addresses_in(addresses)),
                 "read" | "needs_browser" => shown
                     .read
+                    .extend(addresses_in(addresses).into_iter().take(1)),
+                "skipped" if code.trim() == "not_given" => shown
+                    .not_given
                     .extend(addresses_in(addresses).into_iter().take(1)),
                 _ => {}
             }
@@ -192,10 +203,16 @@ fn read_outcomes(output: &str) -> ReadOutcomes<'_> {
             asked = addresses_in(line).into_iter().next();
         } else if line.starts_with("\"status\"") {
             in_a_stop = line.contains("\"stopped\"");
+            in_a_skip = line.contains("\"skipped\"");
             if in_a_stop {
                 shown.stopped.extend(asked);
             } else if line.contains("\"read\"") || line.contains("\"needs_browser\"") {
                 shown.read.extend(asked);
+            }
+        } else if in_a_skip && line.starts_with("\"code\"") {
+            in_a_skip = false;
+            if line.contains("\"not_given\"") {
+                shown.not_given.extend(asked);
             }
         } else if in_a_stop && (line.starts_with("\"finalUrl\"") || line.starts_with("\"http")) {
             // Where a stopped page went: its provenance's `finalUrl`, and its `redirects`.
@@ -286,6 +303,27 @@ impl BrowserRequest {
             routed: true,
             waits_for_a_press: false,
         })
+    }
+
+    /// Names its site's home page in this card's task in place of each address nothing gave the
+    /// turn that wrote it (`given`: the fingerprints of the turn's record, what the person's
+    /// messages, the request, the chat's browser turns and earlier turns, the pages its reader
+    /// read and what its searches found gave). The browser opens the addresses a card's task names
+    /// as given (`shared_browser::given_addresses_from_payload`), so a path a turn made up opened
+    /// as the site's own page, and its home page, which always opens, is the way on there. A card
+    /// the routing step posts is the person's own message, whose addresses they gave.
+    pub(super) fn name_home_pages_where_not_given(
+        &mut self,
+        given: &std::collections::HashSet<String>,
+    ) {
+        if self.routed {
+            return;
+        }
+        if let Some(task) =
+            crate::shared_browser::with_home_pages_where_not_given(&self.task, given)
+        {
+            self.task = task;
+        }
     }
 
     /// Leaves this card for the person to press when it opens a site whose page the turn's own
@@ -1294,6 +1332,109 @@ mod tests {
         routed.wait_for_a_press_where_it_opens(&refused);
         assert!(
             !routed.waits_for_the_person(&["Open https://www.museum.example/en/visit for me."])
+        );
+    }
+
+    /// An address the reader didn't read because nothing gave the turn it (`not_given`) is no
+    /// page a site refused: the turn reads the site's home page instead, so a card for that site
+    /// doesn't wait for a press on its account, as JSON or as text, also where the read read
+    /// nothing. A page a site did refuse in the same read still holds its card.
+    #[test]
+    fn an_address_nobody_gave_holds_no_card() {
+        let completed = |command: &str, exit_code: i64, output: &str| {
+            json!({"type": "item.completed", "item": {
+                "type": "command_execution", "command": command, "exit_code": exit_code,
+                "status": "completed", "aggregated_output": output,
+            }})
+        };
+        let sites = |events: &[Value]| sites_its_reader_did_not_read(&[events]);
+        let made_up = "https://www.shop.example/products/air-fryer-10219916.html";
+        let json_output = format!(
+            "{{\n \"ok\": true,\n \"pages\": [\n  {{\n   \"requestedUrl\": \"{made_up}\",\n   \"status\": \"skipped\",\n   \"code\": \"not_given\",\n   \"message\": \"no message, page read or search result gave this address, so it was not read\"\n  }}\n ]\n}}"
+        );
+        assert!(
+            sites(&[completed(
+                &format!("instafy web read {made_up} --json"),
+                2,
+                &json_output
+            )])
+            .is_empty()
+        );
+        let text_output = format!(
+            "[skipped: not_given] {made_up}\n  no message, page read or search result gave this address, so it was not read\n[stopped: forbidden] https://other.example/p\n  the site refused the read (HTTP 403)"
+        );
+        assert_eq!(
+            sites(&[completed(
+                &format!("instafy web read {made_up} https://other.example/p"),
+                2,
+                &text_output
+            )]),
+            BTreeSet::from(["other.example".to_string()])
+        );
+        // Another skip still counts as not read where the read read nothing.
+        let budget = format!(
+            "{{\n \"pages\": [\n  {{\n   \"requestedUrl\": \"{made_up}\",\n   \"status\": \"skipped\",\n   \"code\": \"turn_limit\"\n  }}\n ]\n}}"
+        );
+        assert_eq!(
+            sites(&[completed(
+                &format!("instafy web read {made_up} --json"),
+                2,
+                &budget
+            )]),
+            BTreeSet::from(["shop.example".to_string()])
+        );
+    }
+
+    /// A card's task names its site's home page in place of an address nothing gave the turn
+    /// that wrote it: the browser opens a card's addresses as given, and a reply's card carried a
+    /// product address no page had given. An address the turn was given, a site's root and an
+    /// address on no public site keep their words, and so does a card the routing step posts,
+    /// which is the person's own message.
+    #[test]
+    fn a_cards_task_names_the_home_page_in_place_of_an_address_nobody_gave() {
+        let key = |site_path: &str| {
+            use sha2::Digest;
+            sha2::Sha256::digest(site_path.as_bytes())
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let given: std::collections::HashSet<String> = [
+            key("shop.example/products/real-1"),
+            key("reviews.example/laptops/one"),
+        ]
+        .into_iter()
+        .collect();
+        let card = |task: &str| {
+            BrowserRequest::parse(json!({ "task": task }).as_object().unwrap()).unwrap()
+        };
+        let mut request = card(
+            "On https://www.shop.example/products/made-up-123.html and https://www.shop.example/products/real-1?ref=card, note the prices. Also check argos.example/product/1234567, (https://reviews.example/laptops/one), https://www.maker.example/ and http://localhost:3000/admin.",
+        );
+        request.name_home_pages_where_not_given(&given);
+        assert_eq!(
+            request.task,
+            "On https://www.shop.example/ and https://www.shop.example/products/real-1?ref=card, note the prices. Also check https://argos.example/, (https://reviews.example/laptops/one), https://www.maker.example/ and http://localhost:3000/admin."
+        );
+        assert_eq!(
+            request.message().metadata.unwrap()["details"]["browserRequest"]["task"],
+            json!(request.task)
+        );
+        // Nothing to change: the task stays word for word.
+        let words = "Open https://reviews.example/laptops/one/#specs and read its battery life.";
+        let mut kept = card(words);
+        kept.name_home_pages_where_not_given(&given);
+        assert_eq!(kept.task, words);
+        let mut routed = BrowserRequest::routed(
+            "Open https://www.shop.example/products/mine-9 for me.",
+            false,
+        )
+        .unwrap();
+        routed.name_home_pages_where_not_given(&given);
+        assert_eq!(
+            routed.task,
+            "Open https://www.shop.example/products/mine-9 for me."
         );
     }
 

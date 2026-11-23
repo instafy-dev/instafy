@@ -37,7 +37,7 @@ import {
   type PageResult,
   type WebReadDeps,
 } from "../src/web-read.js";
-import { defaultSkillRoots } from "../src/web-shared.js";
+import { TURN_GIVEN_SEED, addressesInText, defaultSkillRoots, givenAddressKey, givenSiteKey, givenSitePath } from "../src/web-shared.js";
 import { webLink } from "../src/web-link.js";
 import { findPassages, findTerms, pageLines, pageLinks, pageStructured } from "../src/web-page.js";
 
@@ -371,16 +371,44 @@ describe("reading a page", () => {
       const none = formatWebRead(await read("http://news.example.org/big", { find: "lockers" }));
       expect(none).toContain("--find: 0 passage(s) for lockers; only the start of this page was read (it is too large to read whole)\n");
       expect(none).not.toMatch(/whole page|does not say it/);
+      // Without --find too, on the page's read line, and with no length it doesn't know.
+      const plain = await read("http://news.example.org/big");
+      expect(plain.pages[0]).toMatchObject({ truncated: true });
+      expect(plain.pages[0]).not.toHaveProperty("pageChars");
+      expect(formatWebRead(plain)).toMatch(/, HTTP 200; cut: only the start of this page was read \(it is too large to read whole\)\n/);
     }
   });
 
-  it("bounds the text to --max-chars (default 4000)", async () => {
+  it("bounds the text to --max-chars (default 12000, the most), and says on its text line that a cut read is not the whole page", async () => {
     routes["news.example.org/long"] = { body: page(`<p>${"word ".repeat(3000)}</p>`) };
-    const result = await one("http://news.example.org/long");
+    const report = await read("http://news.example.org/long");
+    const result = report.pages[0]!;
+    expect(LIMITS.defaultChars).toBe(LIMITS.maxChars);
     expect(result.textChars).toBe(LIMITS.defaultChars + 1);
-    expect(result.truncated).toBe(true);
-    const short = await one("http://news.example.org/long", { maxChars: 300 });
-    expect(short.textChars).toBe(301);
+    expect(result).toMatchObject({ truncated: true, pageChars: 14_999 });
+    expect(formatWebRead(report)).toMatch(
+      /\n {2}read [^\n]+, HTTP 200; cut: the text below is the first 12000 of the page's 14999 characters, not the whole page\n/,
+    );
+    const short = await read("http://news.example.org/long", { maxChars: 300 });
+    expect(short.pages[0]!.textChars).toBe(301);
+    expect(formatWebRead(short)).toContain("; cut: the text below is the first 300 of the page's 14999 characters, not the whole page\n");
+  });
+
+  it("returns a long status page whole without --find, up to 12,000 characters, and says nothing of a cut", async () => {
+    // A line status page longer than the old 4,000-character cut: its last lines are the closures.
+    const lines = Array.from({ length: 140 }, (_, n) => `Line ${n + 1}: good service on all stations today.`);
+    lines.push("Line 141: closed between North Street and Harbour.", "Line 142: part closed this weekend.", "Line 143: closed until Monday.");
+    routes["news.example.org/status"] = { body: page(lines.map((line) => `<p>${line}</p>`).join(""), "Status") };
+    const report = await read("http://news.example.org/status");
+    const result = report.pages[0]!;
+    expect(result.textChars).toBeGreaterThan(4_000);
+    expect(result.textChars).toBeLessThanOrEqual(LIMITS.maxChars);
+    expect(result.truncated).toBe(false);
+    expect(result).not.toHaveProperty("pageChars");
+    expect(result.text).toContain("Line 143: closed until Monday.");
+    expect(formatWebRead(report)).not.toMatch(/cut:/);
+    // --find keeps its passages' own bound on a page longer than the ceiling.
+    expect(LIMITS.defaultFindChars).toBe(4_000);
   });
 
   it("decodes gzip and reads JSON and plain text", async () => {
@@ -1232,6 +1260,152 @@ describe("what a stop leaves open", () => {
       expect(elsewhere!.status).toBe("read");
     });
   }
+});
+
+describe("an address nobody gave", () => {
+  const NOT_GIVEN = "no message, page read or search result gave this address, so it was not read";
+  const readHome = (home: string) =>
+    `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. Never link, cite or card this address.`;
+  const NO_HOME = "Octo reads only addresses it was given. Other sources can still be read. Never link, cite or card this address.";
+
+  /**
+   * The folder the runtime gives a turn for the addresses it was given (INSTAFY_TURN_GIVEN_DIR), with its seed: the
+   * fingerprints of what the person's messages and the turn's request named, `addresses` with their sites and `sites`
+   * alone, as runtime-agent writes it (`shared_browser::given_addresses_from_payload`).
+   */
+  function givenFolder(addresses: string[] = [], sites: string[] = []): string {
+    const dir = path.join(tmp, `case-${caseNo}`, "given");
+    fs.mkdirSync(dir, { recursive: true });
+    const keys = [...addresses.flatMap((url) => [givenAddressKey(url), givenSiteKey(url)]), ...sites.map(givenSiteKey)];
+    fs.writeFileSync(path.join(dir, TURN_GIVEN_SEED), JSON.stringify({ version: 1, addresses: keys }));
+    return dir;
+  }
+  const inTurn = (dir: string): Partial<WebReadDeps> => ({
+    env: { INSTAFY_TURN_STARTED_AT: turn, INSTAFY_PROJECT_ID: "project-1", INSTAFY_TURN_GIVEN_DIR: dir },
+  });
+
+  it("keeps an address by its site and path, and reads the addresses a text spells out, as the Shared Browser does", () => {
+    // The same cases as runtime-agent's `a_tasks_addresses_are_kept_by_their_site_and_path`.
+    expect(givenSitePath("https://WWW.Reviews.example:443/Laptops/One/?a=1#b")).toEqual({ site: "reviews.example", path: "/Laptops/One" });
+    expect(givenSitePath("http://reviews.example:8443/x")).toEqual({ site: "reviews.example:8443", path: "/x" });
+    expect(givenSitePath("https://example.org")).toEqual({ site: "example.org", path: "/" });
+    expect(givenSitePath("ftp://example.org/file")).toBeNull();
+    const fingerprint = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 32);
+    expect(givenAddressKey("https://www.reviews.example/laptops/one/")).toBe(fingerprint("reviews.example/laptops/one"));
+    expect(givenSiteKey("https://www.reviews.example/laptops/one")).toBe(fingerprint("reviews.example"));
+    expect(
+      addressesInText(
+        "Read https://en.wikipedia.org/wiki/Mercury_(planet). (See https://example.org/a), (visitporto.travel/en/lello) and " +
+          "https://example.org/b_(c)). See src/main.rs, 1.5/2, e.g./this, name@example.com/x and ftp://example.com/file.",
+      ),
+    ).toEqual(["https://en.wikipedia.org/wiki/Mercury_(planet)", "https://example.org/a", "https://visitporto.travel/en/lello", "https://example.org/b_(c)"]);
+  });
+
+  it("does not read a product address no page gave, and names the shop's home page instead of the plain link", async () => {
+    // The person named the shops, not an address; the turn wrote a product address no page or search had given it.
+    const dir = givenFolder();
+    routes["shop.example.net/products/air-fryer-dual-zone-10219916.html"] = { body: ARTICLE };
+    const asked = "http://shop.example.net/products/air-fryer-dual-zone-10219916.html";
+    const report = await read(asked, {}, inTurn(dir));
+    const refused = report.pages[0]!;
+    expect(refused).toMatchObject({ status: "skipped", code: "not_given", message: NOT_GIVEN, tell: readHome("http://shop.example.net/") });
+    expect(refused.tell).not.toMatch(/plain link/);
+    expect(refused).not.toHaveProperty("text");
+    // Nothing went out for it: no name lookup, no robots.txt, no page.
+    expect(resolved).toEqual([]);
+    expect(hits).toEqual([]);
+    expect(report.budget.loadsUsed).toBe(0);
+    const text = formatWebRead(report);
+    expect(text).toContain(`[skipped: not_given] ${asked}\n  ${NOT_GIVEN}\n  ${readHome("http://shop.example.net/")}\n`);
+    expect(text).not.toMatch(/plain link/);
+    const out: string[] = [];
+    const io = { out: (line: string) => out.push(line), err: (line: string) => out.push(line) };
+    expect(await runWebReadCli([asked], { json: true }, io, deps(inTurn(dir)))).toBe(WEB_READ_EXIT_NONE_READ);
+    // Nor is it remembered as a stop: once a page gives it, it is read.
+    routes["shop.example.net/"] = { body: page('<a href="/products/air-fryer-dual-zone-10219916.html">Dual zone air fryer</a>', "Shop") };
+    const [home, product] = (await read(["http://shop.example.net/", asked], {}, inTurn(dir))).pages;
+    expect(home!.status).toBe("read");
+    expect(product).toMatchObject({ status: "read", fromCache: false });
+  });
+
+  it("reads what the person's messages, a page read or a search result gave, and nothing beside it", async () => {
+    const dir = givenFolder(["https://news.example.org/museum?from=chat"]);
+    routes["news.example.org/museum"] = { body: ARTICLE.replace("Find us at Main Street 1.", "Find us at Main Street 1, see news.example.org/directions.") };
+    routes["news.example.org/visit"] = { body: ARTICLE };
+    routes["news.example.org/directions"] = { body: ARTICLE };
+    routes["shop.example.net/tickets?ref=2"] = { body: ARTICLE };
+    routes["other.example.com/review/museum"] = { body: ARTICLE };
+    // The address the person gave, whatever its query or fragment.
+    expect((await one("http://news.example.org/museum#hours", {}, inTurn(dir))).status).toBe("read");
+    // Its links (another query, the other scheme), and an address its text spells out, are given now; a path beside
+    // them is not.
+    const [link, otherSite, spelled, beside] = (
+      await read(["http://news.example.org/visit", "http://shop.example.net/tickets?ref=2", "http://news.example.org/directions", "http://news.example.org/tours"], {}, inTurn(dir))
+    ).pages;
+    expect([link!.status, otherSite!.status, spelled!.status]).toEqual(["read", "read", "read"]);
+    expect(beside).toMatchObject({ status: "skipped", code: "not_given", tell: readHome("http://news.example.org/") });
+    // A search result's address, as a search writes it to the turn's record.
+    expect((await one("http://other.example.com/review/museum", {}, inTurn(dir))).code).toBe("not_given");
+    fs.writeFileSync(path.join(dir, "search-1.json"), JSON.stringify({ version: 1, addresses: [givenAddressKey("https://other.example.com/review/museum/")] }));
+    expect((await one("http://other.example.com/review/museum", {}, inTurn(dir))).status).toBe("read");
+    // The record holds fingerprints, never an address.
+    const record = fs.readdirSync(dir).map((name) => fs.readFileSync(path.join(dir, name), "utf8")).join("\n");
+    expect(record).not.toMatch(/example|visit|museum|directions/);
+  });
+
+  it("always reads a site's home page, and names no home page for a search nobody gave on a site nobody gave", async () => {
+    const dir = givenFolder([], ["https://shop.example.net/"]);
+    routes["other.example.com/"] = { body: ARTICLE };
+    expect((await one("http://other.example.com/", {}, inTurn(dir))).status).toBe("read");
+    // A search on a site nobody gave: no home page to go to.
+    const search = await one("http://other.example.com/search?q=museum+hours", {}, inTurn(dir));
+    expect(search).toMatchObject({ status: "skipped", code: "not_given", tell: NO_HOME });
+    // Reading the root gave nothing of its site: a made-up path there still names the home page, as any path does.
+    expect((await one("http://other.example.com/hours", {}, inTurn(dir))).tell).toBe(readHome("http://other.example.com/"));
+    // A search on the site the person named goes back to its home page.
+    expect((await one("http://shop.example.net/search?q=air+fryer", {}, inTurn(dir))).tell).toBe(readHome("http://shop.example.net/"));
+  });
+
+  it("keeps every other refusal as it was: link-only sites, private addresses, and a stop's plain link for a given address", async () => {
+    dns["intranet.example.org"] = ["10.0.0.5"];
+    const dir = givenFolder(["http://news.example.org/members"]);
+    routes["news.example.org/members"] = { status: 403 };
+    const [linkOnly, privateName, privateRoot, privateAddress, localName, stopped] = (
+      await read(
+        [
+          "https://www.booking.com/hotel/made-up.html",
+          "http://intranet.example.org/wiki/x",
+          "http://intranet.example.org/",
+          "http://10.1.2.3/x",
+          "http://printer.local/status",
+          "http://news.example.org/members",
+        ],
+        {},
+        inTurn(dir),
+      )
+    ).pages;
+    expect([linkOnly!.status, linkOnly!.code]).toEqual(["stopped", "link_only"]);
+    // A public name that resolves to a private address: a path nobody gave is refused before its name is looked up,
+    // and its root by the address check, as before.
+    expect([privateName!.status, privateName!.code]).toEqual(["skipped", "not_given"]);
+    expect([privateRoot!.status, privateRoot!.code]).toEqual(["stopped", "blocked_address"]);
+    expect([privateAddress!.status, privateAddress!.code]).toEqual(["stopped", "blocked_address"]);
+    expect([localName!.status, localName!.code]).toEqual(["stopped", "blocked_address"]);
+    expect(dialed.every((address) => address === PUBLIC_A)).toBe(true);
+    expect(stopped).toMatchObject({ status: "stopped", code: "forbidden" });
+    expect(stopped!.tell).toContain("Give the person the plain link.");
+  });
+
+  it("refuses nothing where the turn has no record: no folder, no seed, or a seed it can't read", async () => {
+    routes["shop.example.net/products/made-up.html"] = { body: ARTICLE };
+    const noSeed = path.join(tmp, `case-${caseNo}`, "empty");
+    fs.mkdirSync(noSeed, { recursive: true });
+    const broken = givenFolder();
+    fs.writeFileSync(path.join(broken, TURN_GIVEN_SEED), "{not json");
+    for (const over of [{}, inTurn(noSeed), inTurn(broken), inTurn("relative/given")]) {
+      expect((await one("http://shop.example.net/products/made-up.html", { fresh: true }, over)).status).toBe("read");
+    }
+  });
 });
 
 describe("one site, however its host is written", () => {

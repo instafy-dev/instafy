@@ -12,6 +12,9 @@
 // - every hop's host is resolved and every address checked: private, loopback, link-local, CGNAT, metadata and other
 //   reserved addresses are refused, and the connection goes to the address that was checked (no second lookup, so DNS
 //   rebinding cannot swap it); at most 5 redirects, ports 80 and 443 only;
+// - an address no message, page read or search result gave the turn is not read, as the Shared Browser opens none:
+//   past a site's root, only an address in the turn's record of what it was given (web-shared.ts), and the answer
+//   names the site's home page to read instead. A turn without that record refuses none;
 // - a login, CAPTCHA or bot check, paywall, HTTP 401/403/429, download or secret screen stops that URL. A stopped URL
 //   is remembered and never read again in this turn (nor from the cache for a day), whatever the options;
 // - page text is redacted (the browsers' redaction.js) before anything is printed or cached, and comes back wrapped
@@ -34,6 +37,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import type { Command } from "commander";
 import * as redaction from "@instafy/browser-action-policy/redaction";
+import { isLocalHostName } from "@instafy/bind/net";
 import { AI_AGENTS, USER_AGENT, challengeReason, parseRobots, robotsAllows, robotsRefusesAll, type RobotsGroup } from "@instafy/bind/web";
 import {
   findPassages,
@@ -54,8 +58,10 @@ import {
   LinkOnlyListUnavailableError,
   LOCAL_TURN_IDLE_MS,
   NETWORK_VIEWER,
+  TurnGiven,
   TurnStore,
   WebFixturesError,
+  addressesInText,
   barsAgents,
   checkAddress,
   defaultSkillRoots,
@@ -126,7 +132,13 @@ export const LIMITS = Object.freeze({
   maxRedirects: 5,
   maxBodyBytes: 2_000_000,
   maxRobotsBytes: 500_000,
-  defaultChars: 4_000,
+  /**
+   * a read without --find returns a page whole up to the ceiling: cut at 4,000 characters, a line status page came back
+   * without its end, and the turn did not read it again
+   */
+  defaultChars: 12_000,
+  /** a --find read's passages, on a page longer than the ceiling */
+  defaultFindChars: 4_000,
   minChars: 200,
   maxChars: 12_000,
   defaultLinks: 30,
@@ -175,7 +187,8 @@ export type StopCode =
   | "paywall"
   | "download"
   | "secret_screen";
-export type SkipCode = "turn_limit" | "host_limit" | "time_limit";
+/** `not_given`: no message, page read or search result gave the turn this address (notGivenRefusal) */
+export type SkipCode = "turn_limit" | "host_limit" | "time_limit" | "not_given";
 export type FailCode = "not_found" | "http_error" | "unreachable" | "timeout" | "budget_unavailable";
 export type PageStatus = "read" | "needs_browser" | "stopped" | "skipped" | "failed";
 
@@ -199,6 +212,8 @@ export type PageResult = {
   text?: string;
   textChars?: number;
   truncated?: boolean;
+  /** how long the page's text is, when `text` holds only its start (cut at --max-chars) */
+  pageChars?: number;
   /**
    * --find on a page of up to LIMITS.maxChars: `text` here holds the passages (wrapped like the page's `text`, and
    * ahead of it), and `whole` says the page's `text` is all of the page (not when its HTML was cut at maxBodyBytes)
@@ -588,6 +603,8 @@ const TELL: Record<StopCode | SkipCode | FailCode | "robots_site" | "needs_brows
   turn_limit: `Not read: this turn has used its ${LIMITS.loadsPerTurn} page loads. Work with what you have, or ask the person.`,
   host_limit: `Not read: this turn has read this site ${LIMITS.loadsPerHost} times. Use another source.`,
   time_limit: "Not read: this call ran out of time. Read it in a later call if it is still needed.",
+  // notGivenRefusal says it with the site's home page; this is the words without one.
+  not_given: `Octo reads only addresses it was given. ${OTHER_SOURCES_TELL} Never link, cite or card this address.`,
   not_found: "The page is missing or gone: do not cite it.",
   http_error: "The site answered with an error. Use another source rather than retrying.",
   unreachable: "The site did not answer. Use another source rather than retrying.",
@@ -603,6 +620,44 @@ const TELL: Record<StopCode | SkipCode | FailCode | "robots_site" | "needs_brows
 /** What a stop says to do next, also when it is remembered from an earlier read. */
 const stopTell = (stop: { code: StopCode; wholeSite?: true }): string =>
   stop.code === "robots" && stop.wholeSite ? TELL.robots_site : TELL[stop.code];
+
+const NOT_GIVEN_MESSAGE = "no message, page read or search result gave this address, so it was not read";
+
+/**
+ * The answer to an address no message, page read or search result gave the turn: as the Shared Browser opens none
+ * (`refuseUngivenAddress`), it is not read, and the answer names the site's home page to read instead, which is never
+ * refused so. A reader asked for a product address no page gave read it, and the turn's reply, its card and its page
+ * passed it on as the shop's own page. A search nobody gave (an address with a query) on a site nobody gave names no
+ * home page, as in the browser: told one is there, a turn refused a search engine's results address went to that
+ * engine's home page. Nothing is fetched and nothing is remembered as a stop: the address may be given later in the
+ * turn. Null for an address that may be read: one given, a site's root, one on a link-only site (whose own refusal
+ * answers) or one on no public site by its name (an IP address or a local name, which the address check refuses), and
+ * every address in a turn without a record.
+ */
+function notGivenRefusal(url: URL, ctx: ReadContext): { message: string; tell: string } | null {
+  const given = ctx.given;
+  if (!given || given.has(url) || linkOnlySite(url, ctx.guard)) return null;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (net.isIP(host) || isLocalHostName(host)) return null;
+  if (!given.siteGiven(url) && url.search.length > 1) return { message: NOT_GIVEN_MESSAGE, tell: TELL.not_given };
+  const home = redaction.redactUrl(`${url.origin}/`).text;
+  return {
+    message: NOT_GIVEN_MESSAGE,
+    tell: `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. Never link, cite or card this address.`,
+  };
+}
+
+/**
+ * Keeps what a page this call read gives the turn: its own address, where it redirected, its links and the addresses
+ * its text spells out, and its site when it is past the site's root (as the Shared Browser keeps a page's,
+ * `rememberGivenAddresses`). They are the page's as this command shows them, redacted.
+ */
+function rememberRead(ctx: ReadContext, requested: string, record: CachedPage) {
+  ctx.given?.add(
+    [requested, record.finalUrl, ...record.redirects, ...record.links.map((link) => link.href), ...addressesInText(record.lines.join("\n"))],
+    [requested, record.finalUrl],
+  );
+}
 
 /**
  * The same address with "www." added or removed, for a site that answers at only one of them (a bare domain that
@@ -646,6 +701,8 @@ type ReadContext = {
   sharedBudget: SharedResearchBudget | null;
   cache: Cache<CacheKind>;
   guard: LinkOnlyGuard;
+  /** the turn's record of the addresses it was given; null where there is none, and nothing is refused as not given */
+  given: TurnGiven | null;
   viewer: WebViewer;
   deadline: number;
   robotsMemo: Map<string, Promise<{ refused: string | null } | { failed: FailCode; message: string }>>;
@@ -748,6 +805,10 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   const requested = stripHash(requestedUrl);
   const page = basePage(requested, new Date(ctx.now()).toISOString(), ctx.viewer);
 
+  // An address nobody gave is not read, whatever the cache or an earlier stop holds of it: not even robots.txt is asked.
+  const notGiven = notGivenRefusal(requestedUrl, ctx);
+  if (notGiven) return { ...page, status: "skipped", code: "not_given", ...notGiven };
+
   // Every address the chain reached, so a stop is remembered for each of them (under hashed keys).
   const hopUrls: URL[] = [];
   const policyHash = sha256(JSON.stringify(ctx.guard.list));
@@ -821,6 +882,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     // it is a copy of one.
     const listed = (url: string) => Boolean(linkOnlySite(url, ctx.guard));
     if (cached && ![requested, cached.finalUrl, ...cached.redirects, ...(cached.originals ?? [])].some(listed)) {
+      rememberRead(ctx, requested, cached);
       return present(page, cached, true, options, ctx.guard);
     }
   }
@@ -1002,6 +1064,7 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
     structured: redacted.digest.structured,
   };
   if (!response.noStore) ctx.cache.put("pages", requested, record, ctx.now());
+  rememberRead(ctx, requested, record);
   return present(page, record, false, options, ctx.guard);
 }
 
@@ -1018,6 +1081,7 @@ function present(
   const full = record.lines.join("\n");
   let body = full;
   let truncated = record.bodyTruncated === true;
+  let pageChars: number | undefined;
   let find: PageResult["find"];
   if (options.terms.length) {
     const found = findPassages(record.lines, options.terms, options.maxChars);
@@ -1035,6 +1099,8 @@ function present(
     }
   } else if (full.length > options.maxChars) {
     truncated = true;
+    // A page whose HTML was cut is longer than what was read of it, so its length is not known.
+    if (!record.bodyTruncated) pageChars = full.length;
     body = `${full.slice(0, options.maxChars)}…`;
   }
   const links = record.links.slice(0, options.links).map((link, index) => {
@@ -1070,6 +1136,7 @@ function present(
     text: wrap(body),
     textChars: body.length,
     truncated,
+    ...(pageChars !== undefined ? { pageChars } : {}),
     links,
     structured,
     ...(structuredDropped ? { structuredDropped } : {}),
@@ -1113,7 +1180,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
   const urls = parseUrls(options.urls);
   const terms = options.find !== undefined ? findTerms(options.find) : [];
   if (options.find !== undefined && !terms.length) throw new WebReadUsageError("--find needs at least one word of two or more letters.");
-  const maxChars = clamp(options.maxChars ?? LIMITS.defaultChars, LIMITS.minChars, LIMITS.maxChars);
+  const maxChars = clamp(options.maxChars ?? (terms.length ? LIMITS.defaultFindChars : LIMITS.defaultChars), LIMITS.minChars, LIMITS.maxChars);
   const links = clamp(options.links ?? LIMITS.defaultLinks, 0, LIMITS.maxLinks);
 
   // Test builds only: a fixture folder stands in for the network. Checked first, so a build that does not honour it
@@ -1148,6 +1215,7 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
     sharedBudget: sharedResearchBudget(env, deps.budgetFetch),
     cache: new Cache<CacheKind>(cacheDir === null ? null : apart(cacheDir)),
     guard,
+    given: TurnGiven.load(env),
     viewer,
     deadline,
     robotsMemo: new Map(),
@@ -1172,6 +1240,8 @@ export async function webRead(options: WebReadOptions, deps: WebReadDeps = {}): 
       })));
       break;
     }
+    // What a page read gave the turn is kept at once, however the call ends.
+    ctx.given?.save("read");
     if (page.status === "failed" && unanswered(page.code, page)) {
       const key = unansweredKey(new URL(url));
       await turn.update((state) => {
@@ -1286,7 +1356,13 @@ export function formatWebRead(report: WebReadReport): string {
     if (page.message) out.push(`  ${page.message}${page.previouslyStopped ? " (stopped earlier; not read again)" : ""}`);
     if (page.tell) out.push(`  ${page.tell}`);
     if (page.text !== undefined) {
-      out.push(`  read ${page.provenance.readAt} by ${page.provenance.viewer}${page.fromCache ? " (cached)" : ""}, HTTP ${page.httpStatus}`);
+      // A cut read says so on its own line too, not only in its JSON: a turn read the start of a status page as all of it.
+      const cut = page.find || !page.truncated
+        ? ""
+        : page.pageChars
+          ? `; cut: the text below is the first ${Math.max(0, (page.textChars ?? 1) - 1)} of the page's ${page.pageChars} characters, not the whole page`
+          : "; cut: only the start of this page was read (it is too large to read whole)";
+      out.push(`  read ${page.provenance.readAt} by ${page.provenance.viewer}${page.fromCache ? " (cached)" : ""}, HTTP ${page.httpStatus}${cut}`);
       if (page.noReuse) out.push(`  no-reuse: ${page.noReuse.site} (${page.noReuse.reason})`);
       if (page.find) {
         const { passages, whole } = page.find;
@@ -1372,14 +1448,18 @@ export function registerWebCommand(program: Command): Command {
       "Read 1-6 public pages over plain HTTP and print their text, links and structured data with provenance " +
         `(exit 2: nothing read, 64: bad options). Uses the task's shared allowance; standalone: ${LIMITS.loadsPerTurn} loads, ${LIMITS.loadsPerHost} per site, ` +
         `${LIMITS.hostSpacingMs / 1000} s apart. Stopped URLs (login, CAPTCHA, paywall, 401/403/429, download, secret ` +
-        "screen, robots.txt, link-only, private address) are never read another way.",
+        "screen, robots.txt, link-only, private address) are never read another way. In an Instafy turn, an address past " +
+        "a site's home page that no message, page read or search result gave is not read.",
     )
     .argument("<url...>", "http(s) URLs to read")
     .option(
       "--find <terms>",
       `The passages that mention these words ("quoted phrases" kept whole): a page longer than ${LIMITS.maxChars} characters comes back as those passages only, a shorter one with them first and then whole`,
     )
-    .option("--max-chars <n>", `Most characters of text per page, or of its --find passages (default ${LIMITS.defaultChars}, at most ${LIMITS.maxChars})`)
+    .option(
+      "--max-chars <n>",
+      `Most characters of text per page (default ${LIMITS.defaultChars}, the most), or of its --find passages (default ${LIMITS.defaultFindChars}, at most ${LIMITS.maxChars})`,
+    )
     .option("--links <n>", `Most links per page (default ${LIMITS.defaultLinks}, at most ${LIMITS.maxLinks})`)
     .option("--fresh", "Read again even if this workspace's cache has the page (never re-reads a stopped URL)")
     .option("--json", "Output JSON")
