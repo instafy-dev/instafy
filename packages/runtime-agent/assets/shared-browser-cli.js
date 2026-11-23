@@ -4413,12 +4413,14 @@ const DECLINE_CLICK_TIMEOUT_MS = 2_000;
 // says "cookie"): its text and that of the small containers around it, up to
 // its dialog. A dialog that speaks only of privacy or consent (a policy to
 // accept, a consent form) is no cookie banner, though its buttons are judged
-// as a banner's (the describer's consent context). In a notice's own
-// settings, which the browser showed by pressing the settings button of a
-// banner found so (`request.settings`), that container is the settings' own
-// dialog, or one named after a notice (`request.names`, the describer's
-// words), whatever its size: the banner's words were read already, and the
-// settings hold every purpose's text.
+// as a banner's (the describer's consent context), nor is one about a tracker
+// or a tool that tracks. In a notice's own settings, which the browser showed
+// by pressing the settings button of a banner found so (`request.settings`),
+// that container sits in the notice those settings belong to
+// (`request.root`, which held them hidden before the press:
+// noticeSettingsInPage), whatever its size: the banner's words were read
+// already, and the settings hold every purpose's text. A dialog the press
+// showed outside that notice is never its settings.
 function cookieBannerInPage(element, request) {
   const doc = element.ownerDocument;
   const roots = [doc.body, doc.documentElement];
@@ -4437,21 +4439,17 @@ function cookieBannerInPage(element, request) {
       break;
     }
   }
-  const dialogSelector = "dialog, [role=dialog], [role=alertdialog], [aria-modal=true]";
-  if (banner && request && request.settings === true) {
-    const noticeName = new RegExp(String(request.names), "i");
-    for (let node = banner, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
-      if (typeof node.matches === "function" && node.matches(dialogSelector)) return true;
-      const named = ["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || "").join(" ").slice(0, 800);
-      if (noticeName.test(named)) return true;
-    }
-    return false;
+  if (request && request.settings === true) {
+    const root = request.root;
+    return Boolean(banner && root && root.nodeType === 1 && holds(root, banner));
   }
   if (!banner || typeof banner.textContent !== "string" || banner.textContent.length > 4_000) return false;
   const cookieName = /cookie/i;
-  // Tracking as a site's technology ("tracking technologies",
-  // "Tracking-Tools", "trackers"), never a parcel's tracking number.
-  const cookieText = /\b(?:cookies?|trackers?)\b|\btracking[\s-]*(?:technolog|tool|pixel|method|verfahren|dienst|service)/i;
+  // Tracking named as a site's technology ("tracking technologies",
+  // "Website-Tracking-Technologien", "tracking pixels"): never a tracker a
+  // person owns, a tool or service that tracks time or a parcel, or a
+  // parcel's tracking number.
+  const cookieText = /\bcookies?\b|\btracking[\s-]*(?:technolog|pixel)/i;
   const labelledText = (node) => String(node.getAttribute("aria-labelledby") || "")
     .split(/\s+/)
     .filter(Boolean)
@@ -4463,6 +4461,7 @@ function cookieBannerInPage(element, request) {
     })
     .join(" ")
     .slice(0, 400);
+  const dialogSelector = "dialog, [role=dialog], [role=alertdialog], [aria-modal=true]";
   let ownText = true;
   for (let node = banner, depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
     const named = [
@@ -4484,6 +4483,65 @@ function cookieBannerInPage(element, request) {
     }
   }
   return false;
+}
+
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Where a notice's settings button (`element`) keeps the
+// settings it shows, when the page holds them already, hidden, as a consent
+// manager draws them. Its banner is the nearest container around it that
+// holds one of `request.others` (the notice's accepts); each container around
+// that banner, below the page's body, named after a notice (its id, class,
+// label or test id, by `request.names`) is a place they may be. For each,
+// nearest first: the names of the hidden buttons it holds outside the banner,
+// and whether it holds a sign-in, password, code or payment field. With
+// `request.level`, the container at that place instead, or null. Only names
+// and attributes are read, never a field's value.
+function noticeSettingsInPage(element, request) {
+  const doc = element.ownerDocument;
+  const roots = [doc.body, doc.documentElement];
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  const holds = (container, node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const others = Array.isArray(request && request.others) ? request.others : [];
+  const level = request && Number.isInteger(request.level) ? request.level : null;
+  const places = [];
+  let banner = null;
+  for (let node = up(element), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    if (others.some((other) => other && holds(node, other))) {
+      banner = node;
+      break;
+    }
+  }
+  if (!banner) return level === null ? places : null;
+  const noticeName = new RegExp(String(request.names), "i");
+  const buttons = "button, [role=button], input[type=button], input[type=submit]";
+  const personalFields = "input[type=password], input[type=email], [autocomplete*=password], [autocomplete~=username], " +
+    "[autocomplete~=email], [autocomplete~=one-time-code], [autocomplete^=cc-], [autocomplete*=' cc-']";
+  const hidden = (node) => {
+    try {
+      return !node.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true, opacityProperty: true });
+    } catch (_) {
+      return false;
+    }
+  };
+  for (let node = up(banner), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    const named = ["id", "class", "aria-label", "data-testid"].map((name) => node.getAttribute(name) || "").join(" ").slice(0, 800);
+    if (!noticeName.test(named)) continue;
+    if (level !== null && places.length === level) return node;
+    places.push({
+      names: Array.from(node.querySelectorAll(buttons))
+        .filter((button) => !holds(banner, button) && !button.closest("a[href]") && button.disabled !== true && hidden(button))
+        .slice(0, 100)
+        .map((button) => String(button.getAttribute("aria-label") || button.textContent || button.value || "").replace(/\s+/g, " ").trim().slice(0, 200))
+        .filter(Boolean),
+      personal: node.querySelector(personalFields) !== null,
+    });
+  }
+  return level === null ? places : null;
 }
 
 // Words that name a field whose value is a payment detail, a password or a
@@ -4631,16 +4689,49 @@ async function framesHoldNoSecretField(page) {
   return framed === false;
 }
 
+// The container that keeps the settings a notice's settings button shows,
+// as a handle, when the page holds them already, hidden, with a refusal
+// (noticeSettingsInPage): the nearest one, named after a notice, whose hidden
+// buttons outside the button's banner include one the action policy reads as
+// a refusal by its words, and that holds no sign-in, password, code or
+// payment field. Null otherwise: settings a press would only draw, or ones
+// with no refusal, are never shown, so none is left open over the page. The
+// refusal pressed in them must sit in it (cookieBannerInPage).
+async function noticeSettingsOf(entry, accepts, pageUrl) {
+  const request = { kind: "notice-settings", others: accepts, names: CONSENT_NAMES_SOURCE };
+  const places = await entry.locator.evaluate(noticeSettingsInPage, request).catch(() => null);
+  if (!Array.isArray(places)) return null;
+  const refuses = (name) =>
+    classifyStep("click", { tag: "button", text: name, policy: { consentContext: true } }, { pageUrl }).consentRejection === true;
+  const level = places.findIndex((place) => Array.isArray(place?.names) && place.names.some(refuses));
+  if (level < 0 || places[level].personal !== false) return null;
+  const handle = await (async () => entry.locator.evaluateHandle(noticeSettingsInPage, { ...request, level }))().catch(() => null);
+  const root = typeof handle?.asElement === "function" ? handle.asElement() : null;
+  if (!root) await (async () => handle?.dispose())().catch(() => {});
+  return root;
+}
+
+// A notice's own refusal before a purpose's: settings that give each purpose
+// a refusal of its own repeat its name ("Reject" beside every purpose's
+// "Accept"), while the notice's own ("Reject All") is named once there.
+function noticeRefusalFirst(refusals) {
+  const nameOf = ({ entry }) => String(entry.description.label || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const named = new Map();
+  for (const refusal of refusals) named.set(nameOf(refusal), (named.get(nameOf(refusal)) || 0) + 1);
+  const once = refusals.filter((refusal) => named.get(nameOf(refusal)) === 1);
+  return [...once, ...refusals.filter((refusal) => !once.includes(refusal))];
+}
+
 // Marks a page whose notice's settings the browser showed, as a covered
 // control's mark is (coveredBeforeInPage): the document's, gone with it.
 const NOTICE_SETTINGS_KEY = "instafy.sharedBrowser.noticeSettingsShown";
 
 // The browser's own press of a notice's button: one whose middle it reaches,
 // under the step's guard, which lets no form post leave the tab, shown in the
-// action feed as declining cookies. `once`: the press is made only the first
-// time on the page. `after` runs once the page settled, under the guard. Null
-// when nothing was pressed, false when the press failed, else true.
-async function pressOnNotice(page, entry, pageUrl, { once = false, after = async () => {} } = {}) {
+// action feed by `label`. `once`: the press is made only the first time on the
+// page. `after` runs once the page settled, under the guard. Null when nothing
+// was pressed, false when the press failed, else true.
+async function pressOnNotice(page, entry, pageUrl, { once = false, label = "Decline cookies", after = async () => {} } = {}) {
   const landing = await clickLanding(entry);
   if (!landing || landing.other || landing.covered) return null;
   if (once) {
@@ -4660,7 +4751,7 @@ async function pressOnNotice(page, entry, pageUrl, { once = false, after = async
     const box = entry.description.box;
     emitAction({
       type: "click",
-      label: "Decline cookies",
+      label,
       url: pageUrl,
       x: box.x + box.width / 2,
       y: box.y + box.height / 2,
@@ -4708,25 +4799,27 @@ async function refuseNotice(page, refusals, others, pageUrl, request = {}) {
 // (`consentRejection`), only beside a button of the same banner that accepts
 // (`step_refused_consent`), in a banner that speaks of cookies or tracking
 // (cookieBannerInPage). A banner whose own buttons hold no refusal is refused
-// in its own settings: its settings button beside its accept
-// (isNoticeSettingsButton) is pressed once on the page, only to show them,
-// then a refusal they show ("Reject all", "Only necessary") beside an accept
-// or that button. Never an accept, a save, a switch or anything else on it,
-// never a link or a form's button, never one turned off or covered, and never
-// in a frame: a reading lists the page's own controls only. The caller has
-// ruled out a page that may show a secret or holds a sign-in or payment
-// field, settings that show such a field are left as they are, and a page
-// whose frame holds a payment, password or code field (sensitiveFrameInPage)
-// is left alone too. It shares nothing and switches nothing on, so it asks
-// nobody in any mode, as Octo's own press of a refusal never did, and no form
-// may leave the tab while it runs. The step says the banner was declined only
-// once its refusal is gone. True when it pressed something, so the page is
-// read again; a banner it could not press stays up. `leftOut`: the accepts
-// the reading leaves out of its list (collectInteractiveElements). Notices
-// that stayed up in local tests (Nov 22) stopped at no accept among the
-// controls a reading lists (one drawn in a frame, or past the list's room),
-// at a banner whose refusal was only in its settings, and at one whose words
-// named tracking, never cookies.
+// in its own settings when the page holds them already, hidden, with a
+// refusal and no sign-in or payment field (noticeSettingsOf): its settings
+// button beside its accept (isNoticeSettingsButton) is pressed once on the
+// page, only to show them, then a refusal they show ("Reject all", "Only
+// necessary"), the notice's own before a purpose's (noticeRefusalFirst),
+// beside an accept or that button, in that notice. Never an accept, a save, a
+// switch or anything else on it, never a link or a form's button, never one
+// turned off or covered, and never in a frame: a reading lists the page's own
+// controls only. The caller has ruled out a page that may show a secret or
+// holds a sign-in or payment field, settings that show such a field are left
+// as they are, and a page whose frame holds a payment, password or code field
+// (sensitiveFrameInPage) is left alone too. It shares nothing and switches
+// nothing on, so it asks nobody in any mode, as Octo's own press of a refusal
+// never did, and no form may leave the tab while it runs. The step says the
+// banner was declined only once its refusal is gone. True when it pressed
+// something, so the page is read again; a banner it could not press stays up.
+// `leftOut`: the accepts the reading leaves out of its list
+// (collectInteractiveElements). Notices that stayed up in local tests (Nov 22)
+// stopped at no accept among the controls a reading lists (one drawn in a
+// frame, or past the list's room), at a banner whose refusal was only in its
+// settings, and at one whose words named tracking, never cookies.
 async function declineCookieBanner(page, interactive, leftOut = []) {
   const pageUrl = page.url();
   const notice = noticeControls(interactive, leftOut, pageUrl);
@@ -4742,20 +4835,26 @@ async function declineCookieBanner(page, interactive, leftOut = []) {
       .evaluate(cookieBannerInPage, { kind: "cookie-banner", others: notice.accepts })
       .catch(() => false);
     if (beside !== true) continue;
-    const shown = await pressOnNotice(page, entry, pageUrl, { once: true });
-    if (shown !== true) return false;
-    // A press that took the tab to another page leaves it there, to be read
-    // as it is.
-    if (addressWithoutFragment(page.url()) !== addressWithoutFragment(pageUrl)) return true;
-    const accepts = [];
-    const shownControls = await collectInteractiveElements(page, null, null, accepts);
-    if (holdsPersonalFields(shownControls) || !(await framesHoldNoSecretField(page))) return true;
-    const inSettings = noticeControls(shownControls, accepts, pageUrl);
-    await refuseNotice(page, inSettings.refusals, [...inSettings.accepts, entry.locator], pageUrl, {
-      settings: true,
-      names: CONSENT_NAMES_SOURCE,
-    });
-    return true;
+    const root = await noticeSettingsOf(entry, notice.accepts, pageUrl);
+    if (!root) continue;
+    try {
+      const shown = await pressOnNotice(page, entry, pageUrl, { once: true, label: "Open cookie settings" });
+      if (shown !== true) return false;
+      // A press that took the tab to another page leaves it there, to be read
+      // as it is.
+      if (addressWithoutFragment(page.url()) !== addressWithoutFragment(pageUrl)) return true;
+      const accepts = [];
+      const shownControls = await collectInteractiveElements(page, null, null, accepts);
+      if (holdsPersonalFields(shownControls) || !(await framesHoldNoSecretField(page))) return true;
+      const inSettings = noticeControls(shownControls, accepts, pageUrl);
+      await refuseNotice(page, noticeRefusalFirst(inSettings.refusals), [...inSettings.accepts, entry.locator], pageUrl, {
+        settings: true,
+        root,
+      });
+      return true;
+    } finally {
+      await (async () => root.dispose())().catch(() => {});
+    }
   }
   return false;
 }

@@ -1723,7 +1723,8 @@ fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_p
 /// the model on it, one whose search a cookie notice covered and one a privacy notice covered; every review cell said
 /// "I didn't find" (local tests, Nov 22). Two reviewers are tried in the same pass before a review goes in the missing
 /// line, a home page with no review of the model is not a look (the site's own search box, a search that stays on its
-/// site, or its reviews section is), and a reviewer a notice covered is "not checked".
+/// site, or its reviews section is), so a review is a value not found only once a reviewer's search results or reviews
+/// section was read, and a reviewer a notice covered is "not checked".
 #[test]
 fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_found() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1734,8 +1735,8 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
         "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.",
         "- With no search, try up to two reviewers' own sites that way, in the same pass, before a review goes in the missing line.",
         "A home page with no review of the model is not a look: search the site with its own box (a search that stays on its site needs no prompt) or open its reviews section, and open the model's review from there.",
-        "Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
-        "- A review no reviewer's page could be read for (none could be tried, or each one was covered by a notice or stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
+        "Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
+        "- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
     ] {
         let found = comparing[at..]
             .find(line)
@@ -1781,11 +1782,11 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
             "{transport}"
         );
         assert!(
-            prompt.contains("Only once a reviewer's page was read is a review you have no address or link for a value you didn't find"),
+            prompt.contains("Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find"),
             "{transport}"
         );
         assert!(
-            prompt.contains("- A review no reviewer's page could be read for (none could be tried, or each one was covered by a notice or stopped you)"),
+            prompt.contains("- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you)"),
             "{transport}"
         );
     }
