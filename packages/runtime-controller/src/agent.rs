@@ -3327,7 +3327,8 @@ const AGENT_COMPLETE_JOB_UPDATE_SQL: &str = "update agent_jobs
            grant_ids,
            engine,
            claude_code_login_id,
-           credential_id";
+           credential_id,
+           intent";
 
 /// Logs a completion that matched no job its runtime holds, with the job's
 /// status now. One back in the queue after a lease (`queued`, with
@@ -3625,10 +3626,19 @@ pub(crate) async fn agent_complete(
     // Claude Code login its lease took, never one its runtime names
     // (crate::sign_in_room, docs/Local-Engine-Turns.md 11.20). A failed turn
     // that reported reaching that sign-in's plan's limit records it, and a
-    // completed one clears it, for the job's own person only, before the
-    // reply and the failure message are written, which name the sign-in and,
-    // after a limit, the agent's next AI with room.
-    let ran_on = if lane {
+    // completed one leased after the limit was recorded clears it, for the
+    // job's own person only, before the reply and the failure message are
+    // written, which name the sign-in and, after a limit, the agent's next AI
+    // with room. Only a turn that runs an AI says anything of a plan: a
+    // terminal command records, clears and names none.
+    let runs_an_ai = crate::dispatch::dispatch_requires_ai_access(
+        row.get::<_, Option<String>>("intent")
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    let ran_on = if !runs_an_ai {
+        None
+    } else if lane {
         lane_login.map(crate::sign_in_room::SignIn::Login)
     } else {
         crate::credentials::usable_user_credential_id(row.get("credential_id"))
@@ -3651,6 +3661,7 @@ pub(crate) async fn agent_complete(
                 job_agent.as_ref(),
                 job_status,
                 lane,
+                row.get("leased_at"),
                 &artifacts_value,
             )
             .await?,

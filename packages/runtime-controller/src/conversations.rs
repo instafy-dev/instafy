@@ -344,6 +344,7 @@ fn strip_client_internal_metadata(metadata: &mut JsonValue) {
         map.remove("internalPurpose");
         map.remove("spaceReview");
         map.remove("_goalController");
+        map.remove(crate::conversation_goals::state::GOAL_WORDS_KEY);
     }
 }
 
@@ -351,6 +352,7 @@ pub(crate) fn public_conversation_metadata(metadata: Option<JsonValue>) -> JsonV
     let mut metadata = metadata.unwrap_or_else(|| json!({}));
     if let Some(map) = metadata.as_object_mut() {
         map.remove("_goalController");
+        map.remove(crate::conversation_goals::state::GOAL_WORDS_KEY);
     }
     metadata
 }
@@ -847,6 +849,7 @@ pub(crate) async fn create_blank_project_conversation(
     };
     strip_client_internal_metadata(&mut metadata_value);
     crate::conversation_goals::state::prepare_client_metadata(&mut metadata_value);
+    crate::conversation_goals::state::record_goal_words(&mut metadata_value, &context);
     let thread_parent_id = match body.parent_conversation_id.as_ref() {
         Some(raw) if !raw.trim().is_empty() => Some(
             Uuid::from_str(raw.trim())
@@ -1120,6 +1123,7 @@ pub(crate) async fn update_conversation_metadata(
         &mut metadata_value,
         existing.metadata.as_ref(),
     );
+    crate::conversation_goals::state::record_goal_words(&mut metadata_value, &context);
 
     if let Some(map) = metadata_value.as_object() {
         if let Some(raw) = map.get("visibility").and_then(|value| value.as_str()) {
@@ -3301,6 +3305,7 @@ pub(crate) async fn ensure_conversation_record(
                 row.get::<_, Option<JsonValue>>("metadata").as_ref(),
             );
         }
+        crate::conversation_goals::state::record_goal_words(metadata, context);
     }
     let metadata_param = request.conversation_metadata.as_ref().map(PgJson);
 

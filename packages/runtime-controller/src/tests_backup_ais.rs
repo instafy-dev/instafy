@@ -1691,48 +1691,459 @@ async fn a_goal_on_a_claude_code_agent_goes_on_after_its_lane_turn() -> anyhow::
                 .metadata_of("select metadata from conversations where id = $1", chat)
                 .await?;
             assert_eq!(goal["instafyGoal"]["status"], json!("active"));
+            // Each lane job keeps the goal's id, which the goal counts its
+            // turns by across revisions, as for a Codex step: a new human
+            // turn's revision does not restart the count.
+            let goal_id = goal["instafyGoal"]["id"].clone();
+            assert_eq!(sent.payload["metadata"]["goal"], json!({ "id": goal_id }));
+            assert_eq!(next.payload["metadata"]["goal"], json!({ "id": goal_id }));
+            assert_eq!(
+                goal_turns(&lane, chat, &goal_id, &Uuid::new_v4().to_string()).await?,
+                1
+            );
             Ok(())
         },
     )
     .await
 }
 
-/// A goal whose ChatGPT turn fails at its usage limit while the agent's
-/// Claude Code login backup has room goes on there
-/// (docs/Local-Engine-Turns.md 11.20): the completion records the goal's next
-/// step, and its wake-up becomes a lane job on that login, bound to the goal.
+/// The goal's turn count, as its wake-up reads it
+/// (`conversation_goals::prepare_request`), for the goal `goal_id` and the
+/// binding `revision`.
+async fn goal_turns(
+    lane: &Lane,
+    chat: Uuid,
+    goal_id: &JsonValue,
+    revision: &str,
+) -> anyhow::Result<i64> {
+    sql_one(
+        lane.pool(),
+        "select coalesce(max(case when jsonb_typeof(j.payload#>'{metadata,goalContinuation,turn}')='number'
+                                 then greatest(0,least(100,(j.payload#>>'{metadata,goalContinuation,turn}')::numeric))::bigint
+                                 else 0 end),0)::bigint
+           from agent_jobs j
+          where j.conversation_id = $1
+            and (j.payload#>>'{metadata,goal,id}' = $2 or j.payload#>>'{metadata,_controllerGoal,revision}' = $3)",
+        &[&chat, &goal_id.as_str().unwrap_or_default(), &revision],
+    )
+    .await
+}
+
+/// The status of the goal of `chat`, once its wake-up is done with `source`'s
+/// next step: `dispatched`, `blocked` or `canceled`.
+async fn goal_after_step(
+    lane: &Lane,
+    chat: Uuid,
+    source: Uuid,
+) -> anyhow::Result<(String, JsonValue)> {
+    let step: String = eventually("the goal's next step to be settled", || async {
+        let row = lane
+            .pool()
+            .get()
+            .await?
+            .query_opt(
+                "select status from conversation_goal_continuations
+                  where source_job_id = $1 and status in ('dispatched', 'blocked', 'canceled')",
+                &[&source],
+            )
+            .await?;
+        anyhow::Ok(row.map(|row| row.get::<_, String>(0)))
+    })
+    .await?;
+    let metadata = lane
+        .metadata_of("select metadata from conversations where id = $1", chat)
+        .await?;
+    Ok((step, metadata["instafyGoal"]["status"].clone()))
+}
+
+/// The owner's @reviewer on their ChatGPT connection, with `backups`.
+async fn reviewer_with(lane: &Lane, backups: JsonValue) -> anyhow::Result<()> {
+    let (status, made) = lane
+        .harness
+        .call(
+            "POST",
+            "/me/agents",
+            Some(&lane.owner()),
+            Some(json!({
+                "handle": "reviewer",
+                "credentialId": lane.owner_credential,
+                "backupAis": backups,
+            })),
+        )
+        .await?;
+    anyhow::ensure!(status == StatusCode::OK, "reviewer: {status} {made}");
+    Ok(())
+}
+
+/// The owner's goal turn to @reviewer, on its ChatGPT connection, failed at
+/// its usage limit: its job.
+async fn goal_turn_failed_at_its_limit(lane: &Lane, chat: Uuid) -> anyhow::Result<Uuid> {
+    let runtime = lane.space().runtime;
+    let job = lane.admitted(chat, &send_to("reviewer", runtime)).await?;
+    anyhow::ensure!(
+        lane.job(job).await?.credential_id == Some(lane.owner_credential),
+        "the goal's turn is on the first AI"
+    );
+    lane.lease_one(runtime, job).await?;
+    lane.harness
+        .complete(
+            runtime,
+            job,
+            json!({
+                "outcome": "failed",
+                "error_message": "You've hit your usage limit.",
+                "artifacts": [{
+                    "kind": "ai/usage-limit",
+                    "resetsAt": (Utc::now() + Duration::hours(3)).timestamp(),
+                }],
+            }),
+        )
+        .await?;
+    Ok(job)
+}
+
+/// A goal's next step after a turn that did not run on Claude Code never runs
+/// there (docs/Local-Engine-Turns.md 11.5, 11.20): its prompt carries that
+/// turn's reply and the goal's checkpoint, an agent's job's words. A Codex
+/// turn at its usage limit whose agent's only backup with room is a login
+/// blocks the goal rather than run the step there; with a connection after
+/// the login, the step runs on the connection.
 #[tokio::test]
-async fn a_goals_chatgpt_turn_at_its_limit_goes_on_on_a_login_backup() -> anyhow::Result<()> {
+async fn a_goals_codex_turn_at_its_limit_never_goes_on_on_claude_code() -> anyhow::Result<()> {
     with_lane(
         "backup-ais-goal-login",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
             let owner = space.owner;
-            let chatgpt = lane.owner_credential;
             let first = first_login_of(owner);
-            let (status, made) = lane
-                .harness
-                .call(
-                    "POST",
-                    "/me/agents",
-                    Some(&lane.owner()),
-                    Some(json!({
-                        "handle": "reviewer",
-                        "credentialId": chatgpt,
-                        "backupAis": [{ "claudeCodeLoginId": first }],
-                    })),
+            reviewer_with(&lane, json!([{ "claudeCodeLoginId": first }])).await?;
+            let chat = goal_chat(&lane).await?;
+            let job = goal_turn_failed_at_its_limit(&lane, chat).await?;
+            let (step, goal) = goal_after_step(&lane, chat, job).await?;
+            assert_eq!((step.as_str(), goal), ("blocked", json!("blocked")));
+            let lane_jobs: i64 = sql_one(
+                lane.pool(),
+                "select count(*) from agent_jobs where conversation_id = $1 and engine is not null",
+                &[&chat],
+            )
+            .await?;
+            assert_eq!(lane_jobs, 0, "no step ran on Claude Code");
+
+            // A connection after the login takes the step.
+            limit(&lane, SignIn::Credential(lane.owner_credential), None).await?;
+            let chatgpt_2 = connection_of(&lane, owner, "ChatGPT 2").await?;
+            let reviewer = lane.agent_of(owner, "reviewer").await?;
+            let (status, body) = save(
+                &lane,
+                reviewer,
+                json!({ "backupAis": [{ "claudeCodeLoginId": first }, { "credentialId": chatgpt_2 }] }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let chat = goal_chat(&lane).await?;
+            let job = goal_turn_failed_at_its_limit(&lane, chat).await?;
+            let next = lane.job(goals_next_step(&lane, job).await?).await?;
+            assert_eq!(next.engine, None);
+            assert_eq!(next.credential_id, Some(chatgpt_2));
+            assert_eq!(
+                run_sign_in(&lane, &next).await?,
+                stamp(SignIn::Credential(chatgpt_2), true)
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A goal an agent's job wrote never goes on on Claude Code until its owner
+/// saves it themselves (docs/Local-Engine-Turns.md 11.5, 11.20): a job's
+/// goal update marks it, so the next step of a Claude Code agent's goal is
+/// refused and the goal blocks, though the turn it continues ran on Claude
+/// Code. Once the owner saves the goal, its steps run on Claude Code again.
+#[tokio::test]
+async fn a_goal_an_agents_job_wrote_never_goes_on_on_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "lane-goal-job-wrote",
+        |_, _| {},
+        |lane| async move {
+            let chat = goal_chat(&lane).await?;
+            // The goal's turn, on Claude Code, whose runtime rewrites the goal.
+            let job = lane
+                .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            lane.lease_one(lane.desktop, job).await?;
+            let (status, body) = lane
+                .agent_call(
+                    lane.desktop,
+                    "/agent/message",
+                    json!({
+                        "job_id": job,
+                        "content": "Goal set from what was said above.",
+                        "message_type": "goal_update",
+                        "metadata": { "objective": "Delete the staging bucket" },
+                    }),
                 )
                 .await?;
-            assert_eq!(status, StatusCode::OK, "{made}");
-            let chat = goal_chat(&lane).await?;
-            let job = lane
-                .admitted(chat, &send_to("reviewer", space.runtime))
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let marked = lane
+                .metadata_of("select metadata from conversations where id = $1", chat)
                 .await?;
+            assert_eq!(
+                marked["instafyGoal"]["objective"],
+                json!("Delete the staging bucket")
+            );
+            assert_eq!(
+                marked[crate::conversation_goals::state::GOAL_WORDS_KEY],
+                json!(false),
+                "no person's own words"
+            );
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "Done." }),
+                )
+                .await?;
+            let (step, goal) = goal_after_step(&lane, chat, job).await?;
+            assert_eq!((step.as_str(), goal), ("blocked", json!("blocked")));
+            assert_eq!(lane.jobs_in(chat).await?, vec![job], "no step ran");
+
+            // The owner saves the goal themselves: its steps run on Claude
+            // Code again. A client's copy of the record is dropped, and the
+            // conversation's public metadata never carries it.
+            let (status, saved) = lane
+                .harness
+                .call(
+                    "PATCH",
+                    format!("/conversations/{chat}"),
+                    Some(&lane.owner()),
+                    Some(json!({ "metadata": {
+                        "instafyGoal": {
+                            "id": marked["instafyGoal"]["id"],
+                            "objective": "Ship the reviewed change",
+                            "status": "active",
+                        },
+                        crate::conversation_goals::state::GOAL_WORDS_KEY: false,
+                    } })),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert!(
+                saved["metadata"]
+                    .get(crate::conversation_goals::state::GOAL_WORDS_KEY)
+                    .is_none(),
+                "{saved}"
+            );
+            let cleared = lane
+                .metadata_of("select metadata from conversations where id = $1", chat)
+                .await?;
+            assert_eq!(
+                cleared[crate::conversation_goals::state::GOAL_WORDS_KEY],
+                json!(lane.space().owner.to_string()),
+                "{cleared}"
+            );
+            let job = lane
+                .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            lane.lease_one(lane.desktop, job).await?;
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "Shipped half." }),
+                )
+                .await?;
+            let next = lane.job(goals_next_step(&lane, job).await?).await?;
+            assert_eq!(next.engine.as_deref(), Some(claude_code_lane::ENGINE));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A goal's next step on Claude Code quotes only its owner's own Claude Code
+/// turns (docs/Local-Engine-Turns.md 11.5, 11.20): while the runs its prompt
+/// would quote hold a Codex turn's reply, the step keeps off Claude Code, and
+/// with no other AI of the agent's with room the goal blocks, though the turn
+/// it continues ran on Claude Code.
+#[tokio::test]
+async fn a_goal_step_that_would_quote_a_codex_reply_never_runs_on_claude_code() -> anyhow::Result<()>
+{
+    with_lane(
+        "backup-ais-goal-quotes",
+        |_, _| {},
+        |lane| async move {
+            let runtime = lane.space().runtime;
+            let chat = goal_chat(&lane).await?;
+            // The owner's goal turn to @helper, on their ChatGPT connection.
+            let codex = lane.admitted(chat, &send_to("helper", runtime)).await?;
+            lane.lease_one(runtime, codex).await?;
+            lane.harness
+                .complete(
+                    runtime,
+                    codex,
+                    json!({ "outcome": "succeeded", "summary": "The build fails in packages/app." }),
+                )
+                .await?;
+            // Its next step, on @helper again, ends without a word.
+            let step = goals_next_step(&lane, codex).await?;
+            assert_eq!(lane.job(step).await?.engine, None);
+            lane.end_job(step).await?;
+            // Then the owner's turn to @claude, on Claude Code: its next step
+            // would quote both Codex runs.
+            let job = lane
+                .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            lane.lease_one(lane.desktop, job).await?;
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                )
+                .await?;
+            let (step, goal) = goal_after_step(&lane, chat, job).await?;
+            assert_eq!((step.as_str(), goal), ("blocked", json!("blocked")));
+            let lane_jobs: i64 = sql_one(
+                lane.pool(),
+                "select count(*) from agent_jobs where conversation_id = $1 and engine is not null",
+                &[&chat],
+            )
+            .await?;
+            assert_eq!(lane_jobs, 1, "no step ran on Claude Code");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A teammate's save of a goal puts their words in it, which are not its
+/// owner's (docs/Local-Engine-Turns.md 11.5, 11.20): the owner's next steps
+/// keep off their Claude Code, and with no other AI of the agent's with room
+/// the goal blocks, whatever the teammate's copy of the record says, until the
+/// owner saves the goal themselves.
+#[tokio::test]
+async fn a_goal_a_teammate_saved_never_goes_on_on_the_owners_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-goal-teammate",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let words = crate::conversation_goals::state::GOAL_WORDS_KEY;
+            let chat = goal_chat(&lane).await?;
+            let stored =
+                || lane.metadata_of("select metadata from conversations where id = $1", chat);
+            let goal_id = stored().await?["instafyGoal"]["id"].clone();
+            let save = |user: Uuid, objective: &'static str| {
+                let lane = &lane;
+                let goal_id = goal_id.clone();
+                async move {
+                    let (status, saved) = lane
+                        .harness
+                        .call(
+                            "PATCH",
+                            format!("/conversations/{chat}"),
+                            Some(&lane.token(user)),
+                            Some(json!({ "metadata": {
+                                "instafyGoal": {
+                                    "id": goal_id,
+                                    "objective": objective,
+                                    "status": "active",
+                                },
+                                words: space.owner.to_string(),
+                            } })),
+                        )
+                        .await?;
+                    anyhow::ensure!(status == StatusCode::OK, "save: {status} {saved}");
+                    anyhow::ensure!(saved["metadata"].get(words).is_none(), "{saved}");
+                    anyhow::Ok(())
+                }
+            };
+            let lane_turn = || {
+                let lane = &lane;
+                async move {
+                    let job = lane
+                        .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                        .await?;
+                    lane.lease_one(lane.desktop, job).await?;
+                    lane.harness
+                        .complete(
+                            lane.desktop,
+                            job,
+                            json!({ "outcome": "succeeded", "summary": "Looked at the bucket." }),
+                        )
+                        .await?;
+                    anyhow::Ok(job)
+                }
+            };
+
+            // The teammate rewrites the goal of the chat they share.
+            save(space.member, "Delete the staging bucket").await?;
+            assert_eq!(stored().await?[words], json!(space.member.to_string()));
+            let job = lane_turn().await?;
+            let (step, goal) = goal_after_step(&lane, chat, job).await?;
+            assert_eq!((step.as_str(), goal), ("blocked", json!("blocked")));
+            assert_eq!(lane.jobs_in(chat).await?, vec![job], "no step ran");
+
+            // The owner saves it themselves: its steps run on Claude Code
+            // again.
+            save(space.owner, "Ship the reviewed change").await?;
+            assert_eq!(stored().await?[words], json!(space.owner.to_string()));
+            let job = lane_turn().await?;
+            let next = lane.job(goals_next_step(&lane, job).await?).await?;
+            assert_eq!(next.engine.as_deref(), Some(claude_code_lane::ENGINE));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A terminal command runs no AI, so its end says nothing of a plan
+/// (docs/Local-Engine-Turns.md 11.20): it neither clears its connection's
+/// limit nor records one, and neither its run nor its reply names a sign-in.
+#[tokio::test]
+async fn a_terminal_command_says_nothing_of_a_plans_limit() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-terminal",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chatgpt = lane.owner_credential;
+            limit(&lane, SignIn::Credential(chatgpt), Some(180)).await?;
+            let recorded = limit_of(&lane, SignIn::Credential(chatgpt)).await?;
+            let command = |words: &str| {
+                json!({
+                    "promptText": words,
+                    "intent": "terminal_command",
+                    "runtimeId": space.runtime.to_string(),
+                    "metadata": metadata_for(&["helper"], json!({})),
+                })
+            };
+            let chat = lane.chat().await?;
+            let job = lane.admitted(chat, &command("ls")).await?;
             let sent = lane.job(job).await?;
             assert_eq!(sent.credential_id, Some(chatgpt));
-            let revision = sent.payload["metadata"]["_controllerGoal"]["revision"].clone();
-            assert!(revision.is_string(), "{}", sent.payload);
+            assert_eq!(run_sign_in(&lane, &sent).await?, JsonValue::Null);
+            lane.lease_one(space.runtime, job).await?;
+            lane.harness
+                .complete(
+                    space.runtime,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "total 0" }),
+                )
+                .await?;
+            assert_eq!(
+                limit_of(&lane, SignIn::Credential(chatgpt)).await?,
+                recorded
+            );
+            let named = ["aiSignIn", "ai_sign_in", "aiSignInNext", "ai_sign_in_next"];
+            assert_never_holds(&sent.payload, &named, "the job");
+            assert_never_holds(&messages_of(&lane, chat).await?, &named, "the chat");
+            // Nor does a failed one record a limit.
+            limit(&lane, SignIn::Credential(chatgpt), None).await?;
+            let chat = lane.chat().await?;
+            let job = lane.admitted(chat, &command("ls")).await?;
             lane.lease_one(space.runtime, job).await?;
             lane.harness
                 .complete(
@@ -1740,41 +2151,287 @@ async fn a_goals_chatgpt_turn_at_its_limit_goes_on_on_a_login_backup() -> anyhow
                     job,
                     json!({
                         "outcome": "failed",
-                        "error_message": "You've hit your usage limit.",
-                        "artifacts": [{
-                            "kind": "ai/usage-limit",
-                            "resetsAt": (Utc::now() + Duration::hours(3)).timestamp(),
-                        }],
+                        "error_message": "ls: not found",
+                        "artifacts": [{ "kind": "ai/usage-limit", "resetsAt": null }],
                     }),
                 )
                 .await?;
-            let continuations: i64 = sql_one(
+            assert_eq!(limit_of(&lane, SignIn::Credential(chatgpt)).await?, None);
+            assert_never_holds(&messages_of(&lane, chat).await?, &named, "the chat");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// The metadata of every message of `chat`, oldest first.
+async fn messages_of(lane: &Lane, chat: Uuid) -> anyhow::Result<JsonValue> {
+    sql_one(
+        lane.pool(),
+        "select coalesce(jsonb_agg(metadata order by created_at), '[]'::jsonb)
+           from conversation_messages where conversation_id = $1",
+        &[&chat],
+    )
+    .await
+}
+
+/// The latest word on a limit stands (docs/Local-Engine-Turns.md 11.20): a
+/// turn leased before a limit was recorded, which completes after, leaves the
+/// limit standing, while one leased after it clears it; and a later report of
+/// a shorter limit never cuts a longer one short, while a longer one extends
+/// it.
+#[tokio::test]
+async fn the_latest_word_on_a_limit_stands() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-limit-order",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = space.owner;
+            let runtime = space.runtime;
+            let chatgpt = lane.owner_credential;
+            let chatgpt_2 = connection_of(&lane, owner, "ChatGPT 2").await?;
+            reviewer_with(&lane, json!([{ "credentialId": chatgpt_2 }])).await?;
+            // The owner's turn to @reviewer, sent now, and leased now when
+            // `lease` says so: its job.
+            let turn = |lease: bool| {
+                let lane = &lane;
+                async move {
+                    let (job, sent) = sent(lane, "reviewer").await?;
+                    anyhow::ensure!(sent.credential_id == Some(chatgpt), "on ChatGPT");
+                    if lease {
+                        let leased = lane.harness.lease(runtime).await?;
+                        anyhow::ensure!(leased["id"] == json!(job), "leased {leased}");
+                    }
+                    anyhow::Ok(job)
+                }
+            };
+            let at_limit = |job: Uuid, at: DateTime<Utc>| {
+                let lane = &lane;
+                async move {
+                    lane.harness
+                        .complete(
+                            runtime,
+                            job,
+                            json!({
+                                "outcome": "failed",
+                                "error_message": "You've hit your usage limit.",
+                                "artifacts": [{ "kind": "ai/usage-limit", "resetsAt": at.timestamp() }],
+                            }),
+                        )
+                        .await
+                }
+            };
+            let succeeded = |job: Uuid| {
+                let lane = &lane;
+                async move {
+                    lane.harness
+                        .complete(
+                            runtime,
+                            job,
+                            json!({ "outcome": "succeeded", "summary": "Reviewed." }),
+                        )
+                        .await
+                }
+            };
+            let seconds = |at: Option<DateTime<Utc>>| at.map(|at| at.timestamp());
+
+            // B leased before A reached the limit; C sent before but leased
+            // after.
+            let b = turn(true).await?;
+            let a = turn(true).await?;
+            let c = turn(false).await?;
+            let reset = Utc::now() + Duration::hours(3);
+            at_limit(a, reset).await?;
+            assert_eq!(
+                seconds(limit_of(&lane, SignIn::Credential(chatgpt)).await?),
+                Some(reset.timestamp())
+            );
+            succeeded(b).await?;
+            assert_eq!(
+                seconds(limit_of(&lane, SignIn::Credential(chatgpt)).await?),
+                Some(reset.timestamp()),
+                "a turn leased before the limit leaves it"
+            );
+            let (_, next) = sent(&lane, "reviewer").await?;
+            assert_eq!(next.credential_id, Some(chatgpt_2), "the next turn takes the backup");
+            lane.end_jobs().await?;
+            sql(
                 lane.pool(),
-                "select count(*) from conversation_goal_continuations where source_job_id = $1",
-                &[&job],
+                "update agent_jobs set status = 'queued', completed_at = null where id = $1",
+                &[&c],
             )
             .await?;
-            assert_eq!(continuations, 1, "the goal's next step is recorded");
-            let next = lane.job(goals_next_step(&lane, job).await?).await?;
-            assert_eq!(next.engine.as_deref(), Some(claude_code_lane::ENGINE));
-            assert_eq!(next.credential_id, None);
-            assert_eq!(next.claude_code_login_ids, Some(vec![first]));
+            let leased = lane.harness.lease(runtime).await?;
+            assert_eq!(leased["id"], json!(c));
+            succeeded(c).await?;
             assert_eq!(
-                next.payload["metadata"]["_controllerGoal"]["revision"],
-                revision
+                limit_of(&lane, SignIn::Credential(chatgpt)).await?,
+                None,
+                "a turn leased after the limit clears it"
             );
+
+            // A longer limit, then a shorter report: the longer stands.
+            let d = turn(true).await?;
+            let e = turn(true).await?;
+            let long = Utc::now() + Duration::days(5);
+            let short = Utc::now() + Duration::minutes(20);
+            at_limit(d, long).await?;
+            at_limit(e, short).await?;
             assert_eq!(
-                next.payload["metadata"]["goalContinuation"]["turn"],
-                json!(1)
+                seconds(limit_of(&lane, SignIn::Credential(chatgpt)).await?),
+                Some(long.timestamp())
             );
+            // A shorter limit, then a longer report: the longer one.
+            limit(&lane, SignIn::Credential(chatgpt), None).await?;
+            let f = turn(true).await?;
+            let g = turn(true).await?;
+            let longer = Utc::now() + Duration::days(2);
+            at_limit(f, short).await?;
+            at_limit(g, longer).await?;
             assert_eq!(
-                run_sign_in(&lane, &next).await?,
-                stamp(SignIn::Login(first), true)
+                seconds(limit_of(&lane, SignIn::Credential(chatgpt)).await?),
+                Some(longer.timestamp())
             );
-            let goal = lane
-                .metadata_of("select metadata from conversations where id = $1", chat)
+
+            // The same holds for a Claude Code login.
+            let first = first_login_of(owner);
+            let (_, early) = lane.lane_turn().await?;
+            lane.lease_one(lane.desktop, early).await?;
+            sql(
+                lane.pool(),
+                "update claude_code_logins
+                    set limit_resets_at = now() + interval '1 hour', limit_recorded_at = now()
+                  where id = $1",
+                &[&first],
+            )
+            .await?;
+            lane.harness
+                .complete(lane.desktop, early, json!({ "outcome": "succeeded", "summary": "Done." }))
                 .await?;
-            assert_eq!(goal["instafyGoal"]["status"], json!("active"));
+            assert!(
+                limit_of(&lane, SignIn::Login(first)).await?.is_some(),
+                "a lane turn leased before the limit leaves it"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Where a turn reaches a Claude Code login only as a backup, a login the
+/// lane would refuse the turn on is passed over, and the turn goes on to the
+/// next AI (docs/Local-Engine-Turns.md 11.20): here a `/` command, which
+/// Claude Code would read as its own. A Claude Code agent with room on its
+/// first login refuses such a turn as before backups; once that login is at
+/// its limit, the turn goes on to its connection.
+#[tokio::test]
+async fn a_backup_login_the_lane_would_refuse_is_passed_over() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-refused-login",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let owner = space.owner;
+            let runtime = space.runtime;
+            let chatgpt = lane.owner_credential;
+            let chatgpt_2 = connection_of(&lane, owner, "ChatGPT 2").await?;
+            let first = first_login_of(owner);
+            let work = login_of(&lane, owner, "Work", 1).await?;
+            reviewer_with(
+                &lane,
+                json!([{ "claudeCodeLoginId": work }, { "credentialId": chatgpt_2 }]),
+            )
+            .await?;
+            limit(&lane, SignIn::Credential(chatgpt), Some(60)).await?;
+            let command = |handle: &str| {
+                json!({
+                    "promptText": "/review the failing build",
+                    "intent": "feature",
+                    "runtimeId": runtime.to_string(),
+                    "metadata": metadata_for(&[handle], json!({})),
+                })
+            };
+            let job = lane
+                .job(lane.admitted(lane.chat().await?, &command("reviewer")).await?)
+                .await?;
+            assert_eq!((job.engine.as_deref(), job.credential_id), (None, Some(chatgpt_2)));
+            let (_, job) = sent(&lane, "reviewer").await?;
+            assert_eq!(job.claude_code_login_ids, Some(vec![work]), "words it can take");
+            lane.end_jobs().await?;
+
+            let (status, body) = save(
+                &lane,
+                lane.owner_claude,
+                json!({ "backupAis": [{ "claudeCodeLoginId": work }, { "credentialId": chatgpt_2 }] }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            lane.refused(
+                &lane.owner(),
+                lane.chat().await?,
+                command(CLAUDE),
+                unsupported("command"),
+            )
+            .await?;
+            limit(&lane, SignIn::Login(first), Some(60)).await?;
+            let job = lane
+                .job(lane.admitted(lane.chat().await?, &command(CLAUDE)).await?)
+                .await?;
+            assert_eq!((job.engine.as_deref(), job.credential_id), (None, Some(chatgpt_2)));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A person the switch does not cover takes no turn on Claude Code, and a
+/// login among an agent's backups is passed over for them as for any turn the
+/// lane refuses (docs/Local-Engine-Turns.md 11.6, 11.20); a Claude Code agent
+/// with room on its first login is refused as before.
+#[tokio::test]
+async fn a_backup_login_is_passed_over_while_the_switch_does_not_cover_its_owner(
+) -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-switch-off",
+        |config, space| {
+            config.claude_code_lane =
+                ClaudeCodeLaneUsers(DeviceGrantUsers::Only(vec![space.member]));
+        },
+        |lane| async move {
+            let space = lane.space();
+            let owner = space.owner;
+            let chatgpt = lane.owner_credential;
+            let chatgpt_2 = connection_of(&lane, owner, "ChatGPT 2").await?;
+            let first = first_login_of(owner);
+            reviewer_with(&lane, json!([{ "credentialId": chatgpt_2 }])).await?;
+            // Saved while the switch covered them.
+            let reviewer = lane.agent_of(owner, "reviewer").await?;
+            sql(
+                lane.pool(),
+                "update user_agents set backup_ais = $2 where id = $1",
+                &[
+                    &reviewer,
+                    &PgJson(entries(&[
+                        SignIn::Login(first),
+                        SignIn::Credential(chatgpt_2),
+                    ])),
+                ],
+            )
+            .await?;
+            limit(&lane, SignIn::Credential(chatgpt), Some(60)).await?;
+            let (_, job) = sent(&lane, "reviewer").await?;
+            assert_eq!(
+                (job.engine.as_deref(), job.credential_id),
+                (None, Some(chatgpt_2))
+            );
+            lane.refused(
+                &lane.owner(),
+                lane.chat().await?,
+                lane_send(lane_metadata(json!({}))),
+                not_allowed(),
+            )
+            .await?;
             Ok(())
         },
     )

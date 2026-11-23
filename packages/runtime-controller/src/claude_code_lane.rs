@@ -198,7 +198,8 @@ const PAYLOAD_METADATA_KEYS: [&str; 7] = [
 const GOAL_BINDING_KEY: &str = "_controllerGoal";
 /// The conversation's goal as dispatch read it when it bound the turn
 /// (`conversation_goals::bind_dispatch`), present only while the
-/// conversation has one.
+/// conversation has one. A lane job keeps only its `id`, which the goal
+/// counts its turns by across its revisions (`conversation_goals::prepare_request`).
 const GOAL_KEY: &str = "goal";
 /// A goal's next step's turn number and source, which its wake-up's request
 /// carries (`conversation_goals::prepare_request`), and the goal counts its
@@ -316,6 +317,26 @@ pub(crate) fn check_target(
     // L3.
     check_turn_shape(request, target.uses_browser)?;
     check_prompt_text(target.prompt_text)
+}
+
+/// Whether L1-L3 would refuse `request` on Claude Code for one of its targets
+/// whose words are `prompt_text` (11.6), the target's own saved agent aside:
+/// dispatch passes over a Claude Code login it reaches only as a backup for
+/// such a turn, and goes on to the agent's next AI
+/// (crate::sign_in_room::LoginUse).
+pub(crate) fn refuses_turn(
+    config: &AppConfig,
+    context: &RequestContext,
+    request: &DispatchPromptNormalized,
+    uses_browser: bool,
+    prompt_text: &str,
+) -> bool {
+    let Some(owner) = context.user_id else {
+        return true;
+    };
+    !config.claude_code_lane.allow(owner)
+        || check_turn_shape(request, uses_browser).is_err()
+        || check_prompt_text(prompt_text).is_err()
 }
 
 /// L3 (11.4): what a Claude Code agent's turn cannot ask for. Each refusal
@@ -628,9 +649,12 @@ pub(crate) fn payload_metadata(
             map.insert(key.to_string(), value.clone());
         }
     }
-    if metadata.get(GOAL_KEY).is_some_and(|goal| !goal.is_null()) {
+    if let Some(goal) = metadata.get(GOAL_KEY).filter(|goal| !goal.is_null()) {
         if let Some(binding) = metadata.get(GOAL_BINDING_KEY) {
             map.insert(GOAL_BINDING_KEY.to_string(), binding.clone());
+            if let Some(id) = goal.get("id").filter(|id| id.is_string()) {
+                map.insert(GOAL_KEY.to_string(), json!({ "id": id }));
+            }
         }
     }
     if goal_wakeup {
@@ -2010,7 +2034,7 @@ mod tests {
             "aiAccessMode": "managed",
             "managedAiUsed": true,
             "claudeCode": { "version": 2 },
-            "goal": { "text": "x" },
+            "goal": { "id": "goal-1", "objective": "Ship it", "progressSummary": "Half done." },
             "groupParticipation": { "reason": "skill_mode_ambient" },
             "groupAiParticipants": [{ "handle": "helper" }],
             "managedAiBillingDeferred": true,
@@ -2024,6 +2048,8 @@ mod tests {
             "runtimePreference": { "runtimeId": "r" },
             "groupParticipation": { "reason": "skill_mode_ambient" },
             "_controllerGoal": { "revision": "r1", "ownerUserId": "u1", "userTurn": true },
+            // Only the goal's id, which its turns are counted by.
+            "goal": { "id": "goal-1" },
             "input": { "kind": "person" },
             "writeIntent": true,
             "claudeCode": { "version": 1 },
@@ -2045,10 +2071,9 @@ mod tests {
         let mut no_goal = metadata.clone();
         no_goal.as_object_mut().expect("metadata").remove("goal");
         let mut unbound = kept.clone();
-        unbound
-            .as_object_mut()
-            .expect("kept")
-            .remove("_controllerGoal");
+        let unbound_map = unbound.as_object_mut().expect("kept");
+        unbound_map.remove("_controllerGoal");
+        unbound_map.remove("goal");
         assert_eq!(
             JsonValue::Object(payload_metadata(&no_goal, "apply", false)),
             unbound

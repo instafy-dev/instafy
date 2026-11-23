@@ -92,6 +92,10 @@ pub(crate) const PLAN_LIMIT: &str = "plan_limit";
 /// no number a runtime sends makes a time Postgres cannot hold; completion
 /// caps it at eight days anyway.
 const LATEST_RESET_SECONDS: f64 = 253_402_300_799.0;
+/// The furthest ahead a sign-in's limit holds, whether a turn reported it
+/// (`record_limit`, whose SQL says `interval '8 days'`) or its proxy's usage
+/// shows it ([`credential_limit`]).
+const LIMIT_MOST_AHEAD: chrono::Duration = chrono::Duration::days(8);
 
 /// A backup that names none of the caller's live connections and logins.
 pub(crate) const BACKUP_AI_UNKNOWN: &str = "backup_ai_unknown";
@@ -155,13 +159,15 @@ fn canonical_uuid(text: &str) -> Option<Uuid> {
 /// Until when a connection is at its plan's limit, or None while it has room
 /// (11.20): the latest of its recorded `limit_resets_at` and the reset of
 /// each usage window its proxy last read at 100% or more (`subscription_usage`
-/// `windows[*].usedPercent`, and `resetAt` in seconds since the epoch), of
-/// those still ahead of `now`. A time that has passed holds nothing.
+/// `windows[*].usedPercent`, and `resetAt` in seconds since the epoch, held
+/// to [`LIMIT_MOST_AHEAD`] from `now`, as a recorded limit is), of those
+/// still ahead of `now`. A time that has passed holds nothing.
 pub(crate) fn credential_limit(
     limit_resets_at: Option<DateTime<Utc>>,
     subscription_usage: Option<&JsonValue>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
+    let latest = now + LIMIT_MOST_AHEAD;
     let full_windows = subscription_usage
         .and_then(|usage| usage.get("windows"))
         .and_then(JsonValue::as_array)
@@ -170,7 +176,7 @@ pub(crate) fn credential_limit(
         .filter_map(|window| {
             let used = window.get("usedPercent").and_then(JsonValue::as_f64)?;
             let reset = window.get("resetAt").and_then(epoch_seconds)?;
-            (used >= 100.0).then_some(reset)
+            (used >= 100.0).then_some(reset.min(latest))
         });
     limit_resets_at
         .into_iter()
@@ -501,20 +507,48 @@ impl AgentAis {
         Self { first, ais }
     }
 
-    /// The AI dispatch takes (11.20): the first with room, else the one whose
-    /// limit resets first, the earliest of them on a tie; None when none is
-    /// usable.
-    pub(crate) fn choose(&self) -> Option<usize> {
-        self.ais
-            .iter()
-            .position(|ai| ai.limited_until.is_none())
-            .or_else(|| {
-                self.ais
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, ai)| ai.limited_until)
-                    .map(|(index, _)| index)
-            })
+    /// The AI dispatch takes (11.20), of those `reachable` lets through: the
+    /// first with room, else the one whose limit resets first, the earliest
+    /// of them on a tie; None when none is usable.
+    fn choose_where(&self, reachable: impl Fn(&Ai) -> bool) -> Option<usize> {
+        let candidates = || self.ais.iter().enumerate().filter(|(_, ai)| reachable(ai));
+        candidates()
+            .find(|(_, ai)| ai.limited_until.is_none())
+            .or_else(|| candidates().min_by_key(|(_, ai)| ai.limited_until))
+            .map(|(index, _)| index)
+    }
+
+    /// What a turn on the AI at `index` runs on, and its stamp.
+    fn target_of(&self, index: usize) -> (TargetAi, Option<Chosen>) {
+        let ai = self.ais[index];
+        let target = match ai.sign_in {
+            SignIn::Credential(id) => TargetAi::Credential(id),
+            SignIn::Login(login) => TargetAi::ClaudeCode {
+                login_ids: self.stretch(index),
+                login: Some(login),
+            },
+        };
+        (target, Some(Chosen::of(&ai)))
+    }
+
+    /// What a turn runs on as before backups: its first AI while that is
+    /// usable, a Claude Code agent's lane turn on its first login or, with
+    /// none, a lane turn that waits, and otherwise the fallback.
+    fn as_before(&self) -> (TargetAi, Option<Chosen>) {
+        let first = self.ais.first().filter(|ai| ai.first);
+        match self.first {
+            FirstAi::ClaudeCode(login) => (
+                TargetAi::ClaudeCode {
+                    login_ids: login.into_iter().collect(),
+                    login,
+                },
+                first.map(Chosen::of),
+            ),
+            FirstAi::Connection(id) if first.is_some() => {
+                (TargetAi::Credential(id), first.map(Chosen::of))
+            }
+            _ => (TargetAi::Fallback, None),
+        }
     }
 
     /// The stretch of consecutive Claude Code logins of the walk that holds
@@ -584,6 +618,30 @@ pub(crate) enum TargetAi {
     /// None of the agent's own: the person's default connection, else
     /// Instafy AI, as before backups.
     Fallback,
+    /// The turn would run on Claude Code, which it may not
+    /// ([`LoginUse::forbidden`]), and no other AI of the agent's has room:
+    /// dispatch refuses it.
+    NotOnClaudeCode,
+}
+
+/// How a turn may use its agent's Claude Code logins (11.20).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LoginUse {
+    /// The lane's gates would refuse this turn
+    /// (`claude_code_lane::refuses_turn`, or a write scope it cannot be held
+    /// to). A login reached only as a backup, or after the agent's first AI, a
+    /// login, reached its limit, is passed over, and the turn goes on to the
+    /// next AI. A first AI that is a login with room is still taken, and the
+    /// lane refuses the turn, as before backups.
+    pub(crate) refused: bool,
+    /// The turn may not run on Claude Code at all: a goal's next step whose
+    /// prompt would carry words not its owner's own, after a turn that did
+    /// not run on their Claude Code, of a goal a teammate or an agent's job
+    /// wrote, or quoting such a run (11.5,
+    /// `conversation_goals::step_may_run_on_claude_code`). Another AI of the
+    /// agent's with room takes it, and with none it is refused
+    /// ([`TargetAi::NotOnClaudeCode`]).
+    pub(crate) forbidden: bool,
 }
 
 /// The sign-in dispatch chose for a target, as its run's stamp names it.
@@ -617,41 +675,39 @@ impl Chosen {
 
 /// What dispatch runs a target's turn on (11.20), for the agent `row` of
 /// `owner`'s: for a turn that runs an AI (`ai_turn`), the AI [`AgentAis`]
-/// chooses; for any other turn, such as a terminal command, or when none of
-/// its AIs is usable, its first AI as before backups, else the fallback.
+/// chooses, by `logins` passing over a login the lane would refuse the turn
+/// on, unless it is the first AI with room, and never taking Claude Code for
+/// a turn that may not run there; for any other turn, such as a terminal
+/// command, or when none of its AIs is usable, its first AI as before
+/// backups, else the fallback.
 pub(crate) fn target_ai(
     row: &AgentAiRow,
     owner: &OwnerSignIns,
     ai_turn: bool,
+    logins: LoginUse,
 ) -> (TargetAi, Option<Chosen>) {
     let ais = AgentAis::of(row, owner);
-    if ai_turn {
-        if let Some(index) = ais.choose() {
-            let ai = ais.ais[index];
-            let target = match ai.sign_in {
-                SignIn::Credential(id) => TargetAi::Credential(id),
-                SignIn::Login(login) => TargetAi::ClaudeCode {
-                    login_ids: ais.stretch(index),
-                    login: Some(login),
-                },
-            };
-            return (target, Some(Chosen::of(&ai)));
-        }
+    if !ai_turn {
+        return ais.as_before();
     }
-    let first = ais.ais.first().filter(|ai| ai.first);
-    match ais.first {
-        FirstAi::ClaudeCode(login) => (
-            TargetAi::ClaudeCode {
-                login_ids: login.into_iter().collect(),
-                login,
-            },
-            first.map(Chosen::of),
-        ),
-        FirstAi::Connection(id) if first.is_some() => {
-            (TargetAi::Credential(id), first.map(Chosen::of))
-        }
-        _ => (TargetAi::Fallback, None),
+    let reachable = |ai: &Ai| {
+        ai.sign_in.login().is_none() || !logins.refused || (ai.first && ai.limited_until.is_none())
+    };
+    let (target, chosen) = match ais.choose_where(reachable) {
+        Some(index) => ais.target_of(index),
+        None => ais.as_before(),
+    };
+    if logins.forbidden && matches!(target, TargetAi::ClaudeCode { .. }) {
+        return match ais
+            .ais
+            .iter()
+            .position(|ai| ai.sign_in.login().is_none() && ai.limited_until.is_none())
+        {
+            Some(index) => ais.target_of(index),
+            None => (TargetAi::NotOnClaudeCode, None),
+        };
     }
+    (target, chosen)
 }
 
 /// The agent `agent` of `person`'s, and its usable AIs; None when it is not
@@ -897,8 +953,11 @@ pub(crate) fn reported_limit(
 
 /// Records that `ran_on`, `person`'s own, reached its plan's limit, until
 /// `resets_at` (seconds since the epoch) but at most eight days ahead, or one
-/// hour ahead with no reset. A reset that has passed records nothing. Gives
-/// whether it recorded one.
+/// hour ahead with no reset, and keeps a limit already recorded that resets
+/// later, so a later, shorter report never cuts a longer one short. A reset
+/// that has passed records nothing. `limit_recorded_at` says when, which a
+/// completed turn's clear reads ([`clear_limit`]). Gives whether it recorded
+/// one.
 async fn record_limit(
     client: &(impl GenericClient + Sync),
     ran_on: SignIn,
@@ -908,20 +967,28 @@ async fn record_limit(
     let (sql, id) = match ran_on {
         SignIn::Credential(id) => (
             "update user_credentials
-                set limit_resets_at = case
-                        when $3::bigint is null then now() + interval '1 hour'
-                        else least(to_timestamp($3::bigint), now() + interval '8 days')
-                    end
+                set limit_resets_at = greatest(
+                        case when limit_resets_at > now() then limit_resets_at end,
+                        case
+                            when $3::bigint is null then now() + interval '1 hour'
+                            else least(to_timestamp($3::bigint), now() + interval '8 days')
+                        end
+                    ),
+                    limit_recorded_at = now()
               where id = $1 and user_id = $2
                 and ($3::bigint is null or to_timestamp($3::bigint) > now())",
             id,
         ),
         SignIn::Login(id) => (
             "update claude_code_logins
-                set limit_resets_at = case
-                        when $3::bigint is null then now() + interval '1 hour'
-                        else least(to_timestamp($3::bigint), now() + interval '8 days')
-                    end
+                set limit_resets_at = greatest(
+                        case when limit_resets_at > now() then limit_resets_at end,
+                        case
+                            when $3::bigint is null then now() + interval '1 hour'
+                            else least(to_timestamp($3::bigint), now() + interval '8 days')
+                        end
+                    ),
+                    limit_recorded_at = now()
               where id = $1 and user_id = $2
                 and ($3::bigint is null or to_timestamp($3::bigint) > now())",
             id,
@@ -937,26 +1004,34 @@ async fn record_limit(
 }
 
 /// Clears the limit recorded for `ran_on`, `person`'s own, after a turn on it
-/// completed.
+/// completed, when that turn's lease (`leased_at`) came after the limit was
+/// recorded: a turn that started before, and finished after, the limit was
+/// reached proves nothing of the plan since, and leaves it standing.
 async fn clear_limit(
     client: &(impl GenericClient + Sync),
     ran_on: SignIn,
     person: &Uuid,
+    leased_at: Option<DateTime<Utc>>,
 ) -> Result<(), Refusal> {
+    let Some(leased_at) = leased_at else {
+        return Ok(());
+    };
     let (sql, id) = match ran_on {
         SignIn::Credential(id) => (
-            "update user_credentials set limit_resets_at = null
-              where id = $1 and user_id = $2 and limit_resets_at is not null",
+            "update user_credentials set limit_resets_at = null, limit_recorded_at = null
+              where id = $1 and user_id = $2 and limit_resets_at is not null
+                and (limit_recorded_at is null or limit_recorded_at < $3)",
             id,
         ),
         SignIn::Login(id) => (
-            "update claude_code_logins set limit_resets_at = null
-              where id = $1 and user_id = $2 and limit_resets_at is not null",
+            "update claude_code_logins set limit_resets_at = null, limit_recorded_at = null
+              where id = $1 and user_id = $2 and limit_resets_at is not null
+                and (limit_recorded_at is null or limit_recorded_at < $3)",
             id,
         ),
     };
     client
-        .execute_typed(sql, typed![&id, person])
+        .execute_typed(sql, typed![&id, person, &leased_at])
         .await
         .map(|_| ())
         .map_err(|error| internal_error(format!("failed to clear a sign-in's plan limit: {error}")))
@@ -965,11 +1040,14 @@ async fn clear_limit(
 /// What a job's completion records of its sign-in (11.20), in the completion's
 /// transaction, before it writes the reply or the failure message: a failed
 /// job that reported reaching its plan's limit ([`reported_limit`]) records
-/// it, and a completed one clears it, only for `ran_on`, the job's own
-/// credential or the login its lease took, of `person`, the job's own. Only
-/// the runtime that leased the job completes it (2.6), so only it reports.
-/// Then the job's `agent`, read as dispatch reads it, gives whether `ran_on`
-/// is one of its backups and, after a limit, its next AI with room.
+/// it, and a completed one leased after the limit was recorded (`leased_at`)
+/// clears it, only for `ran_on`, the job's own credential or the login its
+/// lease took, of `person`, the job's own. Only the runtime that leased the
+/// job completes it (2.6), so only it reports. The caller passes only a job
+/// whose turn runs an AI: a terminal command proves nothing of a plan. Then
+/// the job's `agent`, read as dispatch reads it, gives whether `ran_on` is
+/// one of its backups and, after a limit, its next AI with room.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn settle_completion(
     client: &(impl GenericClient + Sync),
     ran_on: SignIn,
@@ -977,6 +1055,7 @@ pub(crate) async fn settle_completion(
     agent: Option<&Uuid>,
     job_status: &str,
     lane: bool,
+    leased_at: Option<DateTime<Utc>>,
     artifacts: &JsonValue,
 ) -> Result<SignInEnd, Refusal> {
     let limit_recorded = match job_status {
@@ -985,7 +1064,7 @@ pub(crate) async fn settle_completion(
             None => false,
         },
         "completed" => {
-            clear_limit(client, ran_on, person).await?;
+            clear_limit(client, ran_on, person, leased_at).await?;
             false
         }
         _ => false,
@@ -1098,9 +1177,27 @@ mod tests {
         ] {
             assert_eq!(credential_limit(None, Some(&usage), now), None, "{what}");
         }
-        // A reset no time could hold is held to one, never a panic.
+        // A full window holds at most eight days, as a recorded limit does,
+        // and a reset no time could hold is held to that, never a panic.
+        let far = json!({ "windows": [{
+            "usedPercent": 100,
+            "resetAt": (now + Duration::days(30)).timestamp(),
+        }] });
+        assert_eq!(
+            credential_limit(None, Some(&far), now),
+            Some(now + Duration::days(8))
+        );
         let huge = json!({ "windows": [{ "usedPercent": 100, "resetAt": 1e300 }] });
-        assert!(credential_limit(None, Some(&huge), now).is_some());
+        assert_eq!(
+            credential_limit(None, Some(&huge), now),
+            Some(now + Duration::days(8))
+        );
+        // A recorded limit beyond it, as written by hand, still holds as it is.
+        let recorded = now + Duration::days(9);
+        assert_eq!(
+            credential_limit(Some(recorded), Some(&far), now),
+            Some(recorded)
+        );
     }
 
     #[test]
@@ -1192,7 +1289,7 @@ mod tests {
             &[SignIn::Credential(chatgpt_2), SignIn::Login(work)],
         );
         assert_eq!(
-            on(target_ai(&codex, &all_room, true)),
+            on(target_ai(&codex, &all_room, true, LoginUse::default())),
             (
                 TargetAi::Credential(chatgpt),
                 Some(Chosen {
@@ -1205,7 +1302,7 @@ mod tests {
         // Connection to connection.
         let limited = owner(Some(soon), None, None, None, None);
         assert_eq!(
-            target_ai(&codex, &limited, true),
+            target_ai(&codex, &limited, true, LoginUse::default()),
             (
                 TargetAi::Credential(chatgpt_2),
                 Some(Chosen {
@@ -1218,7 +1315,7 @@ mod tests {
         // Connection to a login: a lane job on its stretch.
         let both_limited = owner(Some(soon), Some(later), None, None, None);
         assert_eq!(
-            target_ai(&codex, &both_limited, true).0,
+            target_ai(&codex, &both_limited, true, LoginUse::default()).0,
             TargetAi::ClaudeCode {
                 login_ids: vec![work],
                 login: Some(work)
@@ -1227,7 +1324,7 @@ mod tests {
         // None with room: the earliest reset.
         let none = owner(Some(later), Some(soon), None, Some(later), None);
         assert_eq!(
-            target_ai(&codex, &none, true),
+            target_ai(&codex, &none, true, LoginUse::default()),
             (
                 TargetAi::Credential(chatgpt_2),
                 Some(Chosen {
@@ -1249,7 +1346,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            target_ai(&claude, &all_room, true),
+            target_ai(&claude, &all_room, true, LoginUse::default()),
             (
                 TargetAi::ClaudeCode {
                     login_ids: vec![first_login, work, home],
@@ -1265,7 +1362,7 @@ mod tests {
         // Login to the next login, with the whole stretch.
         let first_full = owner(None, None, Some(soon), None, None);
         assert_eq!(
-            target_ai(&claude, &first_full, true),
+            target_ai(&claude, &first_full, true, LoginUse::default()),
             (
                 TargetAi::ClaudeCode {
                     login_ids: vec![first_login, work, home],
@@ -1281,7 +1378,7 @@ mod tests {
         // Every login at its limit: the ChatGPT sign-in after them.
         let logins_full = owner(None, None, Some(soon), Some(soon), Some(later));
         assert_eq!(
-            target_ai(&claude, &logins_full, true).0,
+            target_ai(&claude, &logins_full, true, LoginUse::default()).0,
             TargetAi::Credential(chatgpt)
         );
 
@@ -1302,7 +1399,7 @@ mod tests {
         );
         assert_eq!(ais.backups(), vec![SignIn::Login(home)]);
         assert_eq!(
-            target_ai(&stored, &limited, true).0,
+            target_ai(&stored, &limited, true, LoginUse::default()).0,
             TargetAi::ClaudeCode {
                 login_ids: vec![home],
                 login: Some(home)
@@ -1315,7 +1412,7 @@ mod tests {
             logins: vec![],
         };
         assert_eq!(
-            target_ai(&codex, &revoked, true),
+            target_ai(&codex, &revoked, true, LoginUse::default()),
             (
                 TargetAi::Credential(chatgpt_2),
                 Some(Chosen {
@@ -1327,12 +1424,12 @@ mod tests {
         );
         let nothing = OwnerSignIns::default();
         assert_eq!(
-            target_ai(&codex, &nothing, true),
+            target_ai(&codex, &nothing, true, LoginUse::default()),
             (TargetAi::Fallback, None)
         );
         // A Claude Code agent whose person has no login waits, as before.
         assert_eq!(
-            target_ai(&claude, &nothing, true),
+            target_ai(&claude, &nothing, true, LoginUse::default()),
             (
                 TargetAi::ClaudeCode {
                     login_ids: vec![],
@@ -1345,14 +1442,161 @@ mod tests {
         let mut default = row(FirstRow::NotOwn, &[]);
         default.backup_ais = entries(&[SignIn::Credential(chatgpt_2)]);
         assert_eq!(
-            target_ai(&default, &all_room, true),
+            target_ai(&default, &all_room, true, LoginUse::default()),
             (TargetAi::Fallback, None)
         );
         assert!(AgentAis::of(&default, &all_room).backups().is_empty());
         // A turn that runs no AI keeps its first AI, whatever its room.
         assert_eq!(
-            target_ai(&codex, &limited, false).0,
+            target_ai(&codex, &limited, false, LoginUse::default()).0,
             TargetAi::Credential(chatgpt)
+        );
+    }
+
+    /// A login the lane would refuse the turn on is passed over when the turn
+    /// reaches it as a backup, or after a first login at its limit, and the
+    /// turn goes on to the next AI; a first login with room is still taken,
+    /// for the lane to refuse as before backups (docs/Local-Engine-Turns.md
+    /// 11.20).
+    #[test]
+    fn a_login_the_lane_would_refuse_is_passed_over_unless_it_is_the_first_with_room() {
+        let now = Utc::now();
+        let soon = Some(now + Duration::hours(1));
+        let (chatgpt, chatgpt_2) = (Uuid::new_v4(), Uuid::new_v4());
+        let (first_login, work) = (Uuid::new_v4(), Uuid::new_v4());
+        let owner = |chatgpt_limit, first_limit| OwnerSignIns {
+            credentials: vec![
+                credential(chatgpt, chatgpt_limit),
+                credential(chatgpt_2, None),
+            ],
+            logins: vec![login(first_login, first_limit), login(work, None)],
+        };
+        let refused = LoginUse {
+            refused: true,
+            forbidden: false,
+        };
+        // A Codex agent at its limit: its login backup is passed over.
+        let codex = row(
+            FirstRow::Connection(chatgpt),
+            &[SignIn::Login(work), SignIn::Credential(chatgpt_2)],
+        );
+        assert_eq!(
+            target_ai(&codex, &owner(soon, None), true, refused).0,
+            TargetAi::Credential(chatgpt_2)
+        );
+        assert_eq!(
+            target_ai(&codex, &owner(soon, None), true, LoginUse::default()).0,
+            TargetAi::ClaudeCode {
+                login_ids: vec![work],
+                login: Some(work)
+            }
+        );
+        // With no other AI, the first one, at its limit, as before backups.
+        let only_login = row(FirstRow::Connection(chatgpt), &[SignIn::Login(work)]);
+        assert_eq!(
+            target_ai(&only_login, &owner(soon, None), true, refused).0,
+            TargetAi::Credential(chatgpt)
+        );
+        // A Claude Code agent with room on its first login keeps it, and the
+        // lane refuses the turn.
+        let claude = row(
+            FirstRow::ClaudeCode(None),
+            &[SignIn::Login(work), SignIn::Credential(chatgpt)],
+        );
+        assert_eq!(
+            target_ai(&claude, &owner(None, None), true, refused).0,
+            TargetAi::ClaudeCode {
+                login_ids: vec![first_login, work],
+                login: Some(first_login)
+            }
+        );
+        // Its first login at its limit: the next login is passed over too.
+        assert_eq!(
+            target_ai(&claude, &owner(None, soon), true, refused).0,
+            TargetAi::Credential(chatgpt)
+        );
+        // With nothing else, a lane turn as before, which the lane refuses.
+        let claude_alone = row(FirstRow::ClaudeCode(None), &[SignIn::Login(work)]);
+        assert_eq!(
+            target_ai(&claude_alone, &owner(None, soon), true, refused).0,
+            TargetAi::ClaudeCode {
+                login_ids: vec![first_login],
+                login: Some(first_login)
+            }
+        );
+    }
+
+    /// A turn that may not run on Claude Code takes another AI of its agent's
+    /// with room, and with none it is refused; a turn that never reached
+    /// Claude Code is unchanged.
+    #[test]
+    fn a_turn_kept_off_claude_code_takes_another_ai_with_room_or_none() {
+        let now = Utc::now();
+        let soon = Some(now + Duration::hours(1));
+        let (chatgpt, chatgpt_2) = (Uuid::new_v4(), Uuid::new_v4());
+        let (first_login, work) = (Uuid::new_v4(), Uuid::new_v4());
+        let owner = |chatgpt_limit, chatgpt_2_limit| OwnerSignIns {
+            credentials: vec![
+                credential(chatgpt, chatgpt_limit),
+                credential(chatgpt_2, chatgpt_2_limit),
+            ],
+            logins: vec![login(first_login, None), login(work, None)],
+        };
+        let forbidden = LoginUse {
+            refused: false,
+            forbidden: true,
+        };
+        let only_login = row(FirstRow::Connection(chatgpt), &[SignIn::Login(work)]);
+        assert_eq!(
+            target_ai(&only_login, &owner(soon, None), true, forbidden),
+            (TargetAi::NotOnClaudeCode, None)
+        );
+        let login_then_connection = row(
+            FirstRow::Connection(chatgpt),
+            &[SignIn::Login(work), SignIn::Credential(chatgpt_2)],
+        );
+        assert_eq!(
+            target_ai(&login_then_connection, &owner(soon, None), true, forbidden),
+            (
+                TargetAi::Credential(chatgpt_2),
+                Some(Chosen {
+                    sign_in: SignIn::Credential(chatgpt_2),
+                    backup: true,
+                    room: true
+                })
+            )
+        );
+        assert_eq!(
+            target_ai(&login_then_connection, &owner(soon, soon), true, forbidden).0,
+            TargetAi::NotOnClaudeCode
+        );
+        // Its first AI with room, or every AI at its limit with a connection's
+        // reset first: no Claude Code was ever reached.
+        assert_eq!(
+            target_ai(&only_login, &owner(None, None), true, forbidden).0,
+            TargetAi::Credential(chatgpt)
+        );
+        let no_login = row(FirstRow::Connection(chatgpt), &[]);
+        assert_eq!(
+            target_ai(&no_login, &owner(soon, None), true, forbidden).0,
+            TargetAi::Credential(chatgpt)
+        );
+        // A Claude Code agent: another AI with room, or none.
+        let claude = row(FirstRow::ClaudeCode(None), &[SignIn::Credential(chatgpt)]);
+        assert_eq!(
+            target_ai(&claude, &owner(None, None), true, forbidden).0,
+            TargetAi::Credential(chatgpt)
+        );
+        let claude_alone = row(FirstRow::ClaudeCode(None), &[]);
+        assert_eq!(
+            target_ai(&claude_alone, &owner(None, None), true, forbidden).0,
+            TargetAi::NotOnClaudeCode
+        );
+        let nothing = OwnerSignIns::default();
+        assert_eq!(
+            target_ai(&claude_alone, &nothing, true, forbidden).0,
+            TargetAi::NotOnClaudeCode,
+            "a lane turn that would wait for a login is Claude Code too"
         );
     }
 

@@ -225,6 +225,87 @@ pub(crate) struct Wakeup {
     pub(crate) claim_token: Uuid,
 }
 
+/// Whether a goal's next step after `source_job_id`, in `conversation_id`,
+/// may run on its owner `owner`'s Claude Code (docs/Local-Engine-Turns.md
+/// 11.5, 11.20). Its prompt carries the goal's objective and checkpoint and
+/// the replies of the goal's last runs ([`policy::quoted_runs`]), so it may
+/// only when all of those are `owner`'s own: the turn it continues ran on
+/// their Claude Code, a lane job of theirs; the goal holds their own words,
+/// last saved by them, not by a teammate or an agent's job
+/// (`state::holds_owners_words`); and every run the prompt quotes was a lane
+/// job of theirs too. An agent's job reads what teammates wrote in the chat,
+/// and a teammate's words are theirs, so neither reaches Claude Code this way,
+/// as an agent's job's never does through an automation it made. Otherwise
+/// dispatch passes over Claude Code for the step
+/// (crate::sign_in_room::LoginUse::forbidden).
+pub(crate) async fn step_may_run_on_claude_code(
+    tx: &Transaction<'_>,
+    conversation_id: Uuid,
+    source_job_id: Uuid,
+    owner: Uuid,
+) -> Result<bool, Error> {
+    let row = tx
+        .query_typed_one(
+            "select coalesce(
+                        (select j.engine = 'claude-code' from agent_jobs j
+                          where j.id = $2 and j.conversation_id = $1),
+                        false
+                    ) as source_on_claude_code,
+                    (select coalesce(c.metadata, '{}'::jsonb) from conversations c
+                      where c.id = $1) as metadata",
+            typed![&conversation_id, &source_job_id],
+        )
+        .await
+        .map_err(|e| internal_error(format!("check where a goal's step may run: {e}")))?;
+    let metadata = row
+        .get::<_, Option<PgJson<Value>>>("metadata")
+        .map(|metadata| metadata.0)
+        .unwrap_or(Value::Null);
+    if !row.get::<_, bool>("source_on_claude_code") || !state::holds_owners_words(&metadata, owner)
+    {
+        return Ok(false);
+    }
+    let (Some(goal), Some(revision)) = (goal(&metadata), revision(&metadata)) else {
+        return Ok(false);
+    };
+    let recent = goal_evidence(tx, conversation_id, &goal.id, revision, owner).await?;
+    Ok(policy::quoted_runs(&recent)
+        .iter()
+        .all(|run| run.on_owners_claude_code))
+}
+
+/// The completed runs of the goal `goal_id`, or bound to its `revision`, in
+/// `conversation_id`, oldest first, at most the last 101, as its next step
+/// reads them: each one's reply, whether it showed tool or file activity, its
+/// step's turn number, and whether it was a lane job of `owner`'s, the
+/// person whose message started it.
+async fn goal_evidence(
+    tx: &Transaction<'_>,
+    conversation_id: Uuid,
+    goal_id: &str,
+    revision: Uuid,
+    owner: Uuid,
+) -> Result<Vec<RunEvidence>, Error> {
+    let rows=tx.query("select j.payload,j.run_id,(select m.content from conversation_messages m where m.run_id=j.run_id and m.role='assistant' and coalesce(m.metadata->>'messageType','') not in ('goal_update','token_usage','reasoning','status','command_execution','mcp_tool_call','error','runtime_alert') order by m.created_at desc limit 1) as reply, exists(select 1 from conversation_messages m where m.run_id=j.run_id and (m.metadata->>'messageType' in ('command_execution','mcp_tool_call','file_change') or m.metadata->>'kind' in ('command_execution','mcp_tool_call','file_change'))) as activity, coalesce(j.engine='claude-code' and (select p.user_id from prompts p where p.id=j.prompt_id)=$4, false) as on_owners_claude_code from agent_jobs j where j.conversation_id=$1 and (j.payload#>>'{metadata,goal,id}'=$2 or j.payload#>>'{metadata,_controllerGoal,revision}'=$3) and j.status='completed' and j.planning_receipt_state is null order by j.created_at desc,j.id desc limit 101", &[&conversation_id,&goal_id,&revision.to_string(),&owner])
+        .await.map_err(|e|internal_error(format!("load goal evidence: {e}")))?;
+    Ok(rows
+        .iter()
+        .rev()
+        .map(|r| {
+            let p = r.get::<_, PgJson<Value>>("payload").0;
+            RunEvidence {
+                assistant_text: r.get("reply"),
+                has_activity: r.get("activity"),
+                turn: p
+                    .pointer("/metadata/goalContinuation/turn")
+                    .and_then(Value::as_u64)
+                    .and_then(|v| v.try_into().ok()),
+                on_owners_claude_code: r.get("on_owners_claude_code"),
+            }
+        })
+        .collect())
+}
+
 /// The queued job and the wakeup result commit together. Losing the HTTP result
 /// or dying immediately after commit cannot leave an uncertain second send.
 pub(crate) async fn record_dispatch(
@@ -534,23 +615,14 @@ async fn prepare_request(app: &AppState, wake: &Wakeup) -> Result<Option<Value>,
             .map_err(|e| internal_error(format!("commit deferred goal: {e}")))?;
         return Ok(None);
     }
-    let rows=tx.query("select j.payload,j.run_id,(select m.content from conversation_messages m where m.run_id=j.run_id and m.role='assistant' and coalesce(m.metadata->>'messageType','') not in ('goal_update','token_usage','reasoning','status','command_execution','mcp_tool_call','error','runtime_alert') order by m.created_at desc limit 1) as reply, exists(select 1 from conversation_messages m where m.run_id=j.run_id and (m.metadata->>'messageType' in ('command_execution','mcp_tool_call','file_change') or m.metadata->>'kind' in ('command_execution','mcp_tool_call','file_change'))) as activity from agent_jobs j where j.conversation_id=$1 and (j.payload#>>'{metadata,goal,id}'=$2 or j.payload#>>'{metadata,_controllerGoal,revision}'=$3) and j.status='completed' and j.planning_receipt_state is null order by j.created_at desc,j.id desc limit 101", &[&wake.conversation_id,&goal.id,&wake.goal_revision.to_string()])
-        .await.map_err(|e|internal_error(format!("load goal evidence: {e}")))?;
-    let recent: Vec<_> = rows
-        .iter()
-        .rev()
-        .map(|r| {
-            let p = r.get::<_, PgJson<Value>>("payload").0;
-            RunEvidence {
-                assistant_text: r.get("reply"),
-                has_activity: r.get("activity"),
-                turn: p
-                    .pointer("/metadata/goalContinuation/turn")
-                    .and_then(Value::as_u64)
-                    .and_then(|v| v.try_into().ok()),
-            }
-        })
-        .collect();
+    let recent = goal_evidence(
+        &tx,
+        wake.conversation_id,
+        &goal.id,
+        wake.goal_revision,
+        wake.owner_user_id,
+    )
+    .await?;
     let count=tx.query_one("select coalesce(max(case when jsonb_typeof(j.payload#>'{metadata,goalContinuation,turn}')='number' then greatest(0,least(100,(j.payload#>>'{metadata,goalContinuation,turn}')::numeric))::bigint else 0 end),0)::bigint as count from agent_jobs j where j.conversation_id=$1 and (j.payload#>>'{metadata,goal,id}'=$2 or j.payload#>>'{metadata,_controllerGoal,revision}'=$3::text)", &[&wake.conversation_id,&goal.id,&wake.goal_revision.to_string()])
         .await.map_err(|e|internal_error(format!("count goal turns: {e}")))?.get::<_,i64>("count").max(0) as u32;
     let (next_turn, warning) = match policy::decide_continuation(&goal, count, &recent) {

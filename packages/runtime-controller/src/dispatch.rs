@@ -251,7 +251,7 @@ struct AgentTarget {
     claude_code_login: Option<Uuid>,
     /// The sign-in of its person's this turn runs on, as its run's `aiSignIn`
     /// names it (crate::sign_in_room): a connection, or the login chosen.
-    /// None for Instafy AI.
+    /// None for Instafy AI, and for a turn that runs no AI.
     sign_in: Option<crate::sign_in_room::Chosen>,
 }
 
@@ -661,8 +661,12 @@ pub(crate) async fn selects_only_claude_code_agents(
 /// resets first (crate::sign_in_room::target_ai). A connection taken makes
 /// the turn a job on that credential; a login taken makes it a lane turn on
 /// the stretch of logins that holds it (`claude_code`), which then passes
-/// L1-L3 as any Claude Code agent's does. With none usable, and for a turn
-/// that runs no AI, the target keeps what it had before backups: its own
+/// L1-L3 as any Claude Code agent's does. `login_uses` says, by handle, how
+/// the turn may use the agent's logins: one the lane would refuse the turn on
+/// is passed over unless it is the agent's first AI with room, and a turn
+/// that may not run on Claude Code takes another AI with room, or is refused
+/// (`claude_code_lane::not_from_an_agents_job`). With none usable, and for a
+/// turn that runs no AI, the target keeps what it had before backups: its own
 /// usable connection, else the person's default, else Instafy AI, and a
 /// Claude Code agent its first login, or none.
 async fn resolve_agent_targets(
@@ -672,6 +676,7 @@ async fn resolve_agent_targets(
     handles: Vec<String>,
     default_credential_id: Option<Uuid>,
     ai_turn: bool,
+    login_uses: &HashMap<String, crate::sign_in_room::LoginUse>,
 ) -> Result<Vec<AgentTarget>, (StatusCode, Json<ApiError>)> {
     let mut targets = Vec::new();
     // The person's own sign-ins and their room, read once for every agent of
@@ -745,9 +750,10 @@ async fn resolve_agent_targets(
             avatar_seed = Some("octo".to_string());
         }
 
+        let login_use = login_uses.get(&handle).copied().unwrap_or_default();
         let (target_ai, chosen) = match (agent_ai.as_ref(), owner_sign_ins.as_ref()) {
             (Some(agent_ai), Some(owner)) => {
-                crate::sign_in_room::target_ai(agent_ai, owner, ai_turn)
+                crate::sign_in_room::target_ai(agent_ai, owner, ai_turn, login_use)
             }
             _ => (crate::sign_in_room::TargetAi::Fallback, None),
         };
@@ -764,12 +770,18 @@ async fn resolve_agent_targets(
                 crate::sign_in_room::TargetAi::Fallback => {
                     (default_credential_id, runtime_id, false, Vec::new(), None)
                 }
+                crate::sign_in_room::TargetAi::NotOnClaudeCode => {
+                    return Err(crate::claude_code_lane::not_from_an_agents_job());
+                }
             };
-        let sign_in = chosen.or_else(|| {
-            credential_id
-                .filter(|_| !claude_code)
-                .map(crate::sign_in_room::Chosen::default_connection)
-        });
+        // Only a turn that runs an AI names the sign-in it runs on.
+        let sign_in = chosen
+            .or_else(|| {
+                credential_id
+                    .filter(|_| !claude_code)
+                    .map(crate::sign_in_room::Chosen::default_connection)
+            })
+            .filter(|_| ai_turn);
         targets.push(AgentTarget {
             handle,
             agent_id,
@@ -805,7 +817,9 @@ async fn resolve_agent_targets(
             claude_code: false,
             claude_code_login_ids: Vec::new(),
             claude_code_login: None,
-            sign_in: default_credential_id.map(crate::sign_in_room::Chosen::default_connection),
+            sign_in: default_credential_id
+                .filter(|_| ai_turn)
+                .map(crate::sign_in_room::Chosen::default_connection),
         });
     }
 
@@ -2059,13 +2073,69 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &agent_handles,
         ));
     }
+    // How each target's turn may use its agent's Claude Code logins
+    // (crate::sign_in_room::LoginUse, docs/Local-Engine-Turns.md 11.20): one
+    // the lane's gates would refuse this turn on (L1-L3, or a write scope it
+    // cannot be held to) is passed over where the turn reaches it only as a
+    // backup; and a goal's next step that may not run on Claude Code (11.5:
+    // it would quote another's words) never takes one.
+    let ai_turn = dispatch_requires_ai_access(&request.intent);
+    let mut login_uses: HashMap<String, crate::sign_in_room::LoginUse> = HashMap::new();
+    if ai_turn {
+        let step_may_use_claude_code = match (request.goal_wakeup, context.user_id) {
+            (Some((source_job_id, _)), Some(owner)) => {
+                crate::conversation_goals::step_may_run_on_claude_code(
+                    &transaction,
+                    conversation.id,
+                    source_job_id,
+                    owner,
+                )
+                .await?
+            }
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        let uses_browser = strict_browser_runtime_id.is_some()
+            || metadata_uses_personal_browser(&request.metadata)
+            || metadata_uses_shared_browser(&request.metadata);
+        let scopes = build_agent_write_scope_plan(
+            &request.metadata,
+            &request.prompt_text,
+            &agent_handles,
+            &prompt_segments,
+        );
+        for handle in &agent_handles {
+            let prompt_text = prompt_segments
+                .get(handle)
+                .map(|segment| segment.trim())
+                .filter(|segment| !segment.is_empty())
+                .unwrap_or(request.prompt_text.as_str());
+            let refused = crate::claude_code_lane::refuses_turn(
+                &state.config,
+                context,
+                &request,
+                uses_browser,
+                prompt_text,
+            ) || scopes
+                .get(handle)
+                .is_some_and(|scope| !scope.is_unscoped_or_read_only());
+            login_uses.insert(
+                handle.clone(),
+                crate::sign_in_room::LoginUse {
+                    refused,
+                    forbidden: !step_may_use_claude_code,
+                },
+            );
+        }
+    }
     let mut agent_targets = resolve_agent_targets(
         &transaction,
         &project.id,
         context.user_id,
         agent_handles,
         default_credential_id,
-        dispatch_requires_ai_access(&request.intent),
+        ai_turn,
+        &login_uses,
     )
     .await?;
     // Before anything is stamped with them: each AI without a profile wears
