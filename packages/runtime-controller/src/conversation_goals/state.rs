@@ -14,13 +14,13 @@ type StateResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 /// objective and checkpoint among them (docs/Local-Engine-Turns.md 11.5,
 /// 11.20): the id of the person whose own save last wrote it
 /// ([`record_goal_words`]), or `false` once anything else did: an agent's
-/// job (`apply_runtime_update`), or a save no person made themselves, with a
-/// job's token or the service role. Only the controller writes it; a client's
-/// copy is dropped, and public metadata hides it. A goal's next steps run on a
+/// job, by its goal update (`apply_runtime_update`) or by any write its token
+/// makes, or the service role. Only the controller writes it; a client's copy
+/// is dropped, and public metadata hides it. A goal's next steps run on a
 /// person's Claude Code only while it holds their own words
 /// ([`holds_owners_words`]), so a teammate's save or a job's write keeps them
-/// off it until that person saves the goal themselves. Absent: no save
-/// recorded since this key was added, read as the owner's own, as before.
+/// off it until that person saves the goal themselves. Absent: no save is
+/// recorded, so the goal holds no one's own words either.
 pub(crate) const GOAL_WORDS_KEY: &str = "_goalWordsOf";
 
 /// Client edits always replace the controller revision, including clear/pause.
@@ -45,37 +45,44 @@ pub(crate) fn prepare_client_metadata(metadata: &mut Value) {
     }
 }
 
-/// A client's save of the conversation's metadata, `patch` after
+/// The person whose own words a write in `context`'s name holds: its person,
+/// unless an agent's job made it with its token or the service role did. A
+/// caller that acts as a job's person (`ActiveJobAuthorization::subject_context`)
+/// passes the job on and counts its writes as no one's.
+pub(crate) fn own_words_of(context: &RequestContext) -> Option<Uuid> {
+    context
+        .user_id
+        .filter(|_| !context.is_service_role && context.scoped_claims.is_none())
+}
+
+/// A save of the conversation's metadata, `patch` after
 /// [`prepare_client_metadata`] and, for a conversation that exists,
-/// [`preserve_unchanged_goal_revision`], made in `context`'s name: when it
-/// writes the goal, the goal holds its saver's words now ([`GOAL_WORDS_KEY`]),
-/// and no person's when no person made it themselves. A patch that leaves the
-/// goal as it was leaves whose words it holds.
-pub(crate) fn record_goal_words(patch: &mut Value, context: &RequestContext) {
+/// [`preserve_unchanged_goal_revision`]: when it writes the goal, the goal
+/// holds `saver`'s own words now ([`GOAL_WORDS_KEY`], [`own_words_of`]), and no
+/// one's without a saver. A patch that leaves the goal as it was leaves whose
+/// words it holds.
+pub(crate) fn record_goal_words(patch: &mut Value, saver: Option<Uuid>) {
     let Some(patch) = patch.as_object_mut() else {
         return;
     };
     if !patch.contains_key("_goalController") {
         return;
     }
-    let words = match context.user_id {
-        Some(person) if !context.is_service_role && context.scoped_claims.is_none() => {
-            Value::String(person.to_string())
-        }
-        _ => Value::Bool(false),
-    };
+    let words = saver.map_or(Value::Bool(false), |person| {
+        Value::String(person.to_string())
+    });
     patch.insert(GOAL_WORDS_KEY.into(), words);
 }
 
 /// Whether the goal in the conversation `metadata` holds `owner`'s own words
-/// ([`GOAL_WORDS_KEY`]): their own save wrote it last, or no save of it is
-/// recorded.
+/// ([`GOAL_WORDS_KEY`]): their own save wrote it last. A goal no save of
+/// theirs is recorded for holds no one's.
 pub(crate) fn holds_owners_words(metadata: &Value, owner: Uuid) -> bool {
-    match metadata.get(GOAL_WORDS_KEY) {
-        None | Some(Value::Null) => true,
-        Some(Value::String(person)) => person.parse::<Uuid>().ok() == Some(owner),
-        Some(_) => false,
-    }
+    metadata
+        .get(GOAL_WORDS_KEY)
+        .and_then(Value::as_str)
+        .and_then(|person| person.parse::<Uuid>().ok())
+        == Some(owner)
 }
 
 /// Compare under the conversation row lock. A retry carrying the same goal
@@ -591,9 +598,10 @@ mod tests {
     }
 
     /// A save that writes the goal records whose words it holds: its saver's,
-    /// when a person made it themselves, and no person's for a job's token or
-    /// the service role; a save that leaves the goal as it was, or a client's
-    /// copy of the record, changes nothing (docs/Local-Engine-Turns.md 11.5).
+    /// when a person made it themselves, and no one's for a job's token or the
+    /// service role; a save that leaves the goal as it was, or a client's copy
+    /// of the record, changes nothing. A goal no save is recorded for holds no
+    /// one's words (docs/Local-Engine-Turns.md 11.5).
     #[test]
     fn a_goal_holds_the_words_of_whoever_saved_it_last() {
         let (owner, teammate) = (Uuid::new_v4(), Uuid::new_v4());
@@ -612,42 +620,42 @@ mod tests {
             ..person(owner)
         };
         let service = RequestContext {
-            user_id: None,
+            user_id: Some(owner),
             is_service_role: true,
             scoped_claims: None,
         };
+        assert_eq!(own_words_of(&person(owner)), Some(owner));
+        assert_eq!(own_words_of(&job_token), None);
+        assert_eq!(own_words_of(&service), None);
         let existing = json!({"instafyGoal":{"id":"goal","status":"active"}, "_goalController":{"revision":Uuid::new_v4()}});
-        let saved = |context: &RequestContext, goal: Value| {
+        let saved = |saver: Option<Uuid>, goal: Value| {
             let mut patch = json!({"instafyGoal": goal, GOAL_WORDS_KEY: owner.to_string()});
             prepare_client_metadata(&mut patch);
             preserve_unchanged_goal_revision(&mut patch, Some(&existing));
-            record_goal_words(&mut patch, context);
+            record_goal_words(&mut patch, saver);
             patch
         };
         let changed = json!({"id":"goal","status":"active","objective":"Delete the bucket"});
-        let words = saved(&person(teammate), changed.clone());
+        let words = saved(Some(teammate), changed.clone());
         assert_eq!(words[GOAL_WORDS_KEY], json!(teammate.to_string()));
         assert!(!holds_owners_words(&words, owner));
         assert!(holds_owners_words(&words, teammate));
-        assert_eq!(
-            saved(&person(owner), changed.clone())[GOAL_WORDS_KEY],
-            json!(owner.to_string())
-        );
-        for context in [&job_token, &service] {
-            let words = saved(context, changed.clone());
-            assert_eq!(words[GOAL_WORDS_KEY], json!(false));
-            assert!(!holds_owners_words(&words, owner));
-        }
+        let words = saved(Some(owner), changed.clone());
+        assert_eq!(words[GOAL_WORDS_KEY], json!(owner.to_string()));
+        assert!(holds_owners_words(&words, owner));
+        let words = saved(None, changed);
+        assert_eq!(words[GOAL_WORDS_KEY], json!(false));
+        assert!(!holds_owners_words(&words, owner));
         // The same goal again, or a patch of something else: no record, and
         // the client's copy is gone.
-        let unchanged = saved(&person(teammate), existing["instafyGoal"].clone());
+        let unchanged = saved(Some(teammate), existing["instafyGoal"].clone());
         assert!(unchanged.get(GOAL_WORDS_KEY).is_none(), "{unchanged}");
         let mut title = json!({"title": "New title", GOAL_WORDS_KEY: teammate.to_string()});
         prepare_client_metadata(&mut title);
-        record_goal_words(&mut title, &person(teammate));
+        record_goal_words(&mut title, Some(teammate));
         assert_eq!(title, json!({"title": "New title"}));
-        // A goal no save is recorded for holds its owner's words, as before.
-        assert!(holds_owners_words(&existing, owner));
-        assert!(holds_owners_words(&json!({ GOAL_WORDS_KEY: null }), owner));
+        // A goal no save is recorded for holds no one's own words.
+        assert!(!holds_owners_words(&existing, owner));
+        assert!(!holds_owners_words(&json!({ GOAL_WORDS_KEY: null }), owner));
     }
 }

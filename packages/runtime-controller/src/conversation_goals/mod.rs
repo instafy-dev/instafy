@@ -231,7 +231,8 @@ pub(crate) struct Wakeup {
 /// the replies of the goal's last runs ([`policy::quoted_runs`]), so it may
 /// only when all of those are `owner`'s own: the turn it continues ran on
 /// their Claude Code, a lane job of theirs; the goal holds their own words,
-/// last saved by them, not by a teammate or an agent's job
+/// their own save wrote it last, not a teammate's or an agent's job's, and a
+/// goal no save of theirs is recorded for holds none
 /// (`state::holds_owners_words`); and every run the prompt quotes was a lane
 /// job of theirs too. An agent's job reads what teammates wrote in the chat,
 /// and a teammate's words are theirs, so neither reaches Claude Code this way,

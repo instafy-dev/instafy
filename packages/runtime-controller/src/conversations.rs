@@ -849,7 +849,12 @@ pub(crate) async fn create_blank_project_conversation(
     };
     strip_client_internal_metadata(&mut metadata_value);
     crate::conversation_goals::state::prepare_client_metadata(&mut metadata_value);
-    crate::conversation_goals::state::record_goal_words(&mut metadata_value, &context);
+    // From the caller's own credential, never `access_context`: a job token
+    // acts as its subject there, but its words are no one's own.
+    crate::conversation_goals::state::record_goal_words(
+        &mut metadata_value,
+        crate::conversation_goals::state::own_words_of(&context),
+    );
     let thread_parent_id = match body.parent_conversation_id.as_ref() {
         Some(raw) if !raw.trim().is_empty() => Some(
             Uuid::from_str(raw.trim())
@@ -1123,7 +1128,10 @@ pub(crate) async fn update_conversation_metadata(
         &mut metadata_value,
         existing.metadata.as_ref(),
     );
-    crate::conversation_goals::state::record_goal_words(&mut metadata_value, &context);
+    crate::conversation_goals::state::record_goal_words(
+        &mut metadata_value,
+        crate::conversation_goals::state::own_words_of(&context),
+    );
 
     if let Some(map) = metadata_value.as_object() {
         if let Some(raw) = map.get("visibility").and_then(|value| value.as_str()) {
@@ -3282,6 +3290,11 @@ pub(crate) async fn ensure_conversation_record(
         .await
         .map_err(|error| internal_error(format!("failed to load conversation: {error}")))?;
 
+    // A send an agent's job makes with its token comes here as the job's
+    // person (`subject_context`), with the job it is from: what it writes of
+    // the goal is no one's own words (crate::conversation_goals::state).
+    let saver = crate::conversation_goals::state::own_words_of(context)
+        .filter(|_| request.delegating_job_id.is_none());
     if let Some(metadata) = request.conversation_metadata.as_mut() {
         // Explicit goal commands save their goal before dispatch. Their inline
         // snapshot cannot overwrite a newer edit while loading the conversation.
@@ -3305,7 +3318,7 @@ pub(crate) async fn ensure_conversation_record(
                 row.get::<_, Option<JsonValue>>("metadata").as_ref(),
             );
         }
-        crate::conversation_goals::state::record_goal_words(metadata, context);
+        crate::conversation_goals::state::record_goal_words(metadata, saver);
     }
     let metadata_param = request.conversation_metadata.as_ref().map(PgJson);
 

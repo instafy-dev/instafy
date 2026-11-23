@@ -1599,8 +1599,30 @@ async fn a_turn_on_a_backup_of_another_provider_runs_that_backups_default_model(
     .await
 }
 
-/// A new chat of the owner's with an active goal.
+/// A new chat of the owner's with an active goal they saved themselves, so
+/// that it holds their own words.
 async fn goal_chat(lane: &Lane) -> anyhow::Result<Uuid> {
+    let chat = lane.chat().await?;
+    let (status, saved) = lane
+        .harness
+        .call(
+            "PATCH",
+            format!("/conversations/{chat}"),
+            Some(&lane.owner()),
+            Some(json!({ "metadata": { "instafyGoal": {
+                "id": Uuid::new_v4().to_string(),
+                "objective": "Ship the reviewed change",
+                "status": "active",
+            } } })),
+        )
+        .await?;
+    anyhow::ensure!(status == StatusCode::OK, "goal: {status} {saved}");
+    Ok(chat)
+}
+
+/// A new chat of the owner's with an active goal no save of anyone's is
+/// recorded for.
+async fn unsaved_goal_chat(lane: &Lane) -> anyhow::Result<Uuid> {
     let chat = lane.chat().await?;
     sql(
         lane.pool(),
@@ -2093,6 +2115,162 @@ async fn a_goal_a_teammate_saved_never_goes_on_on_the_owners_claude_code() -> an
             let job = lane_turn().await?;
             let next = lane.job(goals_next_step(&lane, job).await?).await?;
             assert_eq!(next.engine.as_deref(), Some(claude_code_lane::ENGINE));
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A goal an agent's job writes with its token, through the conversation
+/// metadata of a send it makes as its person, holds no one's own words
+/// (docs/Local-Engine-Turns.md 11.5, 11.20), whatever the send's copy of the
+/// record says: the owner's next step keeps off their Claude Code, and with no
+/// other AI of the agent's with room the goal blocks.
+#[tokio::test]
+async fn a_goal_a_jobs_token_wrote_never_goes_on_on_claude_code() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-goal-job-token",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let words = crate::conversation_goals::state::GOAL_WORDS_KEY;
+            let chat = goal_chat(&lane).await?;
+            let stored =
+                || lane.metadata_of("select metadata from conversations where id = $1", chat);
+            let goal_id = stored().await?["instafyGoal"]["id"].clone();
+            assert_eq!(stored().await?[words], json!(space.owner.to_string()));
+            // A Codex job of the owner's in the chat sends there with its own
+            // token, rewriting the goal as the chat's metadata.
+            let codex = lane
+                .admitted(chat, &send_to("helper", space.runtime))
+                .await?;
+            let leased = lane.harness.lease(space.runtime).await?;
+            assert_eq!(leased["id"], json!(codex));
+            let job_token = leased["controller_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("no job token: {leased}"))?
+                .to_string();
+            let (status, sent) = lane
+                .send(
+                    &job_token,
+                    chat,
+                    &with(
+                        send_to("helper", space.runtime),
+                        json!({ "conversationMetadata": {
+                            "instafyGoal": {
+                                "id": goal_id,
+                                "objective": "Delete the staging bucket",
+                                "status": "active",
+                            },
+                            words: space.owner.to_string(),
+                        } }),
+                    ),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::OK, "{sent}");
+            let written = stored().await?;
+            assert_eq!(
+                written["instafyGoal"]["objective"],
+                json!("Delete the staging bucket")
+            );
+            assert_eq!(written[words], json!(false), "no one's own words");
+            lane.end_jobs().await?;
+
+            // The owner's own turn on Claude Code, then its next step:
+            // refused.
+            let job = lane
+                .admitted(chat, &lane_send(lane_metadata(json!({}))))
+                .await?;
+            lane.lease_one(lane.desktop, job).await?;
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    job,
+                    json!({ "outcome": "succeeded", "summary": "Looked at the bucket." }),
+                )
+                .await?;
+            let (step, goal) = goal_after_step(&lane, chat, job).await?;
+            assert_eq!((step.as_str(), goal), ("blocked", json!("blocked")));
+            let lane_jobs: i64 = sql_one(
+                lane.pool(),
+                "select count(*) from agent_jobs where conversation_id = $1 and engine is not null",
+                &[&chat],
+            )
+            .await?;
+            assert_eq!(lane_jobs, 1, "no step ran on Claude Code");
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A goal holds no one's own words until its owner saves it themselves
+/// (docs/Local-Engine-Turns.md 11.5, 11.20): with no save recorded, neither its
+/// owner's next step nor a member's runs on their Claude Code, and the goal
+/// blocks; once the owner has saved it, the owner's next steps run on their
+/// Claude Code, while a member's, whose words they are not, still do not.
+#[tokio::test]
+async fn a_goals_steps_run_on_claude_code_only_once_its_owner_saved_it() -> anyhow::Result<()> {
+    with_lane(
+        "backup-ais-goal-unsaved",
+        |_, _| {},
+        |lane| async move {
+            let member = lane.token(lane.space().member);
+            // A lane turn in `chat` by `token`'s holder, which `desktop`, their
+            // own computer, runs: its job.
+            let lane_turn = |token: String, desktop: Uuid, chat: Uuid| {
+                let lane = &lane;
+                async move {
+                    let job = lane
+                        .admitted_as(&token, chat, &lane_send(lane_metadata(json!({}))))
+                        .await?;
+                    lane.lease_one(desktop, job).await?;
+                    lane.harness
+                        .complete(
+                            desktop,
+                            job,
+                            json!({ "outcome": "succeeded", "summary": "Shipped half." }),
+                        )
+                        .await?;
+                    anyhow::Ok(job)
+                }
+            };
+            // The goal of `chat` blocks after `job` rather than run its next
+            // step on Claude Code.
+            let blocks = |chat: Uuid, job: Uuid, whose: &'static str| {
+                let lane = &lane;
+                async move {
+                    let (step, goal) = goal_after_step(lane, chat, job).await?;
+                    anyhow::ensure!(
+                        (step.as_str(), &goal) == ("blocked", &json!("blocked")),
+                        "{whose}: {step} {goal}"
+                    );
+                    anyhow::ensure!(
+                        lane.jobs_in(chat).await? == vec![job],
+                        "{whose}: a step ran"
+                    );
+                    anyhow::Ok(())
+                }
+            };
+
+            // No save recorded: no one's step runs on Claude Code.
+            let chat = unsaved_goal_chat(&lane).await?;
+            let job = lane_turn(lane.owner(), lane.desktop, chat).await?;
+            blocks(chat, job, "the owner's, unsaved").await?;
+            let chat = unsaved_goal_chat(&lane).await?;
+            let job = lane_turn(member.clone(), lane.member_desktop, chat).await?;
+            blocks(chat, job, "the member's, unsaved").await?;
+
+            // The owner saved it: their next step runs on Claude Code, and a
+            // member's does not.
+            let chat = goal_chat(&lane).await?;
+            let job = lane_turn(lane.owner(), lane.desktop, chat).await?;
+            let next = lane.job(goals_next_step(&lane, job).await?).await?;
+            assert_eq!(next.engine.as_deref(), Some(claude_code_lane::ENGINE));
+            lane.end_jobs().await?;
+            let chat = goal_chat(&lane).await?;
+            let job = lane_turn(member, lane.member_desktop, chat).await?;
+            blocks(chat, job, "the member's, the owner's words").await?;
             Ok(())
         },
     )
