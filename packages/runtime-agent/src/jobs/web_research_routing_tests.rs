@@ -1775,7 +1775,9 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
             json!({ "browserTransport": transport }),
         );
         assert!(
-            prompt.contains("- With no search, try up to two reviewers' own sites that way, in the same pass"),
+            prompt.contains(
+                "- With no search, try up to two reviewers' own sites that way, in the same pass"
+            ),
             "{transport}"
         );
         assert!(
@@ -1807,7 +1809,9 @@ fn a_comparison_opens_a_pages_toggle_keeps_part_of_a_value_and_no_siblings_fact(
         assert!(comparing.contains(needle), "{needle}");
     }
     // A value read in part comes before what a value nobody found says.
-    let part = comparing.find("- What a page read says of a value, even in part").unwrap();
+    let part = comparing
+        .find("- What a page read says of a value, even in part")
+        .unwrap();
     assert!(part < comparing.find("- It reads `Unknown`, with why.").unwrap());
     assert!(
         COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len() <= TOPIC_SKILLS_MAX_BYTES,
