@@ -1303,7 +1303,7 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
         "Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with that result's link and date, or read the page first.",
         "- In a reply, from a page read: \"checked 26 Oct on <host>\", linked to it. On a page the starter's site.trust or site.cite writes it from the fact: never typed.",
         "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
-        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check.",
+        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show.",
         "bookings and availability for dates (unnamed hotels: search first, then one card for their own pages)",
         "A policy question beside an order number or e-mail: the shop's policy page; neither goes in a card.",
         "- Read the specific timetable, room or product page, not its home page or search listing.",
@@ -1335,7 +1335,7 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
     // News or a score, searched or not: on the news line, which a turn reads before any search, in a section a
     // browser turn leaves out too; no longer only beside the answer that has no key.
     assert!(search.contains(
-        "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check."
+        "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show."
     ));
     let searching = RESEARCH_SKILL
         .split("\n## Searching\n")
@@ -1475,7 +1475,7 @@ fn a_lookup_says_where_each_fact_came_from() {
     }
     // Read before any search: it sits on the news line, ahead of both searches.
     assert!(section("The AI's own web search").contains(
-        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check."
+        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show."
     ));
     assert!(!section("Searching").contains("News or a score"));
     let research = flat(RESEARCH_SKILL);
@@ -1504,7 +1504,7 @@ fn a_lookup_says_where_each_fact_came_from() {
         "A site posing as an official one is no source or link",
         "\"Cheapest\" is one price below all others found",
         "never a signed storage address",
-        "before saying it doesn't show or you couldn't check",
+        "first; search only for what it doesn't show",
     ] {
         assert!(prompt.contains(needle), "{needle}");
     }
@@ -1540,14 +1540,16 @@ fn a_lookup_says_where_each_fact_came_from() {
 /// to the browser", a link alone, and "share review pages", with the reader's rules in the words ("robots rules",
 /// "blocks automated reading"). It ends one way now: what wasn't read in a few plain words, its link and one card,
 /// which says itself what happens next, and a page whose address would be a guess is named by its site's home page.
-/// Old words make room, and the skill still loads whole.
+/// News is read on its subject's own page first, searched or not, and a search looks only for what that page doesn't
+/// show: with search on, a news question read no page and spent its credits on a search's excerpts, where with search
+/// off it read the subject's newsroom (a local test, Nov 23). Old words make room, and the skill still loads whole.
 #[test]
 fn a_page_the_reader_couldnt_read_ends_one_way_and_news_is_read_whole() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     let ending = "- list it in the reply as \"not read: <page>\", in a few plain words, with its link and, if public, open to Octo and showing no secrets, one card they may press (Readers): never how the reader was stopped (robots.txt) or that you hand it over: the card says what happens next.";
     let reader = "follow its `tell`. A status or news page: no `--find`; a cut read isn't the whole page: read it narrower before saying what it lists.";
-    let news = "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check.";
+    let news = "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show.";
     for needle in [
         ending,
         reader,
@@ -1565,6 +1567,7 @@ fn a_page_the_reader_couldnt_read_ends_one_way_and_news_is_read_whole() {
         "- From a page read:",
         "Prices are stored with \"seen <date>\"",
         "\"Several reads in one card\")",
+        "before saying it doesn't show or you couldn't check",
     ] {
         assert!(!research.contains(gone), "{gone}");
     }

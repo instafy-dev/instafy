@@ -854,6 +854,9 @@ const LEGACY_WEB_RESEARCH_SHA256: &[&str] = &[
     // page was read without `--find` and a cut read again, and a page the reader couldn't read
     // ended in a few plain words, its link and one card, never how the reader was stopped.
     "72511d5584747120c02884281993ba896c3ffd3f335356e225a5d143788f04c7", // v24
+    // From before news or a score read its subject's own page first and searched only for what
+    // that page doesn't show, not only before saying it doesn't show it.
+    "f46a0a94d9372f25358976fd656a9835ada840f0a46062cd891c04611163f682", // v25
 ];
 /// How Octo compares items, for every reader and browser: which items, each one's own page, its
 /// values and the reviews asked for, and what a value nobody found says. A topic of the browser,

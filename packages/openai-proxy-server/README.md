@@ -282,7 +282,14 @@ platform credential:
   and says what was removed, refused or not run; `encrypted_output` is `null`. When text came
   back, its header marks that text as untrusted data and then says how a fact from it is said:
   "a web search on <date> found, on <that result's site>: …" with that result's link and date, or
-  after reading the page (the web-research skill's own sentence). `results`, which
+  after reading the page (the web-research skill's own sentence). Where the text lists results, as
+  a ChatGPT login's search does, each result has a wrapper of its own under the proxy's line with
+  its site and when it was published: the provider's own date, else about when its age says,
+  counted back from the search ("Result 1: example.com, published about 20 Nov 2026"), else "no
+  date given". The header then adds that a result's "today" is its own date, never the search's,
+  and that its page is linked, not a file download. A page no result names is still listed, and a
+  text with a result at an address the answer doesn't cite is written whole, in one wrapper.
+  `results`, which
   codex hands to its clients and never to the model, starts with
   `{"type": "searched_queries", "queries": […]}`: the queries that searched, as they were sent
   (not one refused, repeated, past the limit, withheld by the controller or not run, nor one
