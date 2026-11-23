@@ -47,9 +47,13 @@ describe("ChatPanel's turn-engine wiring", () => {
     // Elsewhere the trace shows an assistant's header only where the gutter
     // face is gone, which would leave the line out on a wide screen.
     const trace = between(chatPanel, "if (normalizedJobThread) {", "Read-only run trace");
-    expect(trace).toContain(
-      "const assistantHeaderEverywhere = showsAssistantHeader && showsTurnEngineSpeakerLine(messageMetadata);",
+    // So does a reply that names the viewer's own sign-in it ran on (11.20).
+    expect(trace).toMatch(
+      /const assistantHeaderEverywhere =\s*showsAssistantHeader &&\s*\(showsTurnEngineSpeakerLine\(messageMetadata\) \|\| showsSignInLineInTrace\(messageMetadata\)\);/,
     );
+    const gate = chatPanel.indexOf("const showsSignInLineInTrace = useReplySignInLineGate(jobThreadMessages);");
+    expect(gate).toBeGreaterThan(chatPanel.indexOf("const jobThreadMessages = useMemo"));
+    expect(gate).toBeLessThan(chatPanel.indexOf("if (normalizedJobThread) {"));
     expect(trace).toContain(
       "speakerIdentity={assistantHeaderEverywhere ? assistantSpeakerIdentity : humanSpeakerIdentity}",
     );

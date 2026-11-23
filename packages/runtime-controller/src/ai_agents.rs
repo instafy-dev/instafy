@@ -21,6 +21,7 @@ use crate::projects::{
     ensure_project_access, ensure_project_read_access, ensure_project_write_access,
     load_project_record,
 };
+use crate::sign_in_room::{self, OwnerSignIns, SignIn};
 use crate::typed_sql::typed;
 use crate::{bad_request, forbidden, internal_error, not_found, ApiError, AppState};
 
@@ -56,6 +57,12 @@ pub(crate) struct AgentProfile {
     /// (docs/Local-Engine-Turns.md 11.19); null for its owner's first login,
     /// and for every other agent.
     claude_code_login_id: Option<String>,
+    /// Its backup AIs (docs/Local-Engine-Turns.md 11.20), in order, only the
+    /// live ones: a connection its owner holds and has not revoked, a Claude
+    /// Code login that exists for them. Each `{"credentialId": "<uuid>"}` or
+    /// `{"claudeCodeLoginId": "<uuid>"}`; empty for an agent on Instafy AI or
+    /// the default.
+    backup_ais: Vec<JsonValue>,
     runtime_id: Option<String>,
     deleted_at: Option<String>,
     created_at: String,
@@ -83,6 +90,9 @@ pub(crate) struct CreateAgentBody {
     /// One of the owner's own Claude Code logins, with `provider:
     /// "claude-code"` only (11.19).
     claude_code_login_id: Option<String>,
+    /// Its backup AIs, in order (11.20, crate::sign_in_room): absent or null
+    /// for none.
+    backup_ais: Option<JsonValue>,
 }
 
 /// Distinguish "field absent" (keep) from "field: null" (clear) for PATCH
@@ -126,6 +136,11 @@ pub(crate) struct UpdateAgentBody {
     /// request.
     #[serde(default, deserialize_with = "double_option")]
     claude_code_login_id: Option<Option<String>>,
+    /// Its backup AIs (11.20, crate::sign_in_room): absent keeps them, a
+    /// list replaces them, and `[]` or null clears them. Choosing Instafy AI
+    /// or the default clears them too.
+    #[serde(default, deserialize_with = "double_option")]
+    backup_ais: Option<Option<JsonValue>>,
     project_id: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     runtime_id: Option<Option<String>>,
@@ -382,6 +397,27 @@ async fn resolve_claude_code_login(
         Some(_) => Ok(login_id),
         None => Err(unknown()),
     }
+}
+
+/// The live backups of the agent `row` holds (its `credential_id`,
+/// `provider`, `claude_code_login_id` and `backup_ais`), as the agent list
+/// returns them (docs/Local-Engine-Turns.md 11.20): in order, each one of
+/// `owner`'s live connections or logins and not the agent's first AI, and
+/// none for an agent on Instafy AI or the default.
+fn live_backup_ais(row: &tokio_postgres::Row, owner: &OwnerSignIns) -> Vec<JsonValue> {
+    let credential_id: Option<Uuid> = row.get("credential_id");
+    let provider: String = row.get("provider");
+    let agent_ai = sign_in_room::AgentAiRow {
+        credential_id,
+        claude_code: provider == PROVIDER_CLAUDE_CODE && credential_id.is_none(),
+        claude_code_login_id: row.get("claude_code_login_id"),
+        backup_ais: row.get("backup_ais"),
+    };
+    sign_in_room::AgentAis::of(&agent_ai, owner)
+        .backups()
+        .into_iter()
+        .map(SignIn::entry)
+        .collect()
 }
 
 /// The AI an agent with no credential falls back to when it stops using
@@ -742,6 +778,7 @@ async fn list_my_agents(
                     ua.reasoning_effort,
                     ua.credential_id,
                     ua.claude_code_login_id,
+                    ua.backup_ais,
                     ua.deleted_at,
                     ua.created_at,
                     ua.updated_at,
@@ -758,10 +795,12 @@ async fn list_my_agents(
         )
         .await
         .map_err(|error| internal_error(format!("failed to list agents: {error}")))?;
+    let owner_sign_ins = OwnerSignIns::load(&transaction, &user_id).await?;
 
     let agents = rows
         .into_iter()
         .map(|row| {
+            let backup_ais = live_backup_ais(&row, &owner_sign_ins);
             let id: Uuid = row.get("id");
             let handle: String = row.get("handle");
             let display_name: Option<String> = row.get("display_name");
@@ -790,6 +829,7 @@ async fn list_my_agents(
                 reasoning_effort,
                 credential_id: credential_id.map(|value| value.to_string()),
                 claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
+                backup_ais,
                 runtime_id: runtime_id.map(|value| value.to_string()),
                 deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
                 created_at: created_at.to_rfc3339(),
@@ -857,6 +897,23 @@ async fn create_my_agent(
     let claude_code_login_id = match body.claude_code_login_id.as_deref() {
         Some(raw) => Some(resolve_claude_code_login(&transaction, &user_id, &provider, raw).await?),
         None => None,
+    };
+    // Its backups (11.20): each one of the owner's own live connections and
+    // logins, after a first AI of their own (crate::sign_in_room).
+    let owner_sign_ins = OwnerSignIns::load(&transaction, &user_id).await?;
+    let backup_ais = match body.backup_ais.as_ref() {
+        Some(requested) => sign_in_room::checked_backup_ais(
+            requested,
+            sign_in_room::FirstAi::of(
+                credential_id,
+                provider == PROVIDER_CLAUDE_CODE,
+                claude_code_login_id,
+                &owner_sign_ins,
+            ),
+            &owner_sign_ins,
+            state.config.claude_code_lane.allow(user_id),
+        )?,
+        None => Vec::new(),
     };
 
     let (agent_id, _handle) = if let Some(handle) = body
@@ -926,6 +983,16 @@ async fn create_my_agent(
         .await?
     };
 
+    if !backup_ais.is_empty() {
+        transaction
+            .execute(
+                "update user_agents set backup_ais = $3 where id = $1 and user_id = $2",
+                &[&agent_id, &user_id, &sign_in_room::entries(&backup_ais)],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to save agent backups: {error}")))?;
+    }
+
     // Credential-created defaults also accept public profile text without
     // feeding it into the runtime description or credential bootstrap path.
     if bio.is_some() {
@@ -940,7 +1007,7 @@ async fn create_my_agent(
 
     let row = transaction
         .query_one(
-            "select id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, deleted_at, created_at, updated_at
+            "select id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, backup_ais, deleted_at, created_at, updated_at
              from user_agents
              where id = $1 and user_id = $2
              limit 1",
@@ -948,6 +1015,7 @@ async fn create_my_agent(
         )
         .await
         .map_err(|error| internal_error(format!("failed to load new agent: {error}")))?;
+    let backup_ais = live_backup_ais(&row, &owner_sign_ins);
 
     transaction
         .commit()
@@ -981,6 +1049,7 @@ async fn create_my_agent(
         reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
         claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
+        backup_ais,
         runtime_id: None,
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
@@ -1021,7 +1090,7 @@ async fn update_my_agent(
 
     let existing = transaction
         .query_opt(
-            "select handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id
+            "select handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id
              from user_agents
              where id = $1 and user_id = $2 and deleted_at is null
              limit 1",
@@ -1042,6 +1111,7 @@ async fn update_my_agent(
     let existing_model: Option<String> = existing.get("model");
     let existing_reasoning_effort: Option<String> = existing.get("reasoning_effort");
     let existing_credential_id: Option<Uuid> = existing.get("credential_id");
+    let existing_claude_code_login_id: Option<Uuid> = existing.get("claude_code_login_id");
 
     let next_handle = desired_handle.unwrap_or_else(|| existing_handle.clone());
     if next_handle != existing_handle {
@@ -1149,6 +1219,32 @@ async fn update_my_agent(
         None => Some(None),
     };
     let update_claude_code_login = claude_code_login_update.is_some();
+    // The agent's first AI after the request, and its backups (11.20,
+    // crate::sign_in_room): a list in the body replaces them, checked against
+    // that first AI, and `[]` or null clears them, as choosing Instafy AI or
+    // the default does. Absent keeps them as the row holds them then, less an
+    // entry that has become the agent's own first AI.
+    let owner_sign_ins = OwnerSignIns::load(&transaction, &user_id).await?;
+    let first_ai = sign_in_room::FirstAi::of(
+        next_credential_id,
+        next_provider == PROVIDER_CLAUDE_CODE,
+        claude_code_login_update.unwrap_or(existing_claude_code_login_id),
+        &owner_sign_ins,
+    );
+    let backup_update: Option<Vec<SignIn>> = match body.backup_ais.as_ref() {
+        Some(Some(requested)) => Some(sign_in_room::checked_backup_ais(
+            requested,
+            first_ai,
+            &owner_sign_ins,
+            state.config.claude_code_lane.allow(user_id),
+        )?),
+        Some(None) => Some(Vec::new()),
+        None if !first_ai.is_own() => Some(Vec::new()),
+        None => None,
+    };
+    let replace_backup_ais = backup_update.is_some();
+    let next_backup_ais = sign_in_room::entries(&backup_update.unwrap_or_default());
+    let first_ai_entry: Option<JsonValue> = first_ai.sign_in().map(SignIn::entry);
     let next_claude_code_login_id = claude_code_login_update.flatten();
 
     let next_model = match body.model {
@@ -1290,9 +1386,21 @@ async fn update_my_agent(
                  reasoning_effort = $10,
                  bio = case when $12 then $11 else bio end,
                  claude_code_login_id = case when $14 then $13 else claude_code_login_id end,
+                 backup_ais = case
+                     when $15 then $16::jsonb
+                     else coalesce(
+                         (select jsonb_agg(kept.entry order by kept.position)
+                            from jsonb_array_elements(
+                                     case when jsonb_typeof(user_agents.backup_ais) = 'array'
+                                          then user_agents.backup_ais else '[]'::jsonb end
+                                 ) with ordinality as kept(entry, position)
+                           where $17::jsonb is null or kept.entry <> $17::jsonb),
+                         '[]'::jsonb
+                     )
+                 end,
                  updated_at = now()
              where id = $1 and user_id = $2 and deleted_at is null
-             returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, deleted_at, created_at, updated_at",
+             returning id, handle, display_name, description, bio, avatar_seed, provider, model, reasoning_effort, credential_id, claude_code_login_id, backup_ais, deleted_at, created_at, updated_at",
             &[
                 &agent_id,
                 &user_id,
@@ -1308,6 +1416,9 @@ async fn update_my_agent(
                 &update_bio,
                 &next_claude_code_login_id,
                 &update_claude_code_login,
+                &replace_backup_ais,
+                &next_backup_ais,
+                &first_ai_entry,
             ],
         )
         .await
@@ -1316,6 +1427,7 @@ async fn update_my_agent(
     let Some(row) = updated else {
         return Err(not_found("agent not found"));
     };
+    let backup_ais = live_backup_ais(&row, &owner_sign_ins);
 
     transaction
         .commit()
@@ -1349,6 +1461,7 @@ async fn update_my_agent(
         reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
         claude_code_login_id: claude_code_login_id.map(|value| value.to_string()),
+        backup_ais,
         runtime_id: agent_runtime_id.map(|value| value.to_string()),
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
@@ -1582,5 +1695,20 @@ mod tests {
         let set: UpdateAgentBody =
             serde_json::from_value(json!({ "claudeCodeLoginId": login })).expect("parse");
         assert_eq!(set.claude_code_login_id, Some(Some(login)));
+
+        // Its backups: absent keeps them, null or a list sets them.
+        assert_eq!(absent.backup_ais, None);
+        let cleared: UpdateAgentBody =
+            serde_json::from_str(r#"{"backupAis": null}"#).expect("parse");
+        assert_eq!(cleared.backup_ais, Some(None));
+        let list = json!([{ "credentialId": Uuid::new_v4().to_string() }]);
+        let set: UpdateAgentBody =
+            serde_json::from_value(json!({ "backupAis": list })).expect("parse");
+        assert_eq!(set.backup_ais, Some(Some(list.clone())));
+        let created: CreateAgentBody =
+            serde_json::from_value(json!({ "backupAis": list })).expect("parse");
+        assert_eq!(created.backup_ais, Some(list));
+        let created: CreateAgentBody = serde_json::from_value(json!({})).expect("parse");
+        assert_eq!(created.backup_ais, None);
     }
 }

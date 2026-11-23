@@ -454,6 +454,8 @@ mod tests {
             avatar_seed: None,
             claude_code: false,
             claude_code_login_ids: Vec::new(),
+            claude_code_login: None,
+            sign_in: None,
         }
     }
 

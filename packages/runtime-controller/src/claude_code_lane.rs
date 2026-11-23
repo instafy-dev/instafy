@@ -4,11 +4,14 @@
 //! section 11 is version 2, which this module builds.
 //!
 //! An agent is a Claude Code agent when its provider is [`PROVIDER`] and it has
-//! no credential (`ai_agents`). Dispatch resolves every handle against the
+//! no credential (`ai_agents`). A turn runs on Claude Code when the AI
+//! dispatch chooses for it, by room, is one of its owner's Claude Code
+//! logins: a Claude Code agent's, or a login among any agent's backups
+//! (crate::sign_in_room, 11.20). Dispatch resolves every handle against the
 //! agents of its own person, so a lane turn is always its person's own: a
 //! teammate's message never reaches another person's agent (11.5). For each
-//! target that is a Claude Code agent, [`check_target`] runs before dispatch
-//! writes anything:
+//! target whose turn runs on Claude Code, [`check_target`] runs before
+//! dispatch writes anything:
 //! - L1: the rollout switch covers the agent's owner;
 //! - L2: the owner rule: the agent is the dispatch's own person's;
 //! - L3: the turn is one Claude Code can take (11.4).
@@ -170,12 +173,13 @@ pub(crate) const MACHINE_STOPPED_MESSAGE: &str = "Instafy Desktop stopped on thi
      computer, so the turn ended and won't run again. Send it again to run it.";
 
 /// The keys a lane job's payload metadata keeps from dispatch's own
-/// (docs/Local-Engine-Turns.md 2.5, 11.12), beside the stamps and the turn's
-/// execution mode: the controller's `agent`, `writeScope`,
-/// `conversationVisibility`, `runtimePreference` and `groupParticipation` (an
-/// evaluation's marker, which completion reads to take a decline), and the
-/// client's `input` and `writeIntent`. Nothing else a client sent, such as a
-/// `userId` of its choosing, reaches the runtime.
+/// (docs/Local-Engine-Turns.md 2.5, 11.12), beside the stamps, the turn's
+/// execution mode and its goal's keys ([`payload_metadata`]): the
+/// controller's `agent`, `writeScope`, `conversationVisibility`,
+/// `runtimePreference` and `groupParticipation` (an evaluation's marker,
+/// which completion reads to take a decline), and the client's `input` and
+/// `writeIntent`. Nothing else a client sent, such as a `userId` of its
+/// choosing, reaches the runtime.
 const PAYLOAD_METADATA_KEYS: [&str; 7] = [
     "agent",
     "writeScope",
@@ -185,6 +189,23 @@ const PAYLOAD_METADATA_KEYS: [&str; 7] = [
     "input",
     "writeIntent",
 ];
+/// The turn's binding to its conversation's goal, which only dispatch writes
+/// (`conversation_goals::bind_dispatch`; every dispatch first drops a
+/// caller's copy, `conversation_goals::strip_job_claims`). Completion reads it
+/// from the job's payload to record the goal's next step
+/// (`conversation_goals::state::settle_job`), so a goal whose turn runs on
+/// Claude Code goes on after it as after any turn.
+const GOAL_BINDING_KEY: &str = "_controllerGoal";
+/// The conversation's goal as dispatch read it when it bound the turn
+/// (`conversation_goals::bind_dispatch`), present only while the
+/// conversation has one. A lane job keeps only its `id`, which the goal
+/// counts its turns by across its revisions (`conversation_goals::prepare_request`).
+const GOAL_KEY: &str = "goal";
+/// A goal's next step's turn number and source, which its wake-up's request
+/// carries (`conversation_goals::prepare_request`), and the goal counts its
+/// turns by to stop at its most. Kept only on a wake-up's job: a send's copy
+/// is a client's.
+const GOAL_CONTINUATION_KEY: &str = "goalContinuation";
 
 /// Marks a dispatch request, or one target's copy of it, whose job runs on
 /// its person's own Claude Code (`agent_jobs.engine`, 11.6). Only dispatch
@@ -240,20 +261,25 @@ fn unsupported(reason: &str, message: &str) -> Refusal {
 
 /// Removes every key only the controller may write from a client's
 /// `metadata`: the `claudeCode` stamp, the failure code and the skip marker,
-/// at the top level and in its nested copies. Sends and recorded messages go
-/// through this for every caller, the service role included
+/// and the stamps of the sign-in a turn ran on and the agent's next one
+/// (`aiSignIn`, `aiSignInNext`, crate::sign_in_room), at the top level and in
+/// its nested copies. Sends and recorded messages go through this for every
+/// caller, the service role included
 /// (`conversations::sanitize_client_recorded_message_metadata`).
 pub(crate) fn strip_client_marks(metadata: &mut JsonValue) {
     let Some(map) = metadata.as_object_mut() else {
         return;
     };
-    for key in CONTROLLER_KEYS {
-        map.remove(key);
+    let controller_keys = CONTROLLER_KEYS
+        .iter()
+        .chain(crate::sign_in_room::CONTROLLER_KEYS.iter());
+    for key in controller_keys.clone() {
+        map.remove(*key);
     }
     for nested_key in NESTED_METADATA_KEYS {
         if let Some(nested) = map.get_mut(nested_key).and_then(JsonValue::as_object_mut) {
-            for key in CONTROLLER_KEYS {
-                nested.remove(key);
+            for key in controller_keys.clone() {
+                nested.remove(*key);
             }
         }
     }
@@ -291,6 +317,26 @@ pub(crate) fn check_target(
     // L3.
     check_turn_shape(request, target.uses_browser)?;
     check_prompt_text(target.prompt_text)
+}
+
+/// Whether L1-L3 would refuse `request` on Claude Code for one of its targets
+/// whose words are `prompt_text` (11.6), the target's own saved agent aside:
+/// dispatch passes over a Claude Code login it reaches only as a backup for
+/// such a turn, and goes on to the agent's next AI
+/// (crate::sign_in_room::LoginUse).
+pub(crate) fn refuses_turn(
+    config: &AppConfig,
+    context: &RequestContext,
+    request: &DispatchPromptNormalized,
+    uses_browser: bool,
+    prompt_text: &str,
+) -> bool {
+    let Some(owner) = context.user_id else {
+        return true;
+    };
+    !config.claude_code_lane.allow(owner)
+        || check_turn_shape(request, uses_browser).is_err()
+        || check_prompt_text(prompt_text).is_err()
 }
 
 /// L3 (11.4): what a Claude Code agent's turn cannot ask for. Each refusal
@@ -366,9 +412,14 @@ pub(crate) fn not_from_an_agents_job() -> Refusal {
     )
 }
 
-/// Whether any agent a dispatch with `metadata` reaches, for `person`, is a
-/// Claude Code agent: its handles as dispatch resolves them, against that
-/// person's own saved agents.
+/// Whether any agent a dispatch with `metadata` reaches, for `person`, may
+/// run a turn on Claude Code: a Claude Code agent, or one whose backups list
+/// one of its owner's Claude Code logins, which takes its turns once its
+/// first AI reaches its plan's limit (docs/Local-Engine-Turns.md 11.20). Its
+/// handles as dispatch resolves them, against that person's own saved agents.
+/// What an agent's job starts never runs on Claude Code (11.5), and dispatch
+/// chooses among an agent's AIs only later, by their room, so such a send is
+/// refused whichever AI would take it.
 pub(crate) async fn selects_a_claude_code_agent(
     client: &(impl tokio_postgres::GenericClient + Sync),
     person: Uuid,
@@ -377,14 +428,20 @@ pub(crate) async fn selects_a_claude_code_agent(
     let handles = crate::dispatch::agent_selection_handles(metadata);
     client
         .query_one(
-            "select exists (
-                 select 1 from user_agents
-                  where user_id = $1
-                    and lower(handle) = any($2::text[])
-                    and deleted_at is null
-                    and provider = $3
-                    and credential_id is null
-             )",
+            concat!(
+                "select exists (
+                     select 1 from user_agents ua
+                      where ua.user_id = $1
+                        and lower(ua.handle) = any($2::text[])
+                        and ua.deleted_at is null
+                        and (
+                            (ua.provider = $3 and ua.credential_id is null)
+                            or ",
+                crate::sign_in_room::lists_a_login!("ua"),
+                "
+                        )
+                 )"
+            ),
             &[&person, &handles, &PROVIDER],
         )
         .await
@@ -435,8 +492,9 @@ fn check_prompt_text(prompt_text: &str) -> Result<(), Refusal> {
 /// self-hosted, attested as theirs, without a Personal Browser,
 /// dispatch-ready, and with an attested `claudeCode` capability of version 2
 /// whose entry for `login` is ready. `login` is the one the turn's job would
-/// take, its first login (11.19): a person with none has no computer that
-/// could. An ambient evaluation that none could take is never queued (11.7).
+/// take, the login dispatch chose for it (11.19, 11.20): a person with none
+/// has no computer that could. An ambient evaluation that none could take is
+/// never queued (11.7).
 pub(crate) async fn a_computer_is_ready(
     state: &AppState,
     transaction: &Transaction<'_>,
@@ -548,8 +606,8 @@ fn runtime_takes_lane_turns(
 /// `claudeCode: {"version": 1, "loginId": "<uuid>"}`, `aiAccessMode:
 /// "claude-code"` and `managedAiUsed: false`. `login` is the Claude Code login
 /// the turn runs on (11.19), and the stamp names none without one. Dispatch
-/// stamps each Claude Code target's run with its first login, and the
-/// person's message and prompt when every target is one; the reply
+/// stamps each Claude Code target's run with the login it chose (11.20), and
+/// the person's message and prompt when every target is one; the reply
 /// (`agent::stamp_ai_access_mode_from_job_payload`) and a failure message
 /// ([`stamp_failure`]) are stamped with the login the turn's lease took. The
 /// job payload ([`payload_metadata`]) names none: its runtime is told the
@@ -575,15 +633,33 @@ pub(crate) fn stamp(map: &mut JsonMap<String, JsonValue>, login: Option<Uuid>) {
 /// only [`PAYLOAD_METADATA_KEYS`] of dispatch's `metadata`, the stamps, and,
 /// for a read-only turn, its `execution_mode`, where the runtime reads it
 /// for any job. An `apply` turn names none, which the runtime reads as
-/// `apply`.
+/// `apply`. A turn in a conversation with a goal keeps its binding to it
+/// ([`GOAL_BINDING_KEY`]), which dispatch writes on every person's turn and
+/// matters only there, and a goal's wake-up (`goal_wakeup`) its
+/// [`GOAL_CONTINUATION_KEY`] too, so the goal's turn count holds across turns
+/// on Claude Code.
 pub(crate) fn payload_metadata(
     metadata: &JsonValue,
     execution_mode: &str,
+    goal_wakeup: bool,
 ) -> JsonMap<String, JsonValue> {
     let mut map = JsonMap::new();
     for key in PAYLOAD_METADATA_KEYS {
         if let Some(value) = metadata.get(key) {
             map.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(goal) = metadata.get(GOAL_KEY).filter(|goal| !goal.is_null()) {
+        if let Some(binding) = metadata.get(GOAL_BINDING_KEY) {
+            map.insert(GOAL_BINDING_KEY.to_string(), binding.clone());
+            if let Some(id) = goal.get("id").filter(|id| id.is_string()) {
+                map.insert(GOAL_KEY.to_string(), json!({ "id": id }));
+            }
+        }
+    }
+    if goal_wakeup {
+        if let Some(value) = metadata.get(GOAL_CONTINUATION_KEY) {
+            map.insert(GOAL_CONTINUATION_KEY.to_string(), value.clone());
         }
     }
     if execution_mode == EXECUTION_MODE_PLAN_ONLY {
@@ -640,15 +716,21 @@ pub(crate) async fn a_turn_waits_in(
 }
 
 /// The Claude Code login a lane job takes when a lease takes it
-/// (docs/Local-Engine-Turns.md 11.19), as `job_login.lane_login_id`: the
-/// first of its `claude_code_login_ids` that is still one of its person's
-/// logins, else, when none is, their first login, the oldest. None for a
-/// person with no login, whose turns wait, and for every job that is not a
-/// lane job. A `left join lateral` on the `agent_jobs` row `aj`: the lease
-/// and the idle poll read the job's login alike ([`lane_turn_runs_on`]).
+/// (docs/Local-Engine-Turns.md 11.19, 11.20), as `job_login.lane_login_id`:
+/// the first of its `claude_code_login_ids` that is still one of its
+/// person's logins and has room (crate::sign_in_room::login_has_room), so a
+/// waiting turn moves from a login that reached its plan's limit to the next
+/// of its stretch; none when none of those has room, and the job waits for
+/// the first reset; and, when none of them is still the person's, or the job
+/// names none, their oldest login with room. None for a person with no login,
+/// whose turns wait, and for every job that is not a lane job. A login of
+/// anyone else's never counts. A `left join lateral` on the `agent_jobs` row
+/// `aj`: the lease and the idle poll read the job's login alike
+/// ([`lane_turn_runs_on`]).
 macro_rules! lane_job_login {
     () => {
-        "left join lateral (
+        concat!(
+            "left join lateral (
             select lane_login.id as lane_login_id
               from claude_code_logins lane_login
               left join unnest(aj.claude_code_login_ids) with ordinality
@@ -660,11 +742,23 @@ macro_rules! lane_job_login {
                             ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                        then (aj.payload #>> '{user_id}')::uuid
                    end
+               and ",
+            crate::sign_in_room::login_has_room!("lane_login"),
+            "
+               and (
+                     wanted_login.id is not null
+                     or not exists (
+                         select 1 from claude_code_logins listed_login
+                          where listed_login.user_id = lane_login.user_id
+                            and listed_login.id = any(aj.claude_code_login_ids)
+                     )
+               )
              order by wanted_login.position nulls last,
                       lane_login.created_at,
                       lane_login.id
              limit 1
         ) job_login on true"
+        )
     };
 }
 pub(crate) use lane_job_login;
@@ -1470,14 +1564,25 @@ mod tests {
             "claude_code": {},
             "claude_code_failure": "x",
             "claude_code_skipped": {},
-            "prompt_metadata": { "claudeCode": { "version": 1 }, "keep": 1 },
-            "details": { "claudeCodeFailure": "not_signed_in" },
+            // The sign-in stamps (crate::sign_in_room), in both spellings.
+            "aiSignIn": { "credentialId": Uuid::new_v4().to_string(), "backup": true },
+            "ai_sign_in": {},
+            "aiSignInNext": { "claudeCodeLoginId": Uuid::new_v4().to_string() },
+            "ai_sign_in_next": {},
+            "prompt_metadata": { "claudeCode": { "version": 1 }, "aiSignIn": {}, "keep": 1 },
+            "promptMetadata": { "aiSignInNext": {} },
+            "details": { "claudeCodeFailure": "not_signed_in", "aiSignIn": {} },
             "keep": true,
         });
         strip_client_marks(&mut metadata);
         assert_eq!(
             metadata,
-            json!({ "prompt_metadata": { "keep": 1 }, "details": {}, "keep": true })
+            json!({
+                "prompt_metadata": { "keep": 1 },
+                "promptMetadata": {},
+                "details": {},
+                "keep": true,
+            })
         );
         strip_client_marks(&mut JsonValue::Null);
     }
@@ -1507,9 +1612,9 @@ mod tests {
             READ_ONLY_WORKSPACE_MODE
         );
         let metadata = json!({ "execution_mode": "apply", "input": { "kind": "person" } });
-        let apply = payload_metadata(&metadata, "apply");
+        let apply = payload_metadata(&metadata, "apply", false);
         assert!(!apply.contains_key("execution_mode"));
-        let read_only = payload_metadata(&metadata, EXECUTION_MODE_PLAN_ONLY);
+        let read_only = payload_metadata(&metadata, EXECUTION_MODE_PLAN_ONLY, false);
         assert_eq!(read_only["execution_mode"], json!(EXECUTION_MODE_PLAN_ONLY));
     }
 
@@ -1929,25 +2034,49 @@ mod tests {
             "aiAccessMode": "managed",
             "managedAiUsed": true,
             "claudeCode": { "version": 2 },
-            "goal": { "text": "x" },
+            "goal": { "id": "goal-1", "objective": "Ship it", "progressSummary": "Half done." },
             "groupParticipation": { "reason": "skill_mode_ambient" },
             "groupAiParticipants": [{ "handle": "helper" }],
             "managedAiBillingDeferred": true,
+            "_controllerGoal": { "revision": "r1", "ownerUserId": "u1", "userTurn": true },
+            "goalContinuation": { "goalId": "g", "turn": 2, "source": "controller" },
+        });
+        let kept = json!({
+            "agent": { "handle": "octo" },
+            "writeScope": { "mode": "unscoped" },
+            "conversationVisibility": "public",
+            "runtimePreference": { "runtimeId": "r" },
+            "groupParticipation": { "reason": "skill_mode_ambient" },
+            "_controllerGoal": { "revision": "r1", "ownerUserId": "u1", "userTurn": true },
+            // Only the goal's id, which its turns are counted by.
+            "goal": { "id": "goal-1" },
+            "input": { "kind": "person" },
+            "writeIntent": true,
+            "claudeCode": { "version": 1 },
+            "aiAccessMode": "claude-code",
+            "managedAiUsed": false,
         });
         assert_eq!(
-            JsonValue::Object(payload_metadata(&metadata, "apply")),
-            json!({
-                "agent": { "handle": "octo" },
-                "writeScope": { "mode": "unscoped" },
-                "conversationVisibility": "public",
-                "runtimePreference": { "runtimeId": "r" },
-                "groupParticipation": { "reason": "skill_mode_ambient" },
-                "input": { "kind": "person" },
-                "writeIntent": true,
-                "claudeCode": { "version": 1 },
-                "aiAccessMode": "claude-code",
-                "managedAiUsed": false,
-            })
+            JsonValue::Object(payload_metadata(&metadata, "apply", false)),
+            kept
+        );
+        // A goal's wake-up keeps its turn number too.
+        let mut wakeup = kept.clone();
+        wakeup["goalContinuation"] = metadata["goalContinuation"].clone();
+        assert_eq!(
+            JsonValue::Object(payload_metadata(&metadata, "apply", true)),
+            wakeup
+        );
+        // A turn in a conversation with no goal keeps no binding to one.
+        let mut no_goal = metadata.clone();
+        no_goal.as_object_mut().expect("metadata").remove("goal");
+        let mut unbound = kept.clone();
+        let unbound_map = unbound.as_object_mut().expect("kept");
+        unbound_map.remove("_controllerGoal");
+        unbound_map.remove("goal");
+        assert_eq!(
+            JsonValue::Object(payload_metadata(&no_goal, "apply", false)),
+            unbound
         );
     }
 }

@@ -1,6 +1,7 @@
 import type {
   FrontendTurnEnginePresentation,
   TurnEngineFailureInput,
+  TurnEngineSpeakerSignIn,
   TurnEngineTurnOwner,
 } from "../frontendFeatureModule";
 import type {
@@ -270,19 +271,24 @@ export function claudeCodeWaitingLine(
 /**
  * The plain-text line under a Claude Code reply's header (5.7, D20). The
  * turn's own person, once they have more than one login, reads which of
- * their logins ran it, by the login completion stamped on the reply (11.19);
- * everyone else reads it as before, since a login's name is its owner's own.
+ * their logins ran it, by the login completion stamped on the reply (11.19),
+ * and, when the chat says the turn ran on one of the agent's backups
+ * (`signIn`, 11.20), that it was a backup; everyone else reads it as before,
+ * since a login's name is its owner's own.
  */
 export function claudeCodeSpeakerLine(
   owner: TurnEngineTurnOwner | null,
   metadata: unknown = null,
   logins: readonly ClaudeCodeLogin[] | null = claudeCodeLoginsSnapshot(),
+  signIn: TurnEngineSpeakerSignIn | null = null,
 ): string {
   if (owner?.isViewer) {
     const label = logins && logins.length > 1 ? claudeCodeLoginLabel(logins, readClaudeCodeStampLoginId(metadata)) : null;
+    // Right after the login it names, so it never reads as the computer's.
+    const backup = signIn?.backup ? ", a backup" : "";
     return label
-      ? `Ran on your own Claude Code (${label}), on your computer`
-      : "Ran on your own Claude Code, on your computer";
+      ? `Ran on your own Claude Code (${label})${backup}, on your computer`
+      : `Ran on your own Claude Code${backup}, on your computer`;
   }
   return `Ran on ${possessive(owner?.name ?? null)} own Claude Code, on their computer`;
 }
@@ -406,8 +412,11 @@ export const CLAUDE_CODE_TURN_PRESENTATION: FrontendTurnEnginePresentation = Obj
   describeSendRefusal: describeClaudeCodeSendRefusal,
   describeSteerRefusal: (code: string) =>
     code.trim() === CLAUDE_CODE_STEER_REFUSED_CODE ? CLAUDE_CODE_STEER_REFUSED : null,
-  describeSpeaker: (owner: TurnEngineTurnOwner | null, metadata?: Readonly<Record<string, unknown>> | null) =>
-    claudeCodeSpeakerLine(owner, metadata ?? null),
+  describeSpeaker: (
+    owner: TurnEngineTurnOwner | null,
+    metadata?: Readonly<Record<string, unknown>> | null,
+    signIn?: TurnEngineSpeakerSignIn | null,
+  ) => claudeCodeSpeakerLine(owner, metadata ?? null, claudeCodeLoginsSnapshot(), signIn ?? null),
   // The speaker line names one of the viewer's logins once their list loads.
   subscribe: subscribeClaudeCodeLogins,
 });

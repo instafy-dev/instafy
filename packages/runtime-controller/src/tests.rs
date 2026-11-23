@@ -1917,7 +1917,8 @@ async fn create_runtime_spread_scope_tables(client: &tokio_postgres::Client) -> 
             CREATE TEMP TABLE claude_code_logins (
                 id uuid PRIMARY KEY,
                 user_id uuid NOT NULL,
-                created_at timestamptz NOT NULL DEFAULT now()
+                created_at timestamptz NOT NULL DEFAULT now(),
+                limit_resets_at timestamptz
             );
             CREATE TEMP TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,
@@ -13778,7 +13779,8 @@ async fn a_job_a_stop_cancels_while_a_lease_waits_is_not_leased() -> anyhow::Res
             CREATE TABLE claude_code_logins (
                 id uuid PRIMARY KEY,
                 user_id uuid NOT NULL,
-                created_at timestamptz NOT NULL DEFAULT now()
+                created_at timestamptz NOT NULL DEFAULT now(),
+                limit_resets_at timestamptz
             );
             CREATE TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,
@@ -14701,7 +14703,8 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
             CREATE TEMP TABLE claude_code_logins (
                 id uuid PRIMARY KEY,
                 user_id uuid NOT NULL,
-                created_at timestamptz NOT NULL DEFAULT now()
+                created_at timestamptz NOT NULL DEFAULT now(),
+                limit_resets_at timestamptz
             );
             CREATE TEMP TABLE upstream_pacing (
                 upstream_key text PRIMARY KEY,

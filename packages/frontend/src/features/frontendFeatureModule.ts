@@ -4,11 +4,12 @@ import {
   type ComponentType,
   type ReactNode,
 } from "react";
-import type {
-  AssistantProviderDefinition,
-  ControllerAgentProfile,
-  CreateMyAgentInput,
-  UpdateMyAgentInput,
+import {
+  AGENT_SIGN_IN_KEYS,
+  type AssistantProviderDefinition,
+  type ControllerAgentProfile,
+  type CreateMyAgentInput,
+  type UpdateMyAgentInput,
 } from "@instafy/sdk/agents";
 import type {
   CapabilityExecutorProviderDefinition,
@@ -91,6 +92,16 @@ export type TurnEngineTurnOwner = {
   name: string | null;
 };
 
+/**
+ * What the chat tells a turn engine's speaker line of the sign-in a reply ran
+ * on (docs/Local-Engine-Turns.md 11.20), for the turn's own person alone, once
+ * they have more than one sign-in and the reply names one of theirs.
+ */
+export type TurnEngineSpeakerSignIn = {
+  /** It was one of the agent's backups, not its first AI. */
+  backup: boolean;
+};
+
 /** What a turn engine is told about one of its failed turns. */
 export type TurnEngineFailureInput = {
   /** The failure message's metadata, as the controller wrote it. */
@@ -147,9 +158,15 @@ export interface FrontendTurnEnginePresentation {
   /**
    * The plain-text line under a reply's header; `owner` is null when the chat
    * cannot tell whose turn it was. `metadata` is the reply's, with the
-   * controller's stamp.
+   * controller's stamp. `signIn` is what the chat read, for the turn's own
+   * person only, of the sign-in it ran on (docs/Local-Engine-Turns.md 11.20):
+   * `backup` while it was one of the agent's backups, which the line then says.
    */
-  describeSpeaker(owner: TurnEngineTurnOwner | null, metadata?: Readonly<Record<string, unknown>> | null): string;
+  describeSpeaker(
+    owner: TurnEngineTurnOwner | null,
+    metadata?: Readonly<Record<string, unknown>> | null,
+    signIn?: TurnEngineSpeakerSignIn | null,
+  ): string;
   /**
    * For words that read what the engine loads for the viewer, such as their
    * own sign-ins: called while a line of the engine's shows, with `onChange`
@@ -184,7 +201,7 @@ export interface FrontendTurnEngineAgentAiNoteProps {
   resolveControllerUrl: () => Promise<string | null>;
 }
 
-/** The fields of an agent the editor itself sends: its profile, and which AI it uses. */
+/** The fields of an agent the editor itself sends: its profile, which AI it uses, and its backups. */
 export const AGENT_EDITOR_OWN_FIELDS = [
   "handle",
   "displayName",
@@ -197,6 +214,7 @@ export const AGENT_EDITOR_OWN_FIELDS = [
   "reasoningEffort",
   "projectId",
   "runtimeId",
+  "backupAis",
 ] as const;
 
 /**
@@ -277,6 +295,47 @@ export interface FrontendTurnEngineAgentAi {
   AgentLabel?: ComponentType<FrontendTurnEngineAgentAiLabelProps>;
 }
 
+/** One of the viewer's own sign-ins a turn engine runs turns on, such as one of their logins. */
+export interface TurnEngineSignIn {
+  /** Its id, a UUID in lowercase. */
+  id: string;
+  /** The name its owner gave it; Studio shows it only to them. */
+  label: string;
+}
+
+/**
+ * The viewer's own sign-ins a turn engine runs turns on
+ * (docs/Local-Engine-Turns.md 11.20). The controller names one, in an agent's
+ * `backupAis` and in the `aiSignIn` and `aiSignInNext` stamps of a turn's
+ * messages, as `{[refKey]: id}`. The agent editor's Backups list offers them
+ * beside the person's connections, and the chat names them, for their owner
+ * alone, under a reply and in a failure.
+ */
+export interface FrontendTurnEngineSignIns {
+  /** The key that names one of them beside its id; never `credentialId`, which names a connection. */
+  refKey: string;
+  /** The viewer's sign-ins as last listed, the engine's first one first; null while none has loaded. */
+  snapshot(): readonly TurnEngineSignIn[] | null;
+  /**
+   * Calls `onChange` whenever they may have changed, and lists them when no
+   * list is recent: what names one subscribes while it shows. Returns the
+   * call that stops it.
+   */
+  subscribe(onChange: () => void): () => void;
+  /** Lists them when no list is younger than `maxAgeMs`; 0 always asks again, as the agent editor does when it opens. */
+  load(maxAgeMs?: number): void;
+  /**
+   * The id of the sign-in an agent whose AI is this engine runs on first, by
+   * what the engine's own fields set in the editor (`fields`, null for
+   * nothing yet) or else what the agent saved; null when it has none. A
+   * backup is never that one.
+   */
+  firstForAgent?(input: {
+    agent: ControllerAgentProfile | null;
+    fields: TurnEngineAgentAiRequestFields | null;
+  }): string | null;
+}
+
 /** What Your AI gives a turn engine's row (docs/Local-Engine-Turns.md 5.3). */
 export interface FrontendTurnEngineYourAiRowProps {
   /** A space's runtime status, including whether the engine's lane covers the viewer. */
@@ -300,6 +359,12 @@ export interface FrontendTurnEngineContribution {
   presentation?: FrontendTurnEnginePresentation;
   /** The engine as an agent's AI; without it no agent editor offers it. */
   agentAi?: FrontendTurnEngineAgentAi;
+  /**
+   * The viewer's own sign-ins the engine runs turns on, as backups and in the
+   * lines that name a turn's sign-in (11.20); without it the engine has none
+   * to offer or name.
+   */
+  signIns?: FrontendTurnEngineSignIns;
   /**
    * Under a waiting turn's line, for the person whose turn it is: what makes
    * it run, such as starting the space on this computer. Renders nothing
@@ -369,6 +434,29 @@ function assertUniqueContributionIds<TContribution>(
       throw new Error(`Duplicate frontend feature ${kind} contribution id "${id}".`);
     }
     seenIds.add(id);
+  }
+}
+
+/**
+ * Each engine with sign-ins names them by a key of its own that the
+ * controller uses for a sign-in (`AGENT_SIGN_IN_KEYS`), never a connection's.
+ */
+function assertTurnEngineSignInKeys(engines: readonly FrontendTurnEngineContribution[]): void {
+  const seenKeys = new Set<string>();
+  for (const engine of engines) {
+    const refKey = engine.signIns?.refKey;
+    if (refKey === undefined) {
+      continue;
+    }
+    if (refKey === "credentialId" || !(AGENT_SIGN_IN_KEYS as readonly string[]).includes(refKey)) {
+      throw new Error(
+        `Turn engine "${engine.id}" names its sign-ins by ${JSON.stringify(refKey)}, which names no sign-in of an engine's.`,
+      );
+    }
+    if (seenKeys.has(refKey)) {
+      throw new Error(`Two turn engines name their sign-ins by "${refKey}".`);
+    }
+    seenKeys.add(refKey);
   }
 }
 
@@ -475,6 +563,7 @@ export function createFrontendFeatureComposition(
     (registration) => registration.id,
   );
   assertUniqueContributionIds("turn engine", turnEngines, (engine) => engine.id);
+  assertTurnEngineSignInKeys(turnEngines);
 
   const seenPaths = new Set<string>();
   for (const route of routes) {

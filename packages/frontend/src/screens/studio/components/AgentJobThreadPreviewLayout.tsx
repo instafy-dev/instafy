@@ -37,6 +37,7 @@ import {
   resolveRetryingStatusPresentation,
   resolveRunFailurePresentation,
 } from "../../../conversations/runFailurePresentation";
+import { readAiSignInStamp } from "../../../conversations/aiSignIns";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { agentJobThreadAcknowledgementIds, shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresentation";
 import {
@@ -96,11 +97,14 @@ function normalizeAgentHandle(value: unknown): string | null {
 }
 
 /**
- * The message of this turn that carries a turn engine's controller stamp:
- * its reply or failure, which the controller stamps from the job, or another
- * of its messages. Null for every other turn.
+ * The message of this turn whose line goes under the header: the one that
+ * carries a turn engine's controller stamp (its reply or failure, which the
+ * controller stamps from the job, or another of its messages), else its
+ * reply, which may name the sign-in it ran on (docs/Local-Engine-Turns.md
+ * 11.20). The line itself says nothing for a reply that names none of the
+ * viewer's own.
  */
-function turnEngineStampedMessage(
+function speakerLineMessage(
   row: ChatMessage,
   finalSummaryMessage: ChatMessage | null,
 ): ChatMessage | null {
@@ -111,7 +115,7 @@ function turnEngineStampedMessage(
       return candidate as unknown as ChatMessage;
     }
   }
-  return null;
+  return finalSummaryMessage && readAiSignInStamp(finalSummaryMessage.metadata) !== null ? finalSummaryMessage : null;
 }
 
 function formatHiddenUpdateLabel(count: number, noun: string): string {
@@ -396,12 +400,13 @@ export function AgentJobThreadPreviewLayout({
   const ownerBadge = showHeaderIdentity ? threadOwnerHandle : null;
   // The reply stays the agent's; a turn that ran on a turn engine says so in
   // one plain line under the header, from the controller's stamp alone
-  // (docs/Local-Engine-Turns.md 5.7).
-  const speakerLineMessage = useMemo(
-    () => turnEngineStampedMessage(message, finalSummaryMessage),
+  // (docs/Local-Engine-Turns.md 5.7), and one that ran on the viewer's own
+  // sign-in names it for them (11.20).
+  const lineMessage = useMemo(
+    () => speakerLineMessage(message, finalSummaryMessage),
     [finalSummaryMessage, message],
   );
-  const turnEngineSpeakerLine = useTurnEngineSpeakerLine(speakerLineMessage);
+  const turnEngineSpeakerLine = useTurnEngineSpeakerLine(lineMessage);
   const terminalStatusMarker = resolveTerminalStatusMarker(finalSpineTone, isCompleted);
   const finalSummaryContent = finalSummaryMessage?.content.trim() ?? "";
   const formattedFinalSummaryContent =

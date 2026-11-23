@@ -20,6 +20,7 @@ import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { normalizeCustomAgentAvatarSrc } from "../../../utils/agentAvatar";
 import { hatchlingSeed, type Hatchling } from "../../../utils/aiFace";
 import type { AiModelOption } from "../../../utils/aiProviderModels";
+import { AgentBackupAisField, type AgentBackupAisFieldProps } from "./AgentBackupAisField";
 import { AgentFacePicker } from "./AgentFacePicker";
 import { CredentialMenuSelect } from "./CredentialMenuSelect";
 import { ModelMenuSelect } from "./ModelMenuSelect";
@@ -54,6 +55,12 @@ type AgentProfileModalProps = {
   aiNote?: ReactNode;
   /** After that note: more of the chosen AI to choose, such as a turn engine's own fields. */
   aiFields?: ReactNode;
+  /**
+   * Under the AI choice: the agent's Backups (docs/Settings-UI.md, Bot
+   * profiles), for an agent whose AI is one of the person's own sign-ins;
+   * null hides them, as for Instafy AI and the person's default.
+   */
+  backups?: AgentBackupAisFieldProps | null;
   modelId?: string | null;
   modelOptions?: AiModelOption[];
   onModelChange?: (modelId: string | null) => void;
@@ -102,6 +109,7 @@ export function AgentProfileModal({
   onProviderChange,
   aiNote = null,
   aiFields = null,
+  backups = null,
   modelId = null,
   modelOptions,
   onModelChange,
@@ -294,6 +302,8 @@ export function AgentProfileModal({
                 />
               </Field>
             ) : null}
+
+            {backups ? <AgentBackupAisField {...backups} disabled={pending || backups.disabled} /> : null}
 
             {showModelPicker ? (
               <Field label="Model" labelId="agent-profile-model-label" htmlFor={isDesktop ? "agent-profile-model" : undefined}>

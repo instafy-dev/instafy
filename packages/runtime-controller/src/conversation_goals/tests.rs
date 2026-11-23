@@ -89,9 +89,16 @@ impl GoalFixture {
             &[&self.job],
         )
         .await?;
-        state::settle_job(tx, self.job, &self.payload, self.conversation, "succeeded")
-            .await
-            .map_err(api_error)?;
+        state::settle_job(
+            tx,
+            self.job,
+            &self.payload,
+            self.conversation,
+            "succeeded",
+            false,
+        )
+        .await
+        .map_err(api_error)?;
         Ok(())
     }
 }
@@ -463,6 +470,7 @@ async fn final_lead_completion_records_one_durable_continuation() -> anyhow::Res
         &fixture.payload,
         fixture.conversation,
         "succeeded",
+        false,
     )
     .await
     .map_err(api_error)?;
@@ -555,7 +563,8 @@ async fn failed_or_canceled_job_stops_an_active_goal() -> anyhow::Result<()> {
             fixture.job,
             &fixture.payload,
             fixture.conversation,
-            outcome
+            outcome,
+            false,
         )
         .await
         .map_err(api_error)?
@@ -567,6 +576,60 @@ async fn failed_or_canceled_job_stops_an_active_goal() -> anyhow::Result<()> {
             .unwrap()
             .contains(outcome));
         assert_eq!(fixture.wakeups(&tx).await?, 0);
+        tx.rollback().await?;
+    }
+    Ok(())
+}
+
+/// A goal turn that failed at its sign-in's plan's limit, which its
+/// completion just recorded, while the goal's agent has another AI with room
+/// (docs/Local-Engine-Turns.md 11.20): the goal records its next step as after
+/// a finished turn and stays active. Any other failure, and a team's planning
+/// turn, blocks it as before.
+#[tokio::test]
+async fn a_goal_turn_failed_at_a_limit_goes_on_while_another_ai_has_room() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("goal turn at a plan's limit").await?;
+    for (goes_on_another_ai, planning_receipt, continues) in [
+        (true, false, true),
+        (false, false, false),
+        (true, true, false),
+    ] {
+        let mut db = pool.get().await?;
+        let tx = db.transaction().await?;
+        let fixture = GoalFixture::seed(&tx).await?;
+        tx.execute(
+            "update agent_jobs set status='failed', outcome='failed' where id=$1",
+            &[&fixture.job],
+        )
+        .await?;
+        if planning_receipt {
+            tx.execute(
+                "update agent_jobs set planning_receipt_state='{}' where id=$1",
+                &[&fixture.job],
+            )
+            .await?;
+        }
+        let updated = state::settle_job(
+            &tx,
+            fixture.job,
+            &fixture.payload,
+            fixture.conversation,
+            "failed",
+            goes_on_another_ai,
+        )
+        .await
+        .map_err(api_error)?;
+        let metadata = fixture.metadata(&tx).await?;
+        let what = format!("goes on: {goes_on_another_ai}, planning: {planning_receipt}");
+        if continues {
+            assert!(updated.is_none(), "{what}");
+            assert_eq!(metadata["instafyGoal"]["status"], "active", "{what}");
+            assert_eq!(fixture.wakeups(&tx).await?, 1, "{what}");
+        } else {
+            assert!(updated.is_some(), "{what}");
+            assert_eq!(metadata["instafyGoal"]["status"], "blocked", "{what}");
+            assert_eq!(fixture.wakeups(&tx).await?, 0, "{what}");
+        }
         tx.rollback().await?;
     }
     Ok(())
@@ -744,7 +807,7 @@ async fn goal_scheduler_dispatches_once_across_crashes_before_and_after_dispatch
                 tx.execute("update agent_jobs set status='completed',outcome='succeeded',completed_at=now() where id=$1", &[&source]).await?;
                 let run:Uuid = row.get("run_id");
                 tx.execute("update runs set status='success' where id=$1", &[&run]).await?;
-                state::settle_job(&tx,source,&row.get::<_,Value>("payload"),conversation,"succeeded").await.map_err(api_error)?;
+                state::settle_job(&tx,source,&row.get::<_,Value>("payload"),conversation,"succeeded",false).await.map_err(api_error)?;
                 let wake = claim_due(&tx).await.map_err(api_error)?.expect("completed active goal has a wakeup");
                 assert_eq!(wake.source_job_id, source);
                 tx.commit().await?;
@@ -793,7 +856,7 @@ async fn goal_scheduler_dispatches_once_across_crashes_before_and_after_dispatch
                 let tx=db.transaction().await?;
                 tx.execute("update agent_jobs set status='completed',outcome='succeeded',completed_at=now() where id=$1", &[&successor]).await?;
                 tx.execute("update runs set status='success' where id=$1", &[&successor_run]).await?;
-                state::settle_job(&tx,successor,&payload,conversation,"succeeded").await.map_err(api_error)?;
+                state::settle_job(&tx,successor,&payload,conversation,"succeeded",false).await.map_err(api_error)?;
                 let wake=claim_due(&tx).await.map_err(api_error)?.expect("successor completion creates the next wakeup");
                 assert_eq!(wake.source_job_id,successor);
                 tx.execute("delete from project_memberships where project_id=$1 and user_id=$2", &[&project,&owner]).await?;

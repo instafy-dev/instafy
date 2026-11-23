@@ -1455,10 +1455,19 @@ impl LaneFailure {
         }
     }
 
-    /// The `claude-code/failure` artifact (2.6), for a failure with a code.
+    /// The `claude-code/failure` artifact (2.6), for a failure with a code. A `plan_limit` one
+    /// carries its reset time too, as `resetsAt` in seconds since the epoch, when Claude Code gave
+    /// one: the controller records the login's limit from it, and the agent's next turns use a
+    /// backup with room until then (docs/Local-Engine-Turns.md 11.20).
     pub fn artifact(&self) -> Option<Value> {
         let code = self.code?;
-        Some(json!({ "kind": "claude-code/failure", "code": code.as_str() }))
+        let mut artifact = json!({ "kind": "claude-code/failure", "code": code.as_str() });
+        if code == FailureCode::PlanLimit
+            && let Some(resets_at) = self.resets_at
+        {
+            artifact["resetsAt"] = json!(resets_at);
+        }
+        Some(artifact)
     }
 }
 

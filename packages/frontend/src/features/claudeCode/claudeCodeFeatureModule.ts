@@ -16,6 +16,7 @@ import { ClaudeCodeAutoStart } from "./ClaudeCodeAutoStart";
 import { ClaudeCodeWaitingNote } from "./ClaudeCodeWaitingNote";
 import { ClaudeCodeYourAiRow } from "./ClaudeCodeYourAiRow";
 import { CLAUDE_CODE_COPY } from "./claudeCodeCopy";
+import { CLAUDE_CODE_SIGN_INS } from "./claudeCodeSignIns";
 import {
   CLAUDE_CODE_TURN_ENGINE_ID,
   CLAUDE_CODE_TURN_NOT_ALLOWED_CODE,
@@ -65,6 +66,8 @@ export const CLAUDE_CODE_TURN_ENGINE: FrontendTurnEngineContribution = Object.fr
   id: CLAUDE_CODE_TURN_ENGINE_ID,
   presentation: CLAUDE_CODE_TURN_PRESENTATION,
   agentAi: CLAUDE_CODE_AGENT_AI,
+  // The person's logins, as an agent's backups and as what a turn ran on (11.20).
+  signIns: CLAUDE_CODE_SIGN_INS,
   WaitingNote: ClaudeCodeWaitingNote,
   YourAiRow: ClaudeCodeYourAiRow,
 });

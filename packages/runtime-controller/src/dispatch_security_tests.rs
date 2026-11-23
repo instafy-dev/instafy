@@ -327,6 +327,8 @@ async fn dispatch_security_agents_never_target_the_reserved_credential_id() -> a
         Some(user_id),
         vec!["reservedpin".to_string()],
         None,
+        true,
+        &HashMap::new(),
     )
     .await
     .map_err(api_error)?;
@@ -345,6 +347,8 @@ async fn dispatch_security_agents_never_target_the_reserved_credential_id() -> a
             Some(user_id),
             handles,
             Some(reserved_id()),
+            true,
+            &HashMap::new(),
         )
         .await
         .map_err(api_error)?;
@@ -364,6 +368,8 @@ async fn dispatch_security_agents_never_target_the_reserved_credential_id() -> a
         Some(user_id),
         vec!["reservedpin".to_string()],
         default_credential_id,
+        true,
+        &HashMap::new(),
     )
     .await
     .map_err(api_error)?;
@@ -476,6 +482,8 @@ async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> an
         Some(owner),
         vec!["pinned".to_string()],
         None,
+        true,
+        &HashMap::new(),
     )
     .await
     .map_err(api_error)?;
@@ -497,6 +505,8 @@ async fn dispatch_security_agents_only_use_credentials_their_owner_holds() -> an
         Some(owner),
         vec!["pinned".to_string(), "ownpin".to_string()],
         default_credential_id,
+        true,
+        &HashMap::new(),
     )
     .await
     .map_err(api_error)?;

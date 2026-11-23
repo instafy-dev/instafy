@@ -78,7 +78,8 @@ export function AssistantSpeakerIdentityLabel({
   const timestampInfo = formatSpeakerTimestamp(timestamp);
   // A reply a turn engine ran stays this agent's, with one plain line under
   // its header, from the controller's stamp on the message alone
-  // (docs/Local-Engine-Turns.md 5.7). A turn's row carries its own.
+  // (docs/Local-Engine-Turns.md 5.7), and so does one that ran on the
+  // viewer's own sign-in, for them alone (11.20). A turn's row carries its own.
   const turnEngineSpeakerLine = useTurnEngineSpeakerLine(
     metadata ? { id: "", timestamp: timestamp ?? 0, metadata } : null,
   );
@@ -146,9 +147,10 @@ function TurnEngineSpeakerLineText({ line }: { line: string }) {
 }
 
 /**
- * A turn engine's line for a reply whose header the chat does not show (a
- * quiet reply in a chat of one, or the same speaker again): the line still
- * says whose own engine ran the turn (docs/Local-Engine-Turns.md 5.7).
+ * The line under a reply's header, for a reply whose header the chat does not
+ * show (a quiet reply in a chat of one, or the same speaker again): the line
+ * still says whose own engine ran the turn (docs/Local-Engine-Turns.md 5.7),
+ * or which of the viewer's own sign-ins did (11.20).
  */
 export function TurnEngineSpeakerLine({ message }: { message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> }) {
   const line = useTurnEngineSpeakerLine(message);

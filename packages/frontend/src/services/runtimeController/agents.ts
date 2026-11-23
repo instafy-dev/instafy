@@ -6,8 +6,8 @@ import {
 
 export type { ControllerAgentProfile } from "@instafy/sdk/agents";
 import {
-  type ControllerAgentProfile, type CreateMyAgentInput, type UpdateMyAgentInput,
-  type ControllerPublicAgentProfile, getProjectAgentProfile,
+  type AgentBackupAi, type ControllerAgentProfile, type CreateMyAgentInput, type UpdateMyAgentInput,
+  type ControllerPublicAgentProfile, AGENT_BACKUP_AIS_MAX, getProjectAgentProfile, readAgentSignIn,
 } from "@instafy/sdk/agents";
 
 export async function getPublicAgentProfile(projectId: string, agentId: string, params?: { accessToken?: string | null; signal?: AbortSignal }) {
@@ -69,6 +69,29 @@ export interface DeleteMyAgentResult {
   error?: string;
 }
 
+/**
+ * An agent's backups as the agents list returns them (docs/Local-Engine-Turns.md
+ * 11.20), in order: each one of its owner's sign-ins by exactly one key, as a
+ * UUID, and each once. Anything else is left out, and so is the whole list
+ * from a controller that sends none.
+ */
+function readBackupAis(value: unknown): AgentBackupAi[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const entries: AgentBackupAi[] = [];
+  for (const candidate of value) {
+    const entry = readAgentSignIn(candidate);
+    const key = entry ? JSON.stringify(entry) : "";
+    if (entry && !seen.has(key) && entries.length < AGENT_BACKUP_AIS_MAX) {
+      seen.add(key);
+      entries.push(entry);
+    }
+  }
+  return entries;
+}
+
 function mapAgentPayload(payload: Record<string, unknown>): ControllerAgentProfile | null {
   const id = typeof payload.id === "string" ? payload.id : "";
   if (!id) {
@@ -95,6 +118,7 @@ function mapAgentPayload(payload: Record<string, unknown>): ControllerAgentProfi
       typeof payload.claudeCodeLoginId === "string" && UUID_PATTERN.test(payload.claudeCodeLoginId)
         ? payload.claudeCodeLoginId.toLowerCase()
         : null,
+    backupAis: readBackupAis(payload.backupAis),
     runtimeId: typeof payload.runtimeId === "string" ? payload.runtimeId : null,
     createdAt: typeof payload.createdAt === "string" ? payload.createdAt : "",
     updatedAt: typeof payload.updatedAt === "string" ? payload.updatedAt : "",

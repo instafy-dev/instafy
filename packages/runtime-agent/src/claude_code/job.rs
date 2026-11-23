@@ -1018,7 +1018,9 @@ mod tests {
         );
         assert_eq!(
             failure_artifacts(&failure),
-            [json!({ "kind": "claude-code/failure", "code": "plan_limit" })]
+            [
+                json!({ "kind": "claude-code/failure", "code": "plan_limit", "resetsAt": 1_900_003_600 })
+            ]
         );
     }
 

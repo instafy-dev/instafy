@@ -14,6 +14,43 @@ export const AGENT_HANDLE_REGEX = /^[a-z0-9][a-z0-9_-]{0,19}$/;
 /** Public profile text, counted in Unicode code points rather than UTF-16 units. */
 export const AGENT_BIO_MAX_LENGTH = 500;
 
+/**
+ * One of an agent's backup AIs (docs/Local-Engine-Turns.md 11.20): one of its
+ * owner's own sign-ins, named by exactly one key, a connection by its
+ * `credentialId` and a Claude Code login by its `claudeCodeLoginId`, each a
+ * UUID. The controller names the sign-in a turn ran on, and the one an
+ * agent's next turns use, the same way (`aiSignIn`, `aiSignInNext`).
+ */
+export type AgentBackupAi = { credentialId: string } | { claudeCodeLoginId: string };
+
+/** The keys that name a sign-in in an {@link AgentBackupAi}. */
+export const AGENT_SIGN_IN_KEYS = ["credentialId", "claudeCodeLoginId"] as const;
+
+/** An agent lists at most this many backups after its first AI. */
+export const AGENT_BACKUP_AIS_MAX = 8;
+
+const SIGN_IN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The sign-in a value names, as an {@link AgentBackupAi} with its id in
+ * lowercase, or null unless it names exactly one, by one of
+ * {@link AGENT_SIGN_IN_KEYS}, as a UUID. Other keys, such as a stamp's
+ * `backup`, are left out.
+ */
+export function readAgentSignIn(value: unknown): AgentBackupAi | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const named = AGENT_SIGN_IN_KEYS.filter((key) => record[key] !== undefined && record[key] !== null);
+  const key = named.length === 1 ? named[0] : undefined;
+  const id = key ? record[key] : null;
+  if (!key || typeof id !== "string" || !SIGN_IN_ID.test(id)) {
+    return null;
+  }
+  return { [key]: id.toLowerCase() } as AgentBackupAi;
+}
+
 export interface ControllerAgentProfile {
   id: string;
   handle: string;
@@ -33,6 +70,13 @@ export interface ControllerAgentProfile {
    * controllers.
    */
   claudeCodeLoginId?: string | null;
+  /**
+   * The agent's backups after its first AI, in order (docs/Local-Engine-Turns.md
+   * 11.20): only live ones, a connection its owner holds and has not revoked
+   * or a login that still exists. Empty for an agent on Instafy AI or its
+   * owner's default AI; absent from older controllers.
+   */
+  backupAis?: AgentBackupAi[];
   runtimeId: string | null;
   deletedAt?: string | null;
   createdAt: string;
@@ -43,6 +87,12 @@ export interface CreateMyAgentInput {
   credentialId?: string | null;
   /** One of the caller's own Claude Code logins, with `provider: "claude-code"` (11.19); null or absent for the first login. */
   claudeCodeLoginId?: string | null;
+  /**
+   * Its backups, in order, at most {@link AGENT_BACKUP_AIS_MAX} (11.20): the
+   * caller's own live connections and logins, none twice and none its first
+   * AI, which must be a connection or Claude Code.
+   */
+  backupAis?: AgentBackupAi[];
   handle?: string;
   displayName?: string | null;
   description?: string | null;
@@ -76,6 +126,12 @@ export interface UpdateMyAgentInput {
    * Instafy AI clears it.
    */
   claudeCodeLoginId?: string | null;
+  /**
+   * Its backups, in order (11.20): omit to keep them, an array replaces them
+   * and `[]` clears them, as on create. Choosing Instafy AI or the owner's
+   * default AI clears them.
+   */
+  backupAis?: AgentBackupAi[];
   model?: string | null;
   reasoningEffort?: string | null;
   projectId?: string;

@@ -6,19 +6,10 @@ import type {
   FrontendTurnEngineAgentAiLabelProps,
 } from "../frontendFeatureModule";
 import { CLAUDE_CODE_COPY } from "./claudeCodeCopy";
-import { claudeCodeLoginLabel, useClaudeCodeLogins, type ClaudeCodeLogin } from "./claudeCodeLoginsStore";
+import { claudeCodeLoginLabel, useClaudeCodeLogins } from "./claudeCodeLoginsStore";
+import { draftClaudeCodeLoginId, effectiveClaudeCodeLoginId } from "./claudeCodeSignIns";
 
 const COPY = CLAUDE_CODE_COPY.agentAi;
-
-/**
- * The login an agent's turns run on (docs/Local-Engine-Turns.md 11.19): the
- * one it names when that is still one of the person's, else their first
- * login, which an agent that names none uses.
- */
-function effectiveLoginId(logins: readonly ClaudeCodeLogin[], named: string | null | undefined): string | null {
-  const id = named?.toLowerCase() ?? null;
-  return (id && logins.some((login) => login.id === id) ? id : logins[0]?.id) ?? null;
-}
 
 /**
  * The agent editor's **Login** choice while Claude Code is the agent's AI
@@ -34,9 +25,7 @@ export function ClaudeCodeAgentAiLogin({ agent, fields, onFieldsChange, disabled
   if (!logins || logins.length < 2) {
     return null;
   }
-  const chosen =
-    fields && "claudeCodeLoginId" in fields ? fields.claudeCodeLoginId ?? null : agent?.claudeCodeLoginId ?? null;
-  const value = effectiveLoginId(logins, chosen) ?? "";
+  const value = effectiveClaudeCodeLoginId(logins, draftClaudeCodeLoginId(agent, fields)) ?? "";
   const firstLoginId = logins[0]?.id ?? null;
   return (
     <Field label={COPY.login} htmlFor={id}>

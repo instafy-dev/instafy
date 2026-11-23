@@ -78,6 +78,18 @@ import {
 } from "../../../features/frontendFeatureModule";
 import { useOptionalActiveProjectId } from "../../../projects/ProjectStateProvider";
 import type { FetchRuntimeStatusParams } from "../../../services/runtimeController/runtimes";
+import type { AgentBackupAi } from "@instafy/sdk/agents";
+import { setViewerConnections, signInKeyOf } from "../../../conversations/aiSignIns";
+import {
+  backupChoices,
+  backupCountLabel,
+  backupRows,
+  backupsToSave,
+  describeBackupSaveRefusal,
+  resolveAgentOwnAi,
+  sameBackupList,
+  useAgentEditorEngineSignIns,
+} from "./agentBackupAis";
 
 function fetchTurnEngineRuntimeStatus(params: FetchRuntimeStatusParams) {
   return controllerClient.runtimes.fetchStatus(params);
@@ -96,6 +108,16 @@ const AGENT_AI_ENGINES: readonly AgentAiEngine[] = APPLICATION_FRONTEND_FEATURES
 );
 
 const NO_AGENT_AI_ENGINE_IDS: ReadonlySet<string> = new Set();
+
+/** The turn engines whose own sign-ins can be an agent's backups (docs/Local-Engine-Turns.md 11.20). */
+const SIGN_IN_ENGINES = APPLICATION_FRONTEND_FEATURES.turnEngines.filter((engine) => engine.signIns);
+
+const NO_BACKUPS: readonly AgentBackupAi[] = Object.freeze([]);
+
+/** The turn engine an agent's `provider` names, with all it contributes, or null. */
+function turnEngineContributionOf(engineId: string | null) {
+  return engineId ? APPLICATION_FRONTEND_FEATURES.turnEngines.find((engine) => engine.id === engineId) ?? null : null;
+}
 
 /** The engine an agent's `provider` names as its AI, or null for a provider of a connection. */
 function agentAiEngineOf(provider: string | null | undefined): AgentAiEngine | null {
@@ -122,6 +144,10 @@ function describeAgentAiSaveRefusal(result: { code?: string | null; details?: un
   const code = result.code?.trim() ?? "";
   if (!code) {
     return null;
+  }
+  const backupRefusal = describeBackupSaveRefusal(code);
+  if (backupRefusal) {
+    return backupRefusal;
   }
   for (const engine of AGENT_AI_ENGINES) {
     const sentence = engine.agentAi.describeSaveRefusal({ code, details: result.details ?? null });
@@ -444,6 +470,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   /** What that engine's own fields set since it was chosen or the editor opened, or null for nothing. */
   const [agentEngineFields, setAgentEngineFields] = useState<TurnEngineAgentAiRequestFields | null>(null);
   const [agentModelDraft, setAgentModelDraft] = useState<string | null>(null);
+  /** The Backups list as the editor changed it, or null while it shows what the agent saved. */
+  const [agentBackupsDraft, setAgentBackupsDraft] = useState<readonly AgentBackupAi[] | null>(null);
   const [agentCredentialDirty, setAgentCredentialDirty] = useState(false);
   const [agentModelDirty, setAgentModelDirty] = useState(false);
   const [credentialTestPendingId, setCredentialTestPendingId] = useState<string | null>(null);
@@ -482,6 +510,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   // @octo's AI when it is not a connection, such as Claude Code
   // (docs/Local-Engine-Turns.md 11.3): the list names it as it names a bot's.
   const octoAiLabel = octoAgent ? agentAiEngineLabel(octoAgent) : null;
+  // And how many backups it lists after its AI (11.20).
+  const octoBackupsLabel = octoAgent ? backupCountLabel(octoAgent.backupAis) : null;
   // A new bot's face, and the one a bot gets back when its picture is
   // removed: the hatchling the owner's picture-less bots wear least, counting
   // down from 8 (docs/Brand.md, "Octo's hatchlings").
@@ -497,6 +527,11 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     }
     return lookup;
   }, [credentials]);
+  // Octo's row names the connection it pins only beside its backups, which
+  // back that connection up; its engine, as for any agent, always.
+  const octoPinnedCredential = octoAgent?.credentialId ? credentialsById.get(octoAgent.credentialId) ?? null : null;
+  const octoListedAiLabel =
+    octoAiLabel ?? (octoBackupsLabel && octoPinnedCredential ? resolveCredentialLabel(octoPinnedCredential) : null);
 
   const loadCredentials = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -538,6 +573,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       ]);
       if (result.success) {
         setCredentials(result.credentials);
+        // The chat names the viewer's own connection a turn ran on from it (11.20).
+        setViewerConnections(user.id, result.credentials);
       } else if (!options?.silent) {
         showStatus(result.error ?? "Unable to load credentials.", "error", 4500);
       }
@@ -909,6 +946,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentEngineDraft(null);
     setAgentEngineFields(null);
     setAgentModelDraft(null);
+    setAgentBackupsDraft(null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
   }, []);
@@ -986,6 +1024,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentProviderDraft(provider);
     setAgentEngineDraft(null);
     setAgentEngineFields(null);
+    setAgentBackupsDraft(null);
     setAgentModelDraft(credential ? modelOptionsForProvider(provider)[0]?.id ?? null : null);
     setAgentCredentialDirty(false);
     setAgentModelDirty(false);
@@ -1037,6 +1076,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentProviderDraft(provider);
     setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
     setAgentEngineFields(null);
+    setAgentBackupsDraft(null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -1068,6 +1108,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentProviderDraft(provider);
     setAgentEngineDraft(agentAiEngineOf(agent.provider)?.id ?? null);
     setAgentEngineFields(null);
+    setAgentBackupsDraft(null);
     setAgentModelDraft(() => {
       const options = modelOptionsForProvider(provider);
       const fallback = options[0]?.id ?? null;
@@ -1168,14 +1209,31 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           description: trimmedDescription.length > 0 ? trimmedDescription : undefined,
           bio: trimmedBio || undefined,
         };
+        // Its backups after its first AI (docs/Local-Engine-Turns.md 11.20),
+        // the whole list in order; none for Instafy AI or the default.
+        const backupAis = backupsToSave(
+          agentBackupsDraft ?? NO_BACKUPS,
+          resolveAgentOwnAi({
+            mode: "create",
+            engine: turnEngineContributionOf(engineId),
+            agent: null,
+            engineFields: agentEngineFields,
+            engineChanged: false,
+            credentialDraft: credentialId,
+            credentialDirty: agentCredentialDirty,
+            hasConnections: codexCredentials.length > 0,
+          }),
+        );
+        const backups = backupAis.length > 0 ? { backupAis } : {};
         const result = await createMyAgent(
           engineId
-            ? { ...turnEngineAgentAiRequestFields(agentEngineFields), ...profile, provider: engineId }
+            ? { ...turnEngineAgentAiRequestFields(agentEngineFields), ...profile, provider: engineId, ...backups }
             : {
                 ...profile,
                 credentialId: credentialId || null,
                 ...(!credentialId ? { provider: agentProviderDraft } : {}),
                 model: agentModelDraft,
+                ...backups,
               },
         );
         if (!mounted.current) return;
@@ -1255,6 +1313,23 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
               ...(agentCredentialDirty ? { credentialId: credentialId || null } : {}),
               ...(agentModelDirty ? { model: agentModelDraft } : {}),
             };
+    // Its backups (docs/Local-Engine-Turns.md 11.20), the whole list in order,
+    // only when they changed: none of the agent's own first AI, and nothing
+    // for Instafy AI or the default, which the controller clears itself.
+    const savedBackups = existingAgent?.backupAis ?? NO_BACKUPS;
+    const agentOwnAiAfterSave = resolveAgentOwnAi({
+      mode: agentProfileModal.mode,
+      engine: turnEngineContributionOf(agentEngineDraft),
+      agent: existingAgent,
+      engineFields: agentEngineFields,
+      engineChanged,
+      credentialDraft: credentialId,
+      credentialDirty: agentCredentialDirty,
+      hasConnections,
+    });
+    const backupAis = backupsToSave(agentBackupsDraft ?? savedBackups, agentOwnAiAfterSave);
+    const backupsPatch =
+      agentOwnAiAfterSave && !sameBackupList(backupAis, savedBackups) ? { backupAis } : {};
 
     agentSaveLock.current = true;
     setAgentActionPendingId(agentId);
@@ -1279,6 +1354,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         description: trimmedDescription.length > 0 ? trimmedDescription : null,
         bio: trimmedBio || null,
         ...aiPatch,
+        ...backupsPatch,
       });
       if (!mounted.current) return;
       if (!result.success || !result.agent) {
@@ -1307,6 +1383,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentCredentialDirty,
     agentEngineDraft,
     agentEngineFields,
+    agentBackupsDraft,
     agentProviderDraft,
     codexCredentials.length,
     agents,
@@ -1364,6 +1441,24 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
   const chosenAgentAiEngine = agentEngineDraft
     ? AGENT_AI_ENGINES.find((engine) => engine.id === agentEngineDraft) ?? null
     : null;
+  // The agent's Backups (docs/Local-Engine-Turns.md 11.20): shown while its AI
+  // after a save is one of the person's own sign-ins, and never that one.
+  const savedAgentBackups =
+    agentProfileModal?.mode === "create" ? NO_BACKUPS : editingAgent?.backupAis ?? NO_BACKUPS;
+  const agentOwnAi = agentProfileModal
+    ? resolveAgentOwnAi({
+        mode: agentProfileModal.mode,
+        engine: turnEngineContributionOf(agentEngineDraft),
+        agent: editingAgent ?? null,
+        engineFields: agentEngineFields,
+        engineChanged: agentEngineDraft !== savedAgentEngineId,
+        credentialDraft: agentCredentialDraft,
+        credentialDirty: agentCredentialDirty,
+        hasConnections: codexCredentials.length > 0,
+      })
+    : null;
+  const shownAgentBackups = backupsToSave(agentBackupsDraft ?? savedAgentBackups, agentOwnAi);
+  const agentBackupsChanged = agentOwnAi !== null && !sameBackupList(shownAgentBackups, savedAgentBackups);
   const agentProfileDirty = agentProfileModal?.mode === "create" || Boolean(agentAvatarFileDraft) ||
     agentNameDraft.trim() !== (editingAgent?.displayName ?? (agentProfileModal?.mode === "octo" ? "Octo" : "")) ||
     agentAvatarUrlDraft.trim() !== resolveAgentAvatarUrlDraftFromSeed(editingAgent?.avatarSeed ?? "") ||
@@ -1371,12 +1466,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
     agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
     (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
-    agentCredentialDirty || agentModelDirty || agentEngineDraft !== savedAgentEngineId || agentEngineFields !== null;
+    agentCredentialDirty || agentModelDirty || agentEngineDraft !== savedAgentEngineId || agentEngineFields !== null ||
+    agentBackupsChanged;
 
   const agentEditorDirty = agentProfileModal?.mode === "create"
     ? Boolean(agentNameDraft || agentHandleDraft || agentAvatarUrlDraft || agentAvatarFileDraft ||
         agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty || agentEngineDraft ||
-        agentEngineFields) ||
+        agentEngineFields || shownAgentBackups.length > 0) ||
       agentFaceDraft !== defaultBotFace
     : agentProfileDirty;
   const dismissAgentProfileModal = useStudioEditorDismissal({
@@ -1569,10 +1665,41 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
       setAgentEngineDraft(null);
       if (choice !== INSTAFY_AI_CHOICE) {
         handleAgentProviderChange(normalizeAiProviderId(choice));
+      } else {
+        // Instafy AI is no sign-in of the person's: it has no backups (11.20).
+        setAgentBackupsDraft(NO_BACKUPS);
       }
     },
     [agentEngineDraft, handleAgentProviderChange],
   );
+
+  // The engines whose sign-ins Backups offers, those the editor offers as an
+  // agent's AI (or the agent uses), and names, those and any a listed backup
+  // is one of. No other engine is asked for its list.
+  const backupEngines = useMemo(() => {
+    const listedKeys = new Set(
+      [...savedAgentBackups, ...(agentBackupsDraft ?? NO_BACKUPS)].map((entry) => signInKeyOf(entry).key),
+    );
+    return SIGN_IN_ENGINES.filter(
+      (engine) =>
+        agentAiEngineChoices.some((choice) => choice.id === engine.id) || listedKeys.has(engine.signIns?.refKey ?? ""),
+    );
+  }, [agentAiEngineChoices, agentBackupsDraft, savedAgentBackups]);
+  const backupEngineSignIns = useAgentEditorEngineSignIns(backupEngines, agentEditorOpen);
+  const agentBackupsField = agentOwnAi
+    ? {
+        rows: backupRows(shownAgentBackups, { credentialsById, engines: backupEngineSignIns }),
+        choices: backupChoices({
+          connections: codexCredentials,
+          engines: backupEngineSignIns.filter((entry) =>
+            agentAiEngineChoices.some((choice) => choice.id === entry.engine.id),
+          ),
+          ownAi: agentOwnAi,
+          listed: shownAgentBackups,
+        }),
+        onChange: (next: AgentBackupAi[]) => setAgentBackupsDraft(next),
+      }
+    : null;
 
   const handleCreateBotFromManager = useCallback(() => {
     openCreateBotModal(defaultCredentialId);
@@ -1632,6 +1759,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
             resolveControllerUrl={resolveTurnEngineControllerUrl}
           />
         ) : null}
+        backups={agentBackupsField}
         modelId={agentModelDraft}
         modelOptions={creatingWithoutConnection || chosenAgentAiEngine ? [] : agentModelOptions}
         connectionHint={creatingWithoutConnection && !chosenAgentAiEngine
@@ -2213,7 +2341,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                       subtitle={
                         <>
                           {octoAgent.displayName ? octoAgent.displayName : "Octo"}
-                          {octoAiLabel ? <> · {octoAiLabel}</> : null}
+                          {octoListedAiLabel ? <> · {octoListedAiLabel}</> : null}
+                          {octoBackupsLabel ? <> · {octoBackupsLabel}</> : null}
                         </>
                       }
                       start={<AgentAvatar agent={octoAgent} />}
@@ -2245,6 +2374,8 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                   const connectedLabel =
                     agentAiEngineLabel(agent) ??
                     (connectedCredential ? resolveCredentialLabel(connectedCredential) : null);
+                  // Then how many backups it lists after it (11.20): "Reviewer · ChatGPT · 2 backups".
+                  const backupsLabel = backupCountLabel(agent.backupAis);
                   const pending = agentActionPendingId === agent.id;
                   return (
                     <li key={agent.id}>
@@ -2255,6 +2386,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
                           <>
                             {agent.displayName ? agent.displayName : "Bot"}
                             {connectedLabel ? <> · {connectedLabel}</> : null}
+                            {backupsLabel ? <> · {backupsLabel}</> : null}
                           </>
                         }
                         start={<AgentAvatar agent={agent} />}

@@ -95,6 +95,7 @@ mod runtime;
 mod secrets;
 mod send_intents;
 mod send_queue;
+mod sign_in_room;
 mod site_intent;
 mod skills_discovery;
 mod speech_proxy;

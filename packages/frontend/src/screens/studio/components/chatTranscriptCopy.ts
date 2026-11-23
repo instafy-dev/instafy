@@ -1,10 +1,12 @@
 import {
   hasFailedRunMetadata,
+  nextSignInForViewer,
   resolveRunFailurePresentation,
   runFailureSentenceForViewer,
   runtimeEntryOfTurn,
   type TurnEngineTurnOwner,
 } from "../../../conversations/runFailurePresentation";
+import { viewerSignInsSnapshot } from "../../../conversations/aiSignIns";
 import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import type { ChatMessage, ChatMessageFileChange } from "../types";
 import { readRowStopNotice, rowWentOnFromStop } from "./chatMessagePresentation";
@@ -58,9 +60,15 @@ function normalizeText(value: string | null | undefined): string {
 function chatWords(message: ChatMessage, reader: ChatCopyReader | undefined): string {
   if (message.role === "assistant" && (normalizeMessageType(message) === "error" || hasFailedRunMetadata(message.metadata))) {
     const failure = resolveRunFailurePresentation({ metadata: message.metadata, content: message.content, assumeFailed: true });
+    const owner = failure?.turnEngine || failure?.nextSignIn ? reader?.turnEngineOwnerOf?.(message) ?? null : null;
+    // A turn that stopped at its sign-in's plan's limit names the agent's next
+    // sign-in for its owner alone, as its card does (11.20).
+    const nextSignIn = failure?.nextSignIn
+      ? nextSignInForViewer(failure, { owner, signIns: viewerSignInsSnapshot() })
+      : null;
     const sentence = failure
-      ? normalizeText(runFailureSentenceForViewer(failure, {
-        owner: failure.turnEngine ? reader?.turnEngineOwnerOf?.(message) ?? null : null,
+      ? normalizeText(nextSignIn?.sentence ?? runFailureSentenceForViewer(failure, {
+        owner: failure.turnEngine ? owner : null,
         runtime: runtimeEntryOfTurn(message, reader?.runtimeStatuses),
       }))
       : "";

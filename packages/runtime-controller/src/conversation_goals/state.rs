@@ -6,9 +6,22 @@ use uuid::Uuid;
 
 use super::policy::{apply_goal_update, normalize_goal, Goal, GoalStatus, GoalUpdate};
 use crate::conversations::{load_conversation_record, ConversationRecord};
-use crate::{internal_error, ApiError, AppState};
+use crate::{auth::RequestContext, internal_error, ApiError, AppState};
 
 type StateResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
+
+/// The conversation metadata key that says whose words its goal holds, its
+/// objective and checkpoint among them (docs/Local-Engine-Turns.md 11.5,
+/// 11.20): the id of the person whose own save last wrote it
+/// ([`record_goal_words`]), or `false` once anything else did: an agent's
+/// job, by its goal update (`apply_runtime_update`) or by any write its token
+/// makes, or the service role. Only the controller writes it; a client's copy
+/// is dropped, and public metadata hides it. A goal's next steps run on a
+/// person's Claude Code only while it holds their own words
+/// ([`holds_owners_words`]), so a teammate's save or a job's write keeps them
+/// off it until that person saves the goal themselves. Absent: no save is
+/// recorded, so the goal holds no one's own words either.
+pub(crate) const GOAL_WORDS_KEY: &str = "_goalWordsOf";
 
 /// Client edits always replace the controller revision, including clear/pause.
 /// A metadata patch unrelated to goals leaves the stored revision untouched.
@@ -17,6 +30,7 @@ pub(crate) fn prepare_client_metadata(metadata: &mut Value) {
         return;
     };
     metadata.remove("_goalController");
+    metadata.remove(GOAL_WORDS_KEY);
     let alias = metadata.remove("instafy_goal");
     if !metadata.contains_key("instafyGoal") {
         if let Some(goal) = alias {
@@ -29,6 +43,46 @@ pub(crate) fn prepare_client_metadata(metadata: &mut Value) {
             json!({"revision": Uuid::new_v4()}),
         );
     }
+}
+
+/// The person whose own words a write in `context`'s name holds: its person,
+/// unless an agent's job made it with its token or the service role did. A
+/// caller that acts as a job's person (`ActiveJobAuthorization::subject_context`)
+/// passes the job on and counts its writes as no one's.
+pub(crate) fn own_words_of(context: &RequestContext) -> Option<Uuid> {
+    context
+        .user_id
+        .filter(|_| !context.is_service_role && context.scoped_claims.is_none())
+}
+
+/// A save of the conversation's metadata, `patch` after
+/// [`prepare_client_metadata`] and, for a conversation that exists,
+/// [`preserve_unchanged_goal_revision`]: when it writes the goal, the goal
+/// holds `saver`'s own words now ([`GOAL_WORDS_KEY`], [`own_words_of`]), and no
+/// one's without a saver. A patch that leaves the goal as it was leaves whose
+/// words it holds.
+pub(crate) fn record_goal_words(patch: &mut Value, saver: Option<Uuid>) {
+    let Some(patch) = patch.as_object_mut() else {
+        return;
+    };
+    if !patch.contains_key("_goalController") {
+        return;
+    }
+    let words = saver.map_or(Value::Bool(false), |person| {
+        Value::String(person.to_string())
+    });
+    patch.insert(GOAL_WORDS_KEY.into(), words);
+}
+
+/// Whether the goal in the conversation `metadata` holds `owner`'s own words
+/// ([`GOAL_WORDS_KEY`]): their own save wrote it last. A goal no save of
+/// theirs is recorded for holds no one's.
+pub(crate) fn holds_owners_words(metadata: &Value, owner: Uuid) -> bool {
+    metadata
+        .get(GOAL_WORDS_KEY)
+        .and_then(Value::as_str)
+        .and_then(|person| person.parse::<Uuid>().ok())
+        == Some(owner)
 }
 
 /// Compare under the conversation row lock. A retry carrying the same goal
@@ -258,7 +312,14 @@ pub(crate) async fn apply_runtime_update(
     ) {
         GoalUpdate::Ignored => Ok(None),
         GoalUpdate::Set(goal) => {
-            persist_goal(transaction, conversation_id, bound.metadata, Some(&goal))
+            // An agent's job's words, which a teammate's message may have put
+            // there, are in the goal now: its next steps keep off Claude Code
+            // until its owner saves it themselves.
+            let mut metadata = bound.metadata;
+            if let Some(map) = metadata.as_object_mut() {
+                map.insert(GOAL_WORDS_KEY.into(), Value::Bool(false));
+            }
+            persist_goal(transaction, conversation_id, metadata, Some(&goal))
                 .await
                 .map(Some)
         }
@@ -270,12 +331,21 @@ pub(crate) async fn apply_runtime_update(
 
 /// The completion transaction atomically closes a job and records its wakeup.
 /// Planning receipts and provider retry requeues return before reaching this hook.
+///
+/// `goes_on_another_ai`: the job failed at its sign-in's plan's limit, which
+/// its completion has just recorded, while the goal's agent now has another
+/// AI with room (crate::sign_in_room::SignInEnd, docs/Local-Engine-Turns.md
+/// 11.20). The goal then records its next step as after a finished turn, and
+/// that step runs on the AI with room, instead of stopping. Any other failure
+/// blocks it as before; the recovery sweep, which knows nothing of limits,
+/// passes false.
 pub(crate) async fn settle_job(
     transaction: &Transaction<'_>,
     job_id: Uuid,
     payload: &Value,
     conversation_id: Uuid,
     outcome: &str,
+    goes_on_another_ai: bool,
 ) -> StateResult<Option<ConversationRecord>> {
     let Some(bound) = load_bound_goal(transaction, job_id, payload, conversation_id).await? else {
         return Ok(None);
@@ -291,11 +361,25 @@ pub(crate) async fn settle_job(
             if bound.planning_receipt {
                 return Ok(None);
             }
-            transaction.execute(
-                "insert into conversation_goal_continuations (source_job_id, conversation_id, goal_revision, owner_user_id)
-                 values ($1, $2, $3, $4) on conflict (source_job_id) do nothing",
-                &[&job_id, &conversation_id, &bound.revision, &bound.owner],
-            ).await.map_err(|error| internal_error(format!("failed to record goal continuation: {error}")))?;
+            record_continuation(
+                transaction,
+                job_id,
+                conversation_id,
+                bound.revision,
+                bound.owner,
+            )
+            .await?;
+            Ok(None)
+        }
+        ("failed", "failed") if goes_on_another_ai && !bound.planning_receipt => {
+            record_continuation(
+                transaction,
+                job_id,
+                conversation_id,
+                bound.revision,
+                bound.owner,
+            )
+            .await?;
             Ok(None)
         }
         ("failed", "failed") | ("canceled", "canceled") | ("expired", "expired" | "failed") => {
@@ -313,6 +397,22 @@ pub(crate) async fn settle_job(
         }
         _ => Ok(None),
     }
+}
+
+/// The goal's next step after `job_id`, which its wake-up dispatches.
+async fn record_continuation(
+    transaction: &Transaction<'_>,
+    job_id: Uuid,
+    conversation_id: Uuid,
+    revision: Uuid,
+    owner: Uuid,
+) -> StateResult<()> {
+    transaction.execute(
+        "insert into conversation_goal_continuations (source_job_id, conversation_id, goal_revision, owner_user_id)
+         values ($1, $2, $3, $4) on conflict (source_job_id) do nothing",
+        &[&job_id, &conversation_id, &revision, &owner],
+    ).await.map_err(|error| internal_error(format!("failed to record goal continuation: {error}")))?;
+    Ok(())
 }
 
 /// The Stop endpoint already authorized the human and locked its exact target
@@ -495,5 +595,67 @@ mod tests {
             Some(&json!({"instafyGoal":null,"_goalController":{"revision":Uuid::new_v4()}})),
         );
         assert!(uuid_at(&clear, "/_goalController/revision").is_some());
+    }
+
+    /// A save that writes the goal records whose words it holds: its saver's,
+    /// when a person made it themselves, and no one's for a job's token or the
+    /// service role; a save that leaves the goal as it was, or a client's copy
+    /// of the record, changes nothing. A goal no save is recorded for holds no
+    /// one's words (docs/Local-Engine-Turns.md 11.5).
+    #[test]
+    fn a_goal_holds_the_words_of_whoever_saved_it_last() {
+        let (owner, teammate) = (Uuid::new_v4(), Uuid::new_v4());
+        let person = |user_id| RequestContext {
+            user_id: Some(user_id),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        let claims: runtime_contracts::AccessTokenClaims = serde_json::from_value(json!({
+            "aud": "instafy", "sub": owner.to_string(), "project_id": Uuid::new_v4().to_string(),
+            "scopes": [], "iat": 0, "exp": 0, "jti": "job",
+        }))
+        .expect("claims");
+        let job_token = RequestContext {
+            scoped_claims: Some(claims),
+            ..person(owner)
+        };
+        let service = RequestContext {
+            user_id: Some(owner),
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        assert_eq!(own_words_of(&person(owner)), Some(owner));
+        assert_eq!(own_words_of(&job_token), None);
+        assert_eq!(own_words_of(&service), None);
+        let existing = json!({"instafyGoal":{"id":"goal","status":"active"}, "_goalController":{"revision":Uuid::new_v4()}});
+        let saved = |saver: Option<Uuid>, goal: Value| {
+            let mut patch = json!({"instafyGoal": goal, GOAL_WORDS_KEY: owner.to_string()});
+            prepare_client_metadata(&mut patch);
+            preserve_unchanged_goal_revision(&mut patch, Some(&existing));
+            record_goal_words(&mut patch, saver);
+            patch
+        };
+        let changed = json!({"id":"goal","status":"active","objective":"Delete the bucket"});
+        let words = saved(Some(teammate), changed.clone());
+        assert_eq!(words[GOAL_WORDS_KEY], json!(teammate.to_string()));
+        assert!(!holds_owners_words(&words, owner));
+        assert!(holds_owners_words(&words, teammate));
+        let words = saved(Some(owner), changed.clone());
+        assert_eq!(words[GOAL_WORDS_KEY], json!(owner.to_string()));
+        assert!(holds_owners_words(&words, owner));
+        let words = saved(None, changed);
+        assert_eq!(words[GOAL_WORDS_KEY], json!(false));
+        assert!(!holds_owners_words(&words, owner));
+        // The same goal again, or a patch of something else: no record, and
+        // the client's copy is gone.
+        let unchanged = saved(Some(teammate), existing["instafyGoal"].clone());
+        assert!(unchanged.get(GOAL_WORDS_KEY).is_none(), "{unchanged}");
+        let mut title = json!({"title": "New title", GOAL_WORDS_KEY: teammate.to_string()});
+        prepare_client_metadata(&mut title);
+        record_goal_words(&mut title, Some(teammate));
+        assert_eq!(title, json!({"title": "New title"}));
+        // A goal no save is recorded for holds no one's own words.
+        assert!(!holds_owners_words(&existing, owner));
+        assert!(!holds_owners_words(&json!({ GOAL_WORDS_KEY: null }), owner));
     }
 }

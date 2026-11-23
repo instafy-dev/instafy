@@ -200,6 +200,28 @@ pub(crate) struct RunEvidence {
     pub assistant_text: Option<String>,
     pub has_activity: bool,
     pub turn: Option<u32>,
+    /// The run was a lane job of the goal's owner's, on their own Claude
+    /// Code: a step on that Claude Code may quote it
+    /// (`conversation_goals::step_may_run_on_claude_code`).
+    pub on_owners_claude_code: bool,
+}
+
+/// The runs a continuation prompt quotes as recent evidence, oldest first:
+/// the last three of `recent` that show a turn number, activity or a reply.
+pub(crate) fn quoted_runs(recent: &[RunEvidence]) -> Vec<&RunEvidence> {
+    let signals: Vec<_> = recent
+        .iter()
+        .filter(|run| {
+            run.turn.is_some()
+                || run.has_activity
+                || run
+                    .assistant_text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+        })
+        .collect();
+    let start = signals.len().saturating_sub(3);
+    signals[start..].to_vec()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,18 +346,7 @@ pub(crate) fn build_continuation_prompt(
             lines.push(format!("{label}: {value}"));
         }
     }
-    let signals: Vec<_> = recent
-        .iter()
-        .filter(|run| {
-            run.turn.is_some()
-                || run.has_activity
-                || run
-                    .assistant_text
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty())
-        })
-        .collect();
-    let signals = &signals[signals.len().saturating_sub(3)..];
+    let signals = quoted_runs(recent);
     if !signals.is_empty() {
         lines.push("\nRecent run evidence (historical observations):".into());
         for (index, run) in signals.iter().enumerate() {

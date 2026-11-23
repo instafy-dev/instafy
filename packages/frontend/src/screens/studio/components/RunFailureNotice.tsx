@@ -15,12 +15,20 @@ import { Check, NavArrowDown, NavArrowRight } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import {
   hasFailedRunMetadata,
+  nextSignInForViewer,
   readControllerStampedTurnEngine,
   runFailureSentenceForViewer,
   runtimeEntryOfTurn,
   type RunFailurePresentation,
   type TurnEngineTurnOwner,
 } from "../../../conversations/runFailurePresentation";
+import {
+  readAiSignInStamp,
+  replySignInLine,
+  turnEngineReplySignIn,
+  useViewerSignIns,
+  viewerSignInsScopeFor,
+} from "../../../conversations/aiSignIns";
 import { useOptionalRuntimeState } from "../../../runtime/RuntimeStateProvider";
 import type { ChatMessage } from "../types";
 import { TurnActivityLine } from "./TurnActivityLine";
@@ -62,10 +70,11 @@ export type RunFailureRetryContextValue = {
    */
   onConnectAi?: () => void;
   /**
-   * Whose turn-engine turn a message belongs to (its failure, or its reply),
-   * as far as the chat can tell; null when it cannot. A failed turn's card
-   * words it for that person or for everyone else, and its reply's line says
-   * whose own engine ran it (docs/Local-Engine-Turns.md 5.5-5.7).
+   * Whose turn a message belongs to (its failure, or its reply), as far as the
+   * chat can tell; null when it cannot. A failed turn-engine turn's card words
+   * it for that person or for everyone else, its reply's line says whose own
+   * engine ran it (docs/Local-Engine-Turns.md 5.5-5.7), and only that person
+   * reads which of their sign-ins ran a turn (11.20).
    */
   turnEngineOwnerOf?: (message: Pick<ChatMessage, "id" | "timestamp" | "metadata">) => TurnEngineTurnOwner | null;
 };
@@ -96,35 +105,80 @@ function readAiAccessMode(message: ChatMessage): string {
   return typeof mode === "string" ? mode.trim().toLowerCase() : "";
 }
 
+/** The sign-in a reply's stamp names, for a reply that is no failure; null for none. */
+function replySignInStamp(metadata: unknown) {
+  return hasFailedRunMetadata(metadata) ? null : readAiSignInStamp(metadata)?.signIn ?? null;
+}
+
 /**
- * The plain-text line under the header of a turn-engine turn's reply ("Ran on
- * Sam's own Claude Code, on their computer"), or null. Only the controller's
- * own stamp on the message shows it: an `aiAccessMode` a member records never
- * does (docs/Local-Engine-Turns.md 5.7). A failed turn has no reply: its
- * failure sentence names the engine itself.
+ * The plain-text line under a reply's header, or null. A turn-engine turn's
+ * says whose own engine ran it ("Ran on Sam's own Claude Code, on their
+ * computer"), and only the controller's own stamp on the message shows it: an
+ * `aiAccessMode` a member records never does (docs/Local-Engine-Turns.md
+ * 5.7). Any other reply shows a line only to the turn's own person, once they
+ * have more than one sign-in: which of their connections ran it ("Ran on
+ * Work", "Ran on Personal, a backup"), from the controller's `aiSignIn` stamp
+ * (11.20); a turn engine's line says so of a backup too. A failed turn has no
+ * reply: its failure sentence names the engine itself.
  */
 export function useTurnEngineSpeakerLine(
   message: Pick<ChatMessage, "id" | "timestamp" | "metadata"> | null,
 ): string | null {
   const retryContext = useRunFailureRetry();
-  const stamped = message && !hasFailedRunMetadata(message.metadata)
-    ? readControllerStampedTurnEngine(message.metadata)
-    : null;
+  const metadata = message && !hasFailedRunMetadata(message.metadata) ? message.metadata : null;
+  const stamped = metadata ? readControllerStampedTurnEngine(metadata) : null;
   const presentation = stamped?.presentation ?? null;
+  const stampedSignIn = replySignInStamp(metadata);
+  // Whose turn it was, asked only of a reply with a line to word: finding it
+  // reads the whole chat.
+  const owner =
+    message && (presentation || stampedSignIn) ? retryContext?.turnEngineOwnerOf?.(message) ?? null : null;
+  // Which of the viewer's own sign-ins ran it: read only for a reply whose
+  // stamp names one, and never for a turn the chat knows to be someone else's.
+  const signInStamp = owner?.isViewer === false ? null : stampedSignIn;
+  const signIns = useViewerSignIns(viewerSignInsScopeFor([signInStamp], { count: true }));
   // The engine's line may name what it loads for the viewer, such as their
   // own sign-ins: it reads again when the engine says that changed.
   const subscribe = useCallback(
     (onChange: () => void) => presentation?.subscribe?.(onChange) ?? (() => {}),
     [presentation],
   );
-  const readLine = () =>
-    presentation && message
-      ? presentation.describeSpeaker(
-          retryContext?.turnEngineOwnerOf?.(message) ?? null,
-          message.metadata as Record<string, unknown>,
-        )
-      : null;
+  const readLine = () => {
+    if (!metadata) {
+      return null;
+    }
+    if (presentation) {
+      return presentation.describeSpeaker(
+        owner,
+        metadata as Record<string, unknown>,
+        signIns ? turnEngineReplySignIn(metadata, owner, signIns) : null,
+      );
+    }
+    return signIns ? replySignInLine(metadata, owner, signIns) : null;
+  };
   return useSyncExternalStore(subscribe, readLine, readLine);
+}
+
+/**
+ * Whether a reply shows the line under its header that names the sign-in it
+ * ran on (11.20), for rows that lay out by it: a reply that is no turn
+ * engine's, whose stamp names one of the viewer's own sign-ins while they
+ * have more than one. It reads the viewer's sign-ins only while one of
+ * `messages` names a sign-in.
+ */
+export function useReplySignInLineGate(
+  messages: readonly Pick<ChatMessage, "metadata">[],
+): (metadata: unknown) => boolean {
+  const stamps = useMemo(() => messages.map((message) => replySignInStamp(message.metadata)), [messages]);
+  const signIns = useViewerSignIns(viewerSignInsScopeFor(stamps, { count: true }));
+  return useCallback(
+    (metadata: unknown) =>
+      signIns !== null &&
+      !hasFailedRunMetadata(metadata) &&
+      readControllerStampedTurnEngine(metadata) === null &&
+      replySignInLine(metadata, null, signIns) !== null,
+    [signIns],
+  );
 }
 
 /** Where focus goes once a pressed control leaves the card's actions row. */
@@ -276,12 +330,26 @@ export function RunFailureMessageBody({
   // whose turn it was. Try again sends it again as for any failure: to the
   // same agent, so to that engine again (11.14).
   const turnEngine = presentation.turnEngine ?? null;
-  const turnEngineOwner = turnEngine ? retryContext?.turnEngineOwnerOf?.(message) ?? null : null;
+  const nextSignInStamp = presentation.nextSignIn ?? null;
+  const turnOwner = turnEngine || nextSignInStamp ? retryContext?.turnEngineOwnerOf?.(message) ?? null : null;
+  const turnEngineOwner = turnEngine ? turnOwner : null;
   const turnEngineSender = turnEngineOwner?.isViewer === true;
-  const friendlyText = runFailureSentenceForViewer(presentation, {
-    owner: turnEngineOwner,
-    runtime: runtimeEntryOfTurn(message, runtimeStatuses),
-  });
+  // A turn that stopped at its sign-in's plan's limit, while the agent's next
+  // turns use another of its owner's sign-ins (docs/Local-Engine-Turns.md
+  // 11.20): its owner reads which, by their own names for them, and may send
+  // it again, since a resend goes there. Nobody else reads either name.
+  const signIns = useViewerSignIns(
+    nextSignInStamp && turnOwner?.isViewer !== false
+      ? viewerSignInsScopeFor([nextSignInStamp.stopped, nextSignInStamp.next], { count: false })
+      : "off",
+  );
+  const nextSignIn = nextSignInForViewer(presentation, { owner: turnOwner, signIns });
+  const friendlyText =
+    nextSignIn?.sentence ??
+    runFailureSentenceForViewer(presentation, {
+      owner: turnEngineOwner,
+      runtime: runtimeEntryOfTurn(message, runtimeStatuses),
+    });
   const retryPending = retryContext !== null && retryContext.pendingRetryKey === message.id;
   const otherRetryInFlight =
     retryContext !== null && retryContext.pendingRetryKey !== null && !retryPending;
@@ -302,9 +370,12 @@ export function RunFailureMessageBody({
   );
   const needsAi = presentation.kind === "needs_ai";
   // A spent usage window reopens in hours or days, so a resend now would fail
-  // the same way. Instafy AI's own limit leaves the person nothing to do; on
-  // their own account they can switch to another AI connection.
+  // the same way, unless the agent's next turns use another sign-in with
+  // room, where a resend goes. Instafy AI's own limit leaves the person
+  // nothing to do; on their own account they can switch to another AI
+  // connection.
   const usageLimit = presentation.kind === "provider_usage_limit";
+  const resendWaitsForReset = usageLimit && nextSignIn === null;
   // The person's own AI connection can fix it in AI settings: a spent usage
   // window, or a sign-in or account the AI refused (presentation.manageAi).
   const offersManageAi =
@@ -325,7 +396,7 @@ export function RunFailureMessageBody({
       ? null
       : presentation.rawText;
   const hasDetails = Boolean(detailsText?.trim()) || Boolean(steps);
-  const showManualControls = retryContext !== null && !quiet && !needsAi && !usageLimit;
+  const showManualControls = retryContext !== null && !quiet && !needsAi && !resendWaitsForReset;
   const showRetry = showManualControls && (retryPending || (!superseded && !withdrawn));
   const showRetried = showManualControls && superseded && !retryPending;
 
