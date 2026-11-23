@@ -5111,14 +5111,16 @@ fn refused_browser_card(
 /// attempt's own thread with no new search or read, asked only for the card
 /// ([`no_card_retry_prompt`], [`refused_card_retry_options`]); its words are a true account, so
 /// they stay until the retry's replace them ([`retry_withdraws_the_first_answer`]). A turn with a
-/// card, or one that changed files, keeps its answer. A card the retry writes opens a page the
-/// reader didn't read, so it waits for the person's press
+/// card, or one that changed files, keeps its answer, and so does one that answers in plain text
+/// (`plain_text`: a plain-text report or write), which no card goes with. A card the retry writes
+/// opens a page the reader didn't read, so it waits for the person's press
 /// (`hold_cards_for_pages_its_reader_did_not_read`), with the retry's words above it.
 fn no_card_for_a_page_it_couldnt_read(
     job: &LeaseJob,
     outcome: &CodexOutcome,
     events: &[JsonValue],
     changed_files: bool,
+    plain_text: bool,
 ) -> Option<CodexFallbackSummaryKind> {
     let card_left = outcome
         .actions
@@ -5126,6 +5128,7 @@ fn no_card_for_a_page_it_couldnt_read(
         .any(|action| matches!(action, CodexAction::RequestBrowser(_)));
     (!card_left
         && !changed_files
+        && !plain_text
         && !browser_request_unsupported(job)
         && browser_request::links_a_page_its_reader_was_refused(&outcome.summary, &[events]))
     .then_some(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead)
@@ -9778,15 +9781,17 @@ impl JobProcessor {
         // more, unless it changed files of its own ([`refused_browser_card`],
         // [`no_card_for_a_page_it_couldnt_read`]).
         if codex_fallback_summary_kind.is_none() {
-            codex_fallback_summary_kind = refused_browser_card(
+            codex_fallback_summary_kind =
+                refused_browser_card(job, &output.final_json, &outcome, !own_files_empty);
+        }
+        if codex_fallback_summary_kind.is_none() {
+            codex_fallback_summary_kind = no_card_for_a_page_it_couldnt_read(
                 job,
-                &output.final_json,
                 &outcome,
+                &output.events,
                 !own_files_empty,
-            )
-            .or_else(|| {
-                no_card_for_a_page_it_couldnt_read(job, &outcome, &output.events, !own_files_empty)
-            });
+                final_output_mode.allow_plain_text_final_fallback(),
+            );
         }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
@@ -33414,7 +33419,7 @@ mod tests {
         let kind = |job: &LeaseJob, raw: &JsonValue, events: &[JsonValue], changed_files: bool| {
             let outcome = extract_codex_outcome(raw).expect("extract outcome");
             refused_browser_card(job, raw, &outcome, changed_files).or_else(|| {
-                no_card_for_a_page_it_couldnt_read(job, &outcome, events, changed_files)
+                no_card_for_a_page_it_couldnt_read(job, &outcome, events, changed_files, false)
             })
         };
         let no_card = answer(json!([]));
@@ -33426,6 +33431,12 @@ mod tests {
         // the browser.
         assert_eq!(kind(&job, &answer(card.clone()), &robots, false), None);
         assert_eq!(kind(&job, &no_card, &robots, true), None);
+        // Nor is a turn that answers in plain text, which no card goes with.
+        let outcome = extract_codex_outcome(&no_card).expect("extract outcome");
+        assert_eq!(
+            no_card_for_a_page_it_couldnt_read(&job, &outcome, &robots, false, true),
+            None
+        );
         let browser_turn = test_lease_job(
             Some("feature"),
             json!({"metadata": {"browserTransport": "shared"}}),
