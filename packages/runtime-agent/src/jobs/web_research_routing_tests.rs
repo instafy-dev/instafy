@@ -470,9 +470,14 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
 
     let router = flat(ROUTER_SKILL);
     assert!(router.contains("with `instafy web read <url…> --json` (no browser card)"));
+    // Current information is looked up as the research skill says, in its order: the router,
+    // in every turn's context, gave its own (search, then read), which the research skill's news
+    // line now turns round. With search on, a news question searched and read no newsroom (a
+    // local test, Nov 23).
     assert!(router.contains(
-        "Look it up as `instafy-web-research` says: the AI's own web search, then `instafy web read`."
+        "For current information (news, prices, releases, status pages): - Look it up as `instafy-web-research` says. - Answer from memory only"
     ));
+    assert!(!router.contains("the AI's own web search, then"));
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     // Whether a page needs a card at all is the building turn's choice, said where the skill says
     // when it is used, which a building turn reads before it hands the person a card: one place,
