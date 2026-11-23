@@ -1931,7 +1931,9 @@ site's home page, so the card's browser run opens the home page and finds the
 page from there; a card the routing step posts is the person's own message and
 keeps its words. A reply's card carried a product address no page had given,
 which the browser would have opened as the shop's own page. A turn without the
-record, such as a Claude Code turn, keeps its cards as they are.
+record, such as a Claude Code turn, keeps its cards as they are, and so does a
+turn one of whose searches listed none of the pages it found (a provider's own
+search tool): any address may then be one it gave.
 
 **A stop at an address no step tried is no finding.** runtime-agent keeps, for
 each run, the addresses its browser steps tried: each one a `navigate` or

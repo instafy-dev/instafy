@@ -1527,7 +1527,13 @@ pub(crate) fn keep_a_turns_given_addresses_for_its_chat(chat: Uuid, addresses: V
 /// Writes one file of a turn's record (`name`, in the record's folder `dir`): `addresses`, as
 /// fingerprints. The file is published whole, under a temporary name the reader skips first.
 pub(crate) fn write_turn_given(dir: &Path, name: &str, addresses: &[String]) -> Result<()> {
-    let payload = serde_json::to_vec(&json!({ "version": 1, "addresses": addresses }))?;
+    publish_turn_given(dir, name, &json!({ "version": 1, "addresses": addresses }))
+}
+
+/// Publishes `record` as the file `name` of a turn's record (`dir`), whole: written under a
+/// temporary name the readers skip, then renamed.
+fn publish_turn_given(dir: &Path, name: &str, record: &JsonValue) -> Result<()> {
+    let payload = serde_json::to_vec(record)?;
     let temporary = dir.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
     std::fs::write(&temporary, payload)
         .with_context(|| format!("failed to write {}", temporary.display()))?;
@@ -1537,8 +1543,9 @@ pub(crate) fn write_turn_given(dir: &Path, name: &str, addresses: &[String]) -> 
     Ok(())
 }
 
-/// Every fingerprint a turn's record holds (`dir`), the seed's first, or None when it has no seed.
-pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
+/// The files of a turn's record (`dir`) that are records, the seed's first, or None when it has
+/// no seed.
+fn turn_given_records(dir: &Path) -> Option<Vec<JsonValue>> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
@@ -1547,7 +1554,7 @@ pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
     names.sort();
     names.insert(0, TURN_GIVEN_SEED.to_string());
     names.truncate(MAX_TURN_GIVEN_FILES);
-    let mut addresses = Vec::new();
+    let mut records = Vec::new();
     for name in names {
         let path = dir.join(&name);
         let record = std::fs::metadata(&path)
@@ -1555,37 +1562,72 @@ pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
             .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_TURN_GIVEN_FILE_BYTES)
             .and_then(|_| std::fs::read(&path).ok())
             .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
-            .filter(|record| record.get("version") == Some(&json!(1)));
-        let Some(entries) = record
-            .as_ref()
-            .and_then(|record| record.get("addresses"))
-            .and_then(JsonValue::as_array)
-        else {
-            if name == TURN_GIVEN_SEED {
-                return None;
-            }
-            continue;
-        };
-        addresses.extend(
-            entries
-                .iter()
-                .filter_map(JsonValue::as_str)
-                .filter(|address| {
-                    address.len() == 32
-                        && address
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                })
-                .map(str::to_string),
-        );
+            .filter(|record| {
+                record.get("version") == Some(&json!(1))
+                    && record.get("addresses").is_some_and(JsonValue::is_array)
+            });
+        match record {
+            Some(record) => records.push(record),
+            None if name == TURN_GIVEN_SEED => return None,
+            None => {}
+        }
     }
-    Some(addresses)
+    Some(records)
 }
+
+/// Every fingerprint a turn's record holds (`dir`), the seed's first, or None when it has no seed.
+pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
+    let records = turn_given_records(dir)?;
+    Some(
+        records
+            .iter()
+            .filter_map(|record| record["addresses"].as_array())
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .filter(|address| {
+                address.len() == 32
+                    && address
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Whether a turn's record (`dir`) takes any address: one of the turn's searches found pages
+/// that no list names ([`keep_what_a_search_found`]), so any address may be one it gave.
+pub(crate) fn turn_given_takes_any_address(dir: &Path) -> bool {
+    turn_given_records(dir).is_some_and(|records| {
+        records
+            .iter()
+            .any(|record| record.get(TURN_GIVEN_ANY_ADDRESS) == Some(&json!(true)))
+    })
+}
+
+/// The mark of a record written for a search whose pages no list names: with it, `instafy web
+/// read` refuses no address as one nobody gave, and a card keeps its words, for the rest of the
+/// turn.
+const TURN_GIVEN_ANY_ADDRESS: &str = "anyAddress";
 
 /// Keeps the pages one of the AI's own web searches found (`results`, its `url` entries, as the
 /// search bridge and a person's own login's search answer) in the turn's record (`dir`), so the
-/// turn reads them with `instafy web read`. A result gives its own address, never its site.
-pub(crate) fn keep_what_a_search_found(dir: &Path, results: &[JsonValue]) {
+/// turn reads them with `instafy web read`. A result gives its own address, never its site. A
+/// search that hands back no list (`None`: a provider's own search tool, whose pages only the
+/// model sees) marks the record as taking any address ([`turn_given_takes_any_address`]): a page
+/// it found would otherwise be refused as one nobody gave.
+pub(crate) fn keep_what_a_search_found(dir: &Path, results: Option<&[JsonValue]>) {
+    let name = format!("search-{}.json", Uuid::new_v4());
+    let Some(results) = results else {
+        let record = json!({ "version": 1, "addresses": [], (TURN_GIVEN_ANY_ADDRESS): true });
+        if let Err(error) = publish_turn_given(dir, &name, &record) {
+            tracing::warn!(
+                ?error,
+                "could not mark the turn's record for a search that lists no pages"
+            );
+        }
+        return;
+    };
     let mut addresses: Vec<String> = Vec::new();
     for key in results
         .iter()
@@ -1600,9 +1642,7 @@ pub(crate) fn keep_what_a_search_found(dir: &Path, results: &[JsonValue]) {
     if addresses.is_empty() {
         return;
     }
-    if let Err(error) =
-        write_turn_given(dir, &format!("search-{}.json", Uuid::new_v4()), &addresses)
-    {
+    if let Err(error) = write_turn_given(dir, &name, &addresses) {
         tracing::warn!(
             ?error,
             "could not keep what a web search found in the turn's record"

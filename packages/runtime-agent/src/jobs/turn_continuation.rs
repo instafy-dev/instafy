@@ -152,9 +152,13 @@ impl TurnFiles {
     }
 
     /// What the turn's record holds now: what its request and chat gave, the pages it read and
-    /// what its searches found. None when the turn has no record.
+    /// what its searches found. None when the turn has no record, or one that takes any address
+    /// (a search of the turn's listed none of its pages).
     pub(super) fn given_addresses(&self) -> Option<std::collections::HashSet<String>> {
         let dir = self.given.as_ref()?;
+        if crate::shared_browser::turn_given_takes_any_address(dir) {
+            return None;
+        }
         crate::shared_browser::read_turn_given(dir).map(|addresses| addresses.into_iter().collect())
     }
 
@@ -983,6 +987,9 @@ mod tests {
         crate::shared_browser::write_turn_given(&dir, "read-1.json", std::slice::from_ref(&read))
             .unwrap();
         assert!(files.given_addresses().unwrap().contains(&read));
+        // A search that lists none of its pages: the turn's cards keep their words.
+        crate::shared_browser::keep_what_a_search_found(&dir, None);
+        assert_eq!(files.given_addresses(), None);
         // The turn ends: the folder goes, and its chat keeps what it held.
         attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
         assert!(!dir.exists());

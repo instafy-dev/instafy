@@ -900,8 +900,10 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   `tell` names the site's home page to read instead, never the plain link. A search address (one with a query) on a
   site nobody gave names no home page. A site's home page, a link-only site (its own refusal answers) and an address
   on no public site by its name (the private-network rule answers) are never refused so. Without that folder and its
-  `seed.json`, as on a person's own computer, nothing is refused. A reader asked for a product address no page had
-  given read it, and the turn's reply and card passed it on as the shop's own page.
+  `seed.json`, as on a person's own computer, nothing is refused, and nor is anything for the rest of a turn one of
+  whose searches listed none of the pages it found (a provider's own search tool, whose record is marked
+  `anyAddress`). A reader asked for a product address no page had given read it, and the turn's reply and card
+  passed it on as the shop's own page.
 - **Stops.** A login (HTTP 401 or a sign-in form), HTTP 403, HTTP 429, a CAPTCHA or bot check, a paywall
   (`isAccessibleForFree: false` or paywall markup), a download (a file or attachment rather than a page) or a page
   that shows a credential (`secret_screen`) stops that URL. A CAPTCHA or bot check is never solved or worked around.

@@ -1200,8 +1200,8 @@ pub struct CodexRunOptions {
     pub turn_continue_note: Option<PathBuf>,
     /// The folder of the turn's record of the addresses it was given
     /// (`shared_browser::TURN_GIVEN_ENV`): the pages each of the AI's own web searches found go
-    /// into it as the search ends, so the turn reads them with `instafy web read`. None for a
-    /// turn without one.
+    /// into it as the search ends, so the turn reads them with `instafy web read`; a search that
+    /// lists none of its pages leaves it taking any address. None for a turn without one.
     pub turn_given_dir: Option<PathBuf>,
     /// An explicit task limit. With none, only an operator-configured overall limit applies;
     /// model inactivity, cancellation and lease loss remain independently bounded.
@@ -2970,10 +2970,7 @@ impl CodexClient {
             if let (EventMsg::WebSearchEnd(search), Some(dir)) =
                 (&event.msg, options.turn_given_dir.as_deref())
             {
-                crate::shared_browser::keep_what_a_search_found(
-                    dir,
-                    search.results.as_deref().unwrap_or_default(),
-                );
+                crate::shared_browser::keep_what_a_search_found(dir, search.results.as_deref());
             }
             if !open_waiting && aggregator.browser_open_waiting() {
                 browser_log_read = crate::shared_browser::action_log_len();

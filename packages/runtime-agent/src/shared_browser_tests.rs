@@ -4073,10 +4073,10 @@ async fn a_card_naming_a_made_up_path_opens_its_home_page_and_what_its_turn_was_
     // What the AI's own search found, as the run's search ends, and a page the reader read.
     keep_what_a_search_found(
         record.path(),
-        &[
+        Some(&[
             json!({ "type": "text_result", "url": "https://reviews.example/laptops/one?utm_source=openai", "title": "Review" }),
             json!({ "type": "search_usage", "searches": 1 }),
-        ],
+        ]),
     );
     write_turn_given(
         record.path(),
@@ -4142,6 +4142,8 @@ async fn a_card_naming_a_made_up_path_opens_its_home_page_and_what_its_turn_was_
 /// A turn's record of the addresses it was given is fingerprints in files of their writers' own:
 /// without its seed there is none, a file that isn't one of its records is skipped, and a search
 /// gives each result's own address, never its site, and nothing for an answer that names no page.
+/// A search that lists none of its pages (a provider's own search tool) leaves the record taking
+/// any address, and keeping what it holds.
 #[test]
 fn a_turns_record_is_its_seed_and_what_its_tools_added() {
     let key = |site_path: &str| approval_test_sha256(site_path)[..32].to_string();
@@ -4149,6 +4151,7 @@ fn a_turns_record_is_its_seed_and_what_its_tools_added() {
     assert_eq!(read_turn_given(record.path()), None);
     write_turn_given(record.path(), "read-1.json", &[key("example.test/a")]).unwrap();
     assert_eq!(read_turn_given(record.path()), None, "no seed");
+    assert!(!turn_given_takes_any_address(record.path()), "no seed");
     write_turn_given(record.path(), TURN_GIVEN_SEED, &[key("example.test/seed")]).unwrap();
     std::fs::write(record.path().join("read-2.json"), "{not json").unwrap();
     std::fs::write(
@@ -4163,16 +4166,17 @@ fn a_turns_record_is_its_seed_and_what_its_tools_added() {
     .unwrap();
     keep_what_a_search_found(
         record.path(),
-        &[json!({ "type": "search_usage", "searches": 1 })],
+        Some(&[json!({ "type": "search_usage", "searches": 1 })]),
     );
     keep_what_a_search_found(
         record.path(),
-        &[
+        Some(&[
             json!({ "url": "https://www.found.example/page/?x=1" }),
             json!({ "url": "https://www.found.example/page" }),
             json!({ "url": "ftp://found.example/file" }),
-        ],
+        ]),
     );
+    assert!(!turn_given_takes_any_address(record.path()));
     let held = read_turn_given(record.path()).unwrap();
     assert_eq!(held.first(), Some(&key("example.test/seed")));
     for kept in ["example.test/a", "example.test/b", "found.example/page"] {
@@ -4195,6 +4199,10 @@ fn a_turns_record_is_its_seed_and_what_its_tools_added() {
         let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
         assert!(!text.contains("found.example"), "{text}");
     }
+    // A search that lists none of the pages it found: any of them may be read now.
+    keep_what_a_search_found(record.path(), None);
+    assert!(turn_given_takes_any_address(record.path()));
+    assert_eq!(read_turn_given(record.path()).unwrap(), held);
 }
 
 /// The words an address no message and no page gave is refused with, on a site the chat was

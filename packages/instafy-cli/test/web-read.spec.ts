@@ -1406,6 +1406,17 @@ describe("an address nobody gave", () => {
       expect((await one("http://shop.example.net/products/made-up.html", { fresh: true }, over)).status).toBe("read");
     }
   });
+
+  it("reads any address once one of the turn's searches listed none of the pages it found", async () => {
+    // A provider's own search tool hands back no list: the runtime marks the record, and any page may be one it found.
+    routes["shop.example.net/products/found.html"] = { body: ARTICLE };
+    const dir = givenFolder();
+    expect((await one("http://shop.example.net/products/found.html", {}, inTurn(dir))).code).toBe("not_given");
+    fs.writeFileSync(path.join(dir, "search-1.json"), JSON.stringify({ version: 1, addresses: [], anyAddress: true }));
+    expect((await one("http://shop.example.net/products/found.html", {}, inTurn(dir))).status).toBe("read");
+    // Its other refusals stay: a link-only site is never read.
+    expect((await one("https://www.booking.com/hotel/found.html", {}, inTurn(dir))).code).toBe("link_only");
+  });
 });
 
 describe("one site, however its host is written", () => {

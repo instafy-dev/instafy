@@ -475,7 +475,9 @@ export class Cache<Kind extends string = string> {
  * each of the AI's own web searches found; `instafy web read` adds each page it reads (its own address, its links and
  * the addresses its text spells out) and `instafy web search` its results. Each writer writes files of its own, so
  * none waits for another. Without the folder and its seed (a person's own computer, a turn the runtime did not start)
- * there is no record, and nothing is refused.
+ * there is no record, and nothing is refused. A search of the AI's own that lists none of the pages it found (a
+ * provider's own search tool) leaves a record marked `anyAddress`: any address may then be one it gave, and none is
+ * refused for the rest of the turn.
  */
 export const TURN_GIVEN_ENV = "INSTAFY_TURN_GIVEN_DIR";
 /** The runtime's file in that folder, written before the turn starts: the record exists only with it. */
@@ -558,6 +560,8 @@ export class TurnGiven {
   private constructor(
     private readonly dir: string,
     private readonly keys: Set<string>,
+    /** a search of the turn's listed none of the pages it found: any address may be one it gave */
+    private readonly anyAddress: boolean,
   ) {}
 
   /**
@@ -576,11 +580,12 @@ export class TurnGiven {
     }
     if (!names.includes(TURN_GIVEN_SEED)) return null;
     const keys = new Set<string>();
+    let anyAddress = false;
     // The seed first, then what this turn's reads and searches added.
     names = [TURN_GIVEN_SEED, ...names.filter((name) => name !== TURN_GIVEN_SEED).sort()].slice(0, TURN_GIVEN_MAX_FILES);
     for (const name of names) {
       const file = path.join(dir, name);
-      let record: { version?: unknown; addresses?: unknown } | null = null;
+      let record: { version?: unknown; addresses?: unknown; anyAddress?: unknown } | null = null;
       try {
         if (fs.statSync(file).size <= TURN_GIVEN_MAX_FILE_BYTES) record = readJson(file);
       } catch {
@@ -591,19 +596,23 @@ export class TurnGiven {
         if (name === TURN_GIVEN_SEED) return null;
         continue;
       }
+      if (record!.anyAddress === true) anyAddress = true;
       for (const key of record!.addresses as unknown[]) {
         if (keys.size >= TURN_GIVEN_MAX_KEYS) break;
         if (typeof key === "string" && GIVEN_KEY.test(key)) keys.add(key);
       }
     }
-    return new TurnGiven(dir, keys);
+    return new TurnGiven(dir, keys, anyAddress);
   }
 
-  /** Whether `url` was given: a site's root always is (it opens without anyone giving it), any other path when kept. */
+  /**
+   * Whether `url` was given: a site's root always is (it opens without anyone giving it), any other path when kept, and
+   * every address once a search listed none of the pages it found.
+   */
   has(url: URL): boolean {
     const address = givenSitePath(url);
     if (!address) return false;
-    return address.path === "/" || this.keys.has(sha256(`${address.site}${address.path}`).slice(0, 32));
+    return this.anyAddress || address.path === "/" || this.keys.has(sha256(`${address.site}${address.path}`).slice(0, 32));
   }
 
   /** Whether the turn was given `url`'s site: a message or the request named an address on it or its name, or a page read there past its root. */
