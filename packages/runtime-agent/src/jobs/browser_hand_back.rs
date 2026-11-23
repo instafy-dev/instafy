@@ -2170,10 +2170,10 @@ pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
 
 /// The second pass's answer added to the turn's: the words of both, first then second, so the
 /// person still reads a first line that said a page stopped the turn, then the finding lines of
-/// both. A second pass that wrote no words of its own says what it read in the runtime's
-/// ([`what_the_second_pass_read`]): with the first pass's words alone, the person read that the
-/// product pages couldn't be read, though the second pass had read all three (a local test,
-/// Nov 23). Each pass's lines are its own: one that wrote none adds the pages its own steps opened
+/// both. A second pass that wrote no words of its own says what it read in the runtime's, after
+/// the first pass's ([`what_the_second_pass_read`]): with the first pass's words alone, the person
+/// read that the product pages couldn't be read, though the second pass had read all three (a
+/// local test, Nov 23). Each pass's lines are its own: one that wrote none adds the pages its own steps opened
 /// (`opened`), by address ([`finding_lines_from_pages`]), as the end of a turn with none does, so
 /// no page it read is lost beside the other pass's lines; one that opened none either adds
 /// nothing. A first pass's line that a page stopped it goes when the second read that page
@@ -2197,18 +2197,20 @@ pub(super) fn add_the_second_pass(summary: &mut String, answer: &str, opened: &[
             None => return,
         },
     };
-    // One that wrote no words of its own says what it read in the runtime's, before its missing
-    // line when it wrote one.
-    let words = match what_the_second_pass_read(&lines) {
-        Some(read) if words_of(&words).is_empty() => [read, words]
+    let (mut first_words, first_lines) =
+        split_findings(summary).unwrap_or_else(|| (summary.trim().to_string(), Vec::new()));
+    // One that wrote no words of its own says what it read in the runtime's, after the first
+    // pass's words and before its missing line when it wrote one. With no words of either pass,
+    // the turn's reply stays without words, as it was.
+    let says_nothing = words_of(&words).is_empty() && !words_of(&first_words).is_empty();
+    let words = match what_the_second_pass_read(&lines).filter(|_| says_nothing) {
+        Some(read) => [read, words]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => words,
+        None => words,
     };
-    let (mut first_words, first_lines) =
-        split_findings(summary).unwrap_or_else(|| (summary.trim().to_string(), Vec::new()));
     if words.lines().any(|line| missing_line(line).is_some()) {
         take_missing_names(&mut first_words);
     }
@@ -6888,6 +6890,10 @@ mod tests {
             ),
             "{summary}"
         );
+        // A first pass that wrote no words of its own leaves the reply without words, as it was.
+        let mut summary = format!("{home}\n{unreachable}");
+        add_the_second_pass(&mut summary, &products, &[]);
+        assert_eq!(words_of(&summary), "", "{summary}");
         // A second pass that read nothing but stopped at a page says nothing of its own.
         let mut summary = first.clone();
         take_unread_pages(&mut summary);
