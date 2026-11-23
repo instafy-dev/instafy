@@ -13964,9 +13964,10 @@ fn a_cookie_notices_accept_is_never_listed_so_no_step_can_press_it() {
 /// A local test (Nov 5): a banner's "Reject" or "Reject all" was in five turns' readings and no turn pressed
 /// it; the line that told a turn to rested on the model following text. Instafy's browser now
 /// presses a banner's own refusal itself once the page settles, before Octo reads it: only beside
-/// an accept of the same banner, never the accept or the settings, and never on a page with a
-/// sign-in field or one that may show a secret. It asks nobody, the step's activity says so
-/// (`declined: "cookies"`, which Details lists), and the reading Octo gets is the page after it.
+/// an accept of the same banner, never the accept, its settings only to show a refusal they hold
+/// when the banner has none (local tests, Nov 22), and never on a page with a sign-in field or one
+/// that may show a secret. It asks nobody, the step's activity says so (`declined: "cookies"`,
+/// which Details lists), and the reading Octo gets is the page after it.
 #[test]
 fn the_browser_declines_a_cookie_banner_itself() {
     let fixture = EmbeddedControllerFixture::new();
@@ -14009,12 +14010,23 @@ fn the_browser_declines_a_cookie_banner_itself() {
         "0\n"
     );
 
-    // No refusal on the banner, a refusal apart from the accept, a page with a sign-in field,
-    // a page that may show a secret, a dialog about a privacy policy that never speaks of
-    // cookies (its "Decline" may close an account), and a checkout whose card fields sit in a
-    // payment provider's frame: nothing is pressed, and the activity says nothing.
+    // A banner whose own buttons hold no refusal is refused in its own settings: its settings
+    // button beside its accept is pressed to show them, and nothing else when they show no
+    // refusal (here they show the same banner); the activity says nothing.
+    let fixture = EmbeddedControllerFixture::new();
+    let reading = payload_of(&fixture.run("cookie-banner-no-reject", "GET", "/v1/snapshot", None));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "1\n",
+        "only the banner's settings were pressed"
+    );
+    assert!(reading["activity"].get("declined").is_none(), "{reading}");
+
+    // A refusal apart from the accept, a page with a sign-in field, a page that may show a
+    // secret, a dialog about a privacy policy that never speaks of cookies (its "Decline" may
+    // close an account), and a checkout whose card fields sit in a payment provider's frame:
+    // nothing is pressed, and the activity says nothing.
     for mode in [
-        "cookie-banner-no-reject",
         "cookie-banner-apart",
         "cookie-banner-sign-in",
         "cookie-banner-secret",
