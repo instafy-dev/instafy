@@ -1,5 +1,0 @@
----
-"@instafy/cli": patch
----
-
-`instafy web search` with no search key, in a run whose AI has its own web search, now says that it searched nothing and points to that search, as the web-research skill says (the skill decides when and how often to search; the command names no cost or limit, since a person's own ChatGPT login searches on their own plan), and to going on without a search only if that search answers that it did not run. Turns that had their own search ran this command first, read "This space has no search key. Go on without it: …" and never searched: one found no price and said a search had returned nothing where none had run. The runtime marks the commands of such a run with `INSTAFY_TURN_AI_WEB_SEARCH=1`; everywhere else the words are unchanged. A call that sent nothing now has its own exit, 3 (`no_provider`, or the turn's searches used up), apart from 2 for a search that was sent and found nothing or that no provider answered, so the chat keeps no search step for a search there was nothing to send to.
