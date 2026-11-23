@@ -1175,11 +1175,19 @@ saying which of its values the turn chose, not the page; a value a page doesn't
 give goes in the missing line, by name. A route, from the operator's journey planner with
 its stations chosen, for the day and time the person travels (a daytime hour
 when they gave none) and saying which, is `instafy-getting-around`'s, and so is
-what a turn gives when the planner can't be run (its fields never show, or one
-is the person's): the lines and stop the place's own getting-there tab or
-question names, in the place's words, linked, with "the planner wasn't run, so
-no times". A planner that showed no fields in a chat isn't opened the same way
-again there: its link and the start and stop to type in it are given instead. A
+what a turn gives when the planner can't be run (its fields never show, one
+is the person's, or no stop could be chosen): the lines the place's own
+getting-there tab or question names, else an official city or tourism page's,
+every line and stop it names, closures too, each as the words of the page
+they're on, named by its site and linked (a city page's lines are never the
+place's), with "the planner wasn't run, so no times". A planner that showed no
+fields in a chat isn't opened the same way again there: its link and the start
+and stop to type in it are given instead. One whose list opened with no
+suggestion isn't typed into the same way again in that message: the
+operator's own planner page is opened once from its menu, else it is linked
+with the start and stop. A step that didn't work is said as the turn's own,
+never as the planner refusing it, and a page asked for after a route turn
+carries that turn's lines and sources without running the planner again. A
 comparison's models, those a page's menu names included, each read on its own
 page, and its reviews are `instafy-comparing`'s: with no search, a review no
 page links to is looked for on up to two reviewers' own sites, and counts as not
@@ -2333,7 +2341,15 @@ fields changed under it before anyone was asked, or whose snapshot with no
 record no longer reads as the page), and runtime-agent counts such steps until
 a step on a fresh snapshot's control, or one that moves to another page or
 tab, goes through (a look at the page or a scroll between them does not
-count). The second answers that the page keeps changing, which ends that
+count). A step whose snapshotId this browser never gave in the run is no
+page change: runtime-agent keeps the ids it gave the turn, and answers such a
+step, which the controller can't tell from an earlier reading's, with "This
+snapshotId isn't one this browser gave in this run; the latest reading's is
+<id>. Nothing was done on the page.", as it answers an id that is no reading's
+at all (missing, or not 64 hex characters) before the controller runs; with
+none given yet, the controller's "take a fresh snapshot" stands. A turn
+mis-copied a reading's id twice and wrote that the planner did not accept its
+step. The second answers that the page keeps changing, which ends that
 page, not the run, so a control that never holds still (a live count, a
 ticker in a link) sends the turn on instead of a loop of snapshots: to the
 site's own page for the task, from a link on the page (its menu: a planner, a
@@ -2657,7 +2673,20 @@ there are and the first four, by the names and indices of the reading it
 answers with: "Typed 7 characters into
 "From". A page's reading never shows typed text. 3 suggestions under "From":
 "Central Station" (index 3), "Central Square" (index 4), "Old Central Park"
-(index 5). Click one. Nothing was sent yet." On a page that may show a
+(index 5). Click one. Nothing was sent yet." A field whose list opened and
+stayed empty (the field, or the combobox it sits in, still says
+`aria-expanded="true"` after the whole 3 seconds, for a popup that is no dialog
+or grid, and no row of its list shows) says so, then the page's requests that
+failed from the first key to the end of the look, by site and the browser's
+reason: what its own code asks for (fetch, XHR, an event stream, a socket), its
+scripts and frames, never a picture, a style or a font, nor a request the page
+dropped itself (`net::ERR_ABORTED`). The result keeps them too
+(`emptyList.notLoaded`, each by kind, site and reason, never a path or query):
+"… Its list opened, but no suggestion came within 3 s. Meanwhile, these
+failed: a request to api.example (net::ERR_TUNNEL_CONNECTION_FAILED). Nothing
+was sent yet." A planner's start field opened its list so and the step said
+only that nothing was sent, which left the failed answer unseen and the turn
+blaming the planner. On a page that may show a
 secret it names none. A
 click on a checkbox, a radio button or a switch says whether it is checked now.
 A `choose` step's `done` names the option and the list by its own name

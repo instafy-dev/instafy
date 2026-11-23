@@ -14386,6 +14386,11 @@ async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
         (
             "click",
             json!({ "index": 3 }),
+            "This snapshotId isn't one this browser gave in this run, and it has given none yet: take a snapshot first. Nothing was done on the page.",
+        ),
+        (
+            "click",
+            json!({ "index": 900, "snapshotId": SNAPSHOT_ID }),
             "Shared Browser action requires one valid index and its fresh snapshotId",
         ),
     ] {
@@ -14401,6 +14406,185 @@ async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
             "{answer}"
         );
     }
+}
+
+/// A turn mis-copied its reading's 64-character snapshotId as 61 characters, twice: told only that the step
+/// "requires one valid index and its fresh snapshotId", it wrote that the planner did not accept its step (a local
+/// test, Nov 23). A snapshotId this browser didn't give in the run, malformed or unknown, now says so, names the
+/// latest reading's id and that nothing was done on the page; the step ran nowhere, so it never counts as the page
+/// changing under it, while an earlier reading's id still does, and with no reading given yet the controller's own
+/// "take a fresh snapshot" stands.
+#[tokio::test]
+async fn a_snapshot_id_this_browser_never_gave_names_the_latest_and_counts_as_no_page_change() {
+    let server = SharedBrowserMcpServer::new();
+    let given = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    let later = "9a3c2e7d4b1f60a85c9e2d7b3f1a4c6e8d0b2f4a6c8e0d2b4f6a8c0e2d4b6f8a";
+    let request = |path: &str, body: JsonValue| SharedBrowserRequest {
+        method: "POST".to_string(),
+        path: path.to_string(),
+        body: Some(body),
+    };
+    let look = SharedBrowserRequest {
+        method: "GET".to_string(),
+        path: "/v1/snapshot".to_string(),
+        body: None,
+    };
+    let words =
+        |result: &std::result::Result<JsonValue, SharedBrowserMcpExecutionFailure>| match result {
+            Err(SharedBrowserMcpExecutionFailure::Other(error)) => format!("{error:#}"),
+            other => panic!("not a step's own failure: {other:?}"),
+        };
+    let refused = |message: &'static str| {
+        move || async move {
+            Err(ControllerFailure {
+                message: message.to_string(),
+                step: None,
+                approval: None,
+                refused: None,
+                changed_after_yes: false,
+                page_changed: true,
+            }
+            .into())
+        }
+    };
+    // The controller's two refusals of an id that is neither the page's as it reads now nor the latest
+    // reading's (targetLocator and request-human-input in assets/shared-browser-cli.js).
+    let stale_words = [
+        "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+        "The page changed; take a fresh snapshot before requesting human input",
+    ];
+    let script = embedded_shared_browser_script();
+    for words in stale_words {
+        assert!(script.contains(&format!("\"{words}\"")), "{words}");
+    }
+    let stale = stale_words[0];
+    let made_up = "f".repeat(64);
+    let unknown = request(
+        "/v1/type",
+        json!({ "index": 9, "snapshotId": made_up, "text": "Central" }),
+    );
+    let earlier = request("/v1/click", json!({ "index": 2, "snapshotId": given }));
+    let answered = |id: &'static str| {
+        move || async move {
+            Ok::<_, anyhow::Error>(
+                json!({ "ok": true, "snapshotId": id, "interactiveElements": [] }),
+            )
+        }
+    };
+
+    // With no reading given yet, the controller's own words stand.
+    let first = server
+        .execute_with_failure_latch(&unknown, refused(stale))
+        .await;
+    assert_eq!(words(&first), stale);
+
+    // Once readings were given (a step on one starts the page-changed count again), an id that is none of them
+    // names the latest.
+    assert!(
+        server
+            .execute_with_failure_latch(&earlier, answered(given))
+            .await
+            .is_ok()
+    );
+    assert!(
+        server
+            .execute_with_failure_latch(&look, answered(later))
+            .await
+            .is_ok()
+    );
+    assert_eq!(server.page_changed_streak.load(AtomicOrdering::SeqCst), 0);
+    let named = format!(
+        "This snapshotId isn't one this browser gave in this run; the latest reading's is {later}. Nothing was done on the page."
+    );
+    for message in stale_words {
+        for _ in 0..3 {
+            let answer = server
+                .execute_with_failure_latch(&unknown, refused(message))
+                .await;
+            assert_eq!(words(&answer), named, "{message}");
+            let Err(SharedBrowserMcpExecutionFailure::Other(error)) = &answer else {
+                unreachable!()
+            };
+            let failure = error
+                .downcast_ref::<ControllerFailure>()
+                .expect("the step's failure");
+            assert!(!failure.page_changed, "{message}");
+        }
+    }
+    // Never a page change: six of them in a row never reached "keeps changing".
+    assert_eq!(server.page_changed_streak.load(AtomicOrdering::SeqCst), 0);
+
+    // An earlier reading's id still counts as the page changing under the step, and the second in a row ends
+    // that page.
+    let once = server
+        .execute_with_failure_latch(&earlier, refused(stale))
+        .await;
+    assert_eq!(words(&once), stale);
+    let twice = server
+        .execute_with_failure_latch(&earlier, refused(stale))
+        .await;
+    assert!(
+        words(&twice).contains("This page keeps changing"),
+        "{}",
+        words(&twice)
+    );
+
+    // Any other refusal of a step whose id this browser never gave keeps its own words.
+    assert!(
+        server
+            .execute_with_failure_latch(
+                &request("/v1/click", json!({ "index": 2, "snapshotId": later })),
+                answered(later)
+            )
+            .await
+            .is_ok()
+    );
+    let other = server
+        .execute_with_failure_latch(
+            &unknown,
+            refused("\"Email\" changed after the snapshot this step names, so nothing was done."),
+        )
+        .await;
+    assert!(
+        words(&other).starts_with("\"Email\" changed"),
+        "{}",
+        words(&other)
+    );
+
+    // A malformed id (the 64 characters mis-copied as 61) is refused before the browser is asked, with the same
+    // words, in a failed step's shape.
+    let mut wire = McpWire::connect(server.clone()).await;
+    let mis_copied = format!("{}{}", &given[..42], &given[45..]);
+    assert_eq!(mis_copied.len(), 61);
+    for (name, arguments) in [
+        (
+            "type",
+            json!({ "index": 9, "snapshotId": mis_copied, "text": "Central" }),
+        ),
+        ("click", json!({ "index": 9, "snapshotId": "not-an-id" })),
+        ("click", json!({ "index": 9 })),
+        (
+            "request_human_input",
+            json!({ "indices": [9, 11], "snapshotId": mis_copied }),
+        ),
+    ] {
+        let answer = wire.call(name, arguments).await;
+        assert_eq!(
+            answer["result"],
+            json!({
+                "content": [{ "type": "text", "text": named }],
+                "structuredContent": { "error": { "reason": named } },
+                "isError": true,
+            }),
+            "{name}: {answer}"
+        );
+    }
+    // The runtime reads no stop of the page in them.
+    let failed = failed_tool_result(&named);
+    assert_eq!(
+        crate::shared_browser_activity::step_stop(false, failed.structured_content.as_ref(), None),
+        None
+    );
 }
 
 #[tokio::test]

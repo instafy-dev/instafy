@@ -84,7 +84,10 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    sent yet. A type step types as a person does, ending on a key press (one
 //    a US keyboard has no key for too), and names the first options of the
 //    list its field opens then, sending nothing: its own list whole once it
-//    changed, never another list on the page nor a row turned off. A page that
+//    changed, never another list on the page nor a row turned off. A field
+//    whose list opened and stayed empty says so after the whole wait, with
+//    the page's requests that failed meanwhile by site and reason. A step
+//    whose snapshotId the browser never gave runs nowhere. A page that
 //    moves the focus, opens a field of its own or replaces the field as text
 //    goes in keeps the whole text, in order. A click on a plain link the page
 //    does not take in time opens the link's address in the tab.
@@ -1077,6 +1080,35 @@ stop.addEventListener("keyup", () => {
   }, 1000);
 });
 </script>`;
+// A planner whose start field sits in a combobox that says its list is open
+// at the first key and asks `source` for the stops that match, drawing them
+// when the answer comes, as a site's own script does. Meanwhile it loads a
+// picture from a site that doesn't answer, and asks its own site for
+// something it drops 0.1 s later. Asked of a site that doesn't answer, its
+// list stays open and empty.
+const ASKED_LIST = (source) => `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<div role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-owns="start-stops">
+<input id="start" name="start" aria-label="Start" aria-autocomplete="list" aria-controls="start-stops" autocomplete="off">
+</div>
+<ul id="start-stops" role="listbox"></ul>
+<p><button>Plan journey</button></p></form>
+<script>
+const box = document.querySelector("[role=combobox]");
+const start = document.getElementById("start");
+const list = document.getElementById("start-stops");
+start.addEventListener("keyup", () => {
+  box.setAttribute("aria-expanded", "true");
+  new Image().src = "{dead}/pixel.gif";
+  const dropped = new AbortController();
+  fetch("/reading/slow-stops", { signal: dropped.signal }).catch(() => {});
+  setTimeout(() => dropped.abort(), 100);
+  fetch("${source}/stops?q=" + encodeURIComponent(start.value))
+    .then((answer) => answer.json())
+    .then((stops) => { list.innerHTML = stops.map((stop) => '<li role="option">' + stop + '</li>').join(""); })
+    .catch(() => {});
+});
+</script>`;
 // A search that says it opens a list and never does, beside a list of its
 // own the page always shows.
 const SORTED_SEARCH = `<h1>Museums</h1>
@@ -1236,6 +1268,10 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/moving-link": page("Museum", MOVING_LINK),
       "site.test /reading/key-only-list": page("Find a stop", KEY_ONLY_LIST),
       "site.test /reading/sorted-search": page("Museums", SORTED_SEARCH),
+      "site.test /reading/asked-list-empty": page("Journey planner", ASKED_LIST("{dead}")),
+      "site.test /reading/asked-list": page("Journey planner", ASKED_LIST("/reading")),
+      "site.test /reading/stops": { type: "application/json; charset=utf-8", body: JSON.stringify(["Central Station", "Central Square"]) },
+      "site.test /reading/slow-stops": { type: "application/json; charset=utf-8", body: "[]", lateOnceMs: 5_000 },
       "site.test /reading/moving-fields": page("Find a place", MOVING_FIELDS),
       "site.test /reading/presentation-cover": page("Timetable", PRESENTATION_COVER),
       "site.test /reading/blur-list": page("Journey planner", SUGGESTION_LIST('field.addEventListener("blur", () => draw([]));')),
@@ -2094,13 +2130,15 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedNewLine = await ok("POST", "/v1/type", { index: control(typedToStop, "To").index, snapshotId: typedToStop.snapshotId, text: "Harbour\n" });
     assert.match(typedNewLine.done, /^Typed 8 characters into "To", and the field holds 7 characters now\./u, typedNewLine.done);
     // A field whose own list shows nothing names nothing, though another
-    // field's list still shows: those are not its suggestions.
+    // field's list still shows: those are not its suggestions. Its list
+    // stayed open and empty, which it says.
     const typedNoStop = await ok("POST", "/v1/type", { index: control(typedNewLine, "From").index, snapshotId: typedNewLine.snapshotId, text: "Zzzz" });
     assert.equal(
       typedNoStop.done,
-      `Typed 4 characters into "From". A page's reading never shows typed text. Nothing was sent yet.`,
+      `Typed 4 characters into "From". A page's reading never shows typed text. Its list opened, but no suggestion came within 3 s. Nothing was sent yet.`,
       "another field's options were named as this field's suggestions",
     );
+    assert.deepEqual(typedNoStop.emptyList, { notLoaded: [] });
     assert.equal(new URL(runPage.url()).pathname, "/reading/key-lists", "typing sent the planner's form");
     assert.deepEqual(requests, [], "typing sent something");
     // A field whose list fills only on a key opens it for a text that ends on
@@ -2127,7 +2165,7 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedUnmatched = await ok("POST", "/v1/type", { index: control(typedLoading, "Stop").index, snapshotId: typedLoading.snapshotId, text: "Zzzz" });
     assert.equal(
       typedUnmatched.done,
-      `Typed 4 characters into "Stop". A page's reading never shows typed text. Nothing was sent yet.`,
+      `Typed 4 characters into "Stop". A page's reading never shows typed text. Its list opened, but no suggestion came within 3 s. Nothing was sent yet.`,
       "a row turned off was named as a suggestion",
     );
     assert.deepEqual(requests, [], "typing sent something");
@@ -2137,6 +2175,66 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedSorted = await ok("POST", "/v1/type", { index: control(reading, "Search museums").index, snapshotId: reading.snapshotId, text: "modern art" });
     assert.match(typedSorted.done, /^Typed 10 characters into "Search museums"\. /u, typedSorted.done);
     assert.doesNotMatch(typedSorted.done, /suggestion/u, "a list the field never opened was named as its suggestions");
+    assert.equal(typedSorted.emptyList, undefined, "a list the field never opened was said to have opened");
+    // A field whose combobox says its list opened at the first key, and whose
+    // stops never come because the site the page asks for them doesn't
+    // answer, is looked at for the whole 3 s, and the step says the list
+    // opened with no suggestion, then what failed meanwhile by its site and
+    // the browser's reason, which its result keeps too: never a picture that
+    // failed, nor what the page dropped itself. A planner's list opened so and
+    // the step said only that nothing was sent (a local test, Nov 23). Typing
+    // still sends nothing.
+    reading = await read("/reading/asked-list-empty");
+    requests.length = 0;
+    started = Date.now();
+    const typedAsked = await ok("POST", "/v1/type", { index: control(reading, "Start").index, snapshotId: reading.snapshotId, text: "Central" });
+    measurements.typeEmptyListMs = Date.now() - started;
+    assert.ok(measurements.typeEmptyListMs >= 3_000, `the step looked for ${measurements.typeEmptyListMs} ms`);
+    assert.equal(
+      typedAsked.done,
+      `Typed 7 characters into "Start". A page's reading never shows typed text. Its list opened, but no suggestion came within 3 s. Meanwhile, these failed: a request to cdn.dead.test (net::ERR_NAME_NOT_RESOLVED). Nothing was sent yet.`,
+    );
+    assert.deepEqual(typedAsked.emptyList, { notLoaded: [{ kind: "fetch", site: "cdn.dead.test", error: "net::ERR_NAME_NOT_RESOLVED" }] });
+    assert.equal(new URL(runPage.url()).pathname, "/reading/asked-list-empty", "typing sent the planner's form");
+    assert.ok(!requests.some((entry) => entry.includes("/reading/journey")), `typing sent something: ${requests.join(", ")}`);
+    // The same planner whose stops come names them as before, and nothing of
+    // what failed meanwhile.
+    reading = await read("/reading/asked-list");
+    const typedFilled = await ok("POST", "/v1/type", { index: control(reading, "Start").index, snapshotId: reading.snapshotId, text: "Central" });
+    const askedStops = typedFilled.interactiveElements.filter((entry) => entry.role === "option");
+    assert.deepEqual(askedStops.map((entry) => entry.label), ["Central Station", "Central Square"]);
+    assert.equal(
+      typedFilled.done,
+      `Typed 7 characters into "Start". A page's reading never shows typed text. 2 suggestions under "Start": ${askedStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
+    );
+    assert.equal(typedFilled.emptyList, undefined);
+    // A step whose snapshotId this browser never gave runs nowhere: one cut
+    // short (a turn mis-copied a reading's 64 characters as 61) is refused in
+    // words that say so and that nothing was done on the page, and one of the
+    // right shape that no reading has is refused as stale, which
+    // runtime-agent, keeping the ids it gave the turn, answers in the same
+    // words with the latest reading's id (shared_browser.rs). Nothing is
+    // typed, clicked, sent or asked.
+    reading = await read("/reading/asked-list");
+    requests.length = 0;
+    const promptsBeforeIds = prompts.length;
+    const NOT_GIVEN = "This snapshotId isn't one this browser gave in this run; use the latest reading's. Nothing was done on the page.";
+    for (const [tool, body] of [
+      ["/v1/type", { index: control(reading, "Start").index, text: "Central" }],
+      ["/v1/click", { index: control(reading, "Plan journey").index }],
+    ]) {
+      const cut = await runTool("POST", tool, { ...body, snapshotId: reading.snapshotId.slice(0, 61) });
+      assert.equal(cut.code, 1, `${tool} with a cut snapshotId ran: ${cut.stdout}`);
+      assert.ok(cut.stderr.includes(NOT_GIVEN), cut.stderr);
+      const madeUp = await runTool("POST", tool, { ...body, snapshotId: "f".repeat(64) });
+      assert.equal(madeUp.code, 1, `${tool} with a made-up snapshotId ran: ${madeUp.stdout}`);
+      assert.match(madeUp.stderr, /Shared Browser snapshot is stale; take a fresh snapshot before acting/u);
+      assert.deepEqual(JSON.parse(madeUp.stdout), { ok: false, pageChanged: true });
+    }
+    assert.equal(await runPage.evaluate(() => document.getElementById("start").value), "", "a step whose snapshotId the browser never gave typed");
+    assert.equal(new URL(runPage.url()).pathname, "/reading/asked-list", "a step whose snapshotId the browser never gave clicked");
+    assert.deepEqual(requests, [], "a step whose snapshotId the browser never gave sent something");
+    assert.equal(prompts.length, promptsBeforeIds, "a step whose snapshotId the browser never gave asked");
     // A page that moves the focus to a suggestion, opens a search field of its
     // own with the words, or replaces the field as text goes in keeps the
     // whole text, in order, as setting it left it: no key goes in before the
@@ -2208,6 +2306,7 @@ export async function runSharedBrowserPageReadingFixture() {
     const typedNamedDay = await ok("POST", "/v1/type", { index: control(reading, "Day").index, snapshotId: reading.snapshotId, text: "20.11.2026" });
     assert.equal(await runPage.evaluate(() => getComputedStyle(document.getElementById("calendar")).display), "block", "the named calendar never opened");
     assert.doesNotMatch(typedNamedDay.done, /suggestion/u, `a named calendar's weeks were named as the field's suggestions: ${typedNamedDay.done}`);
+    assert.equal(typedNamedDay.emptyList, undefined, "an open calendar was said to be a list that opened");
     assert.deepEqual(
       typedNamedDay.interactiveElements.map((entry) => entry.label), ["Day", "Plan journey"],
       "a named calendar's weeks were listed as controls",
@@ -2922,7 +3021,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
-        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
+        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field whose list opened and stayed empty says so after the whole 3 s, with the page's requests that failed meanwhile by site and reason (never a picture, nor a request the page dropped itself), while the same field whose stops came names them as before; a step whose snapshotId the browser never gave, cut short or made up, types, clicks, sends and asks nothing; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
         "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",

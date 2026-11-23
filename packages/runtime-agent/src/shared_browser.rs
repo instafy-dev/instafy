@@ -246,6 +246,81 @@ const PAGE_KEEPS_CHANGING_MESSAGE: &str = concat!(
     "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task. ",
     next_source!()
 );
+/// The most snapshotIds the server keeps of those it gave in a run ([`GivenSnapshots`]): far
+/// more readings than a turn takes.
+const MAX_GIVEN_SNAPSHOTS: usize = 512;
+/// The controller's words for a step whose snapshotId is neither the page's as it reads now nor
+/// the latest reading's (`targetLocator` and `request-human-input` in
+/// `assets/shared-browser-cli.js`), which it counts as the page changing under the step: it can't
+/// tell such an id from an earlier reading's ([`SharedBrowserMcpServer::with_given_snapshots`]).
+const STALE_SNAPSHOT_WORDS: [&str; 2] = [
+    "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+    "The page changed; take a fresh snapshot before requesting human input",
+];
+
+/// What a step answers whose snapshotId this browser didn't give in the run: one that is no
+/// reading's id at all (missing, or not 64 hex characters: [`SnapshotNotGiven`]), or one it never
+/// gave while it gave others ([`GivenSnapshots`]). The step didn't run and nothing was done on the
+/// page, and the answer names the latest reading's id to use. A turn mis-copied a reading's id
+/// twice, was told only that the step "requires one valid index and its fresh snapshotId", and
+/// wrote that the planner did not accept its step (a local test, Nov 23).
+fn snapshot_not_given_words(latest: Option<&str>) -> String {
+    match latest {
+        Some(latest) => format!(
+            "This snapshotId isn't one this browser gave in this run; the latest reading's is {latest}. Nothing was done on the page."
+        ),
+        None => "This snapshotId isn't one this browser gave in this run, and it has given none yet: take a snapshot first. Nothing was done on the page.".to_string(),
+    }
+}
+
+/// A step's snapshotId that is no reading's id at all: missing, or not 64 hex characters
+/// ([`validate_target`]). The server answers it with [`snapshot_not_given_words`].
+#[derive(Debug)]
+struct SnapshotNotGiven;
+
+impl std::fmt::Display for SnapshotNotGiven {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "This snapshotId isn't one this browser gave in this run; use the latest reading's. Nothing was done on the page.",
+        )
+    }
+}
+
+impl std::error::Error for SnapshotNotGiven {}
+
+/// The snapshotIds the server gave the turn in its run, newest last: the id of each reading a
+/// step answered with. A step can only name one of them, as each id is a fingerprint of the run
+/// and the page (`snapshotFingerprint` in `assets/shared-browser-cli.js`), so a step that names
+/// another (mis-copied, made up, or an earlier run's) didn't run, and the page didn't change
+/// under it.
+#[derive(Default)]
+struct GivenSnapshots(std::collections::VecDeque<String>);
+
+impl GivenSnapshots {
+    /// Keeps the snapshotId a step's answer gave, if any.
+    fn keep(&mut self, payload: &JsonValue) {
+        let Some(id) = payload
+            .get("snapshotId")
+            .and_then(JsonValue::as_str)
+            .filter(|id| valid_snapshot_id(id))
+        else {
+            return;
+        };
+        self.0.retain(|kept| kept != id);
+        if self.0.len() >= MAX_GIVEN_SNAPSHOTS {
+            self.0.pop_front();
+        }
+        self.0.push_back(id.to_string());
+    }
+
+    fn latest(&self) -> Option<&str> {
+        self.0.back().map(String::as_str)
+    }
+
+    fn gave(&self, id: &str) -> bool {
+        self.0.iter().any(|kept| kept == id)
+    }
+}
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -3511,6 +3586,8 @@ struct SharedBrowserMcpServer {
     /// Steps in a row that the page changed under
     /// ([`PAGE_CHANGED_STREAK_LIMIT`]).
     page_changed_streak: Arc<AtomicU32>,
+    /// The snapshotIds this server gave the turn ([`GivenSnapshots`]).
+    given_snapshots: Arc<Mutex<GivenSnapshots>>,
 }
 
 /// Whether a step that answered starts the count of steps the page changed
@@ -3539,7 +3616,67 @@ impl SharedBrowserMcpServer {
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
             changed_after_yes: Arc::new(AtomicU32::new(0)),
             page_changed_streak: Arc::new(AtomicU32::new(0)),
+            given_snapshots: Arc::new(Mutex::new(GivenSnapshots::default())),
         }
+    }
+
+    /// The latest snapshotId this server gave the turn, if any.
+    fn latest_snapshot(&self) -> Option<String> {
+        self.given_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest()
+            .map(str::to_string)
+    }
+
+    /// Keeps the snapshotId a step's answer gave ([`GivenSnapshots`]), and answers a step the
+    /// controller refused for its snapshotId ([`STALE_SNAPSHOT_WORDS`]) with
+    /// [`snapshot_not_given_words`] when this server never gave that id while it gave others: the
+    /// controller can't tell such an id from an earlier reading's, so it counted the step as one
+    /// the page changed under, and two of them ended a page that held still as one that "keeps
+    /// changing". The step didn't run, so it counts as no page change; what the controller said
+    /// of the step stays. With none given yet, the controller's "take a fresh snapshot" stands.
+    fn with_given_snapshots(
+        &self,
+        request: &SharedBrowserRequest,
+        outcome: Result<JsonValue>,
+    ) -> Result<JsonValue> {
+        let mut given = self
+            .given_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let error = match outcome {
+            Ok(payload) => {
+                given.keep(&payload);
+                return Ok(payload);
+            }
+            Err(error) => error,
+        };
+        let named = request
+            .body
+            .as_ref()
+            .and_then(|body| body.get("snapshotId"))
+            .and_then(JsonValue::as_str);
+        let Some(failure) = error.downcast_ref::<ControllerFailure>() else {
+            return Err(error);
+        };
+        let Some(latest) = given.latest() else {
+            return Err(error);
+        };
+        if !STALE_SNAPSHOT_WORDS.contains(&failure.message.as_str())
+            || named.is_none_or(|id| given.gave(id))
+        {
+            return Err(error);
+        }
+        Err(ControllerFailure {
+            message: snapshot_not_given_words(Some(latest)),
+            step: failure.step,
+            approval: failure.approval,
+            refused: failure.refused,
+            changed_after_yes: false,
+            page_changed: false,
+        }
+        .into())
     }
 
     /// Latches `code` unless a code is already latched, and answers with the
@@ -3570,7 +3707,7 @@ impl SharedBrowserMcpServer {
             return Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code));
         }
 
-        let outcome = execute().await;
+        let outcome = self.with_given_snapshots(request, execute().await);
         // Only an unreachable browser continues the streak; any other answer
         // proves the browser and the run's tab were there.
         let unavailable = outcome
@@ -3690,6 +3827,11 @@ impl ServerHandler for SharedBrowserMcpServer {
             // A tool the browser doesn't offer is no step of it.
             Err(error) if !self.tools.iter().any(|offered| offered.name == tool) => {
                 return Err(McpError::invalid_params(error.to_string(), None));
+            }
+            // A snapshotId that is no reading's: the answer names the latest reading's.
+            Err(error) if error.downcast_ref::<SnapshotNotGiven>().is_some() => {
+                let words = snapshot_not_given_words(self.latest_snapshot().as_deref());
+                return Ok(failed_tool_result(&words).into());
             }
             // A step whose arguments the browser refused ran nowhere, and says why as every
             // failed step does ([`failed_tool_result`]): a protocol error reaches a code cell
@@ -4182,18 +4324,23 @@ fn require_only_keys(object: &JsonMap<String, JsonValue>, allowed: &[&str]) -> R
     Ok(())
 }
 
+/// A step's control: one index of a reading, and that reading's snapshotId. An id that is no
+/// reading's at all is one this browser never gave ([`SnapshotNotGiven`]).
 fn validate_target(object: &JsonMap<String, JsonValue>) -> Result<()> {
+    let has_snapshot_id = object
+        .get("snapshotId")
+        .and_then(JsonValue::as_str)
+        .is_some_and(valid_snapshot_id);
+    if !has_snapshot_id {
+        return Err(SnapshotNotGiven.into());
+    }
     let has_index = match object.get("index") {
         Some(value) => value
             .as_u64()
             .is_some_and(|index| index <= MAX_TARGET_INDEX),
         None => false,
     };
-    let has_snapshot_id = object
-        .get("snapshotId")
-        .and_then(JsonValue::as_str)
-        .is_some_and(valid_snapshot_id);
-    if !has_index || !has_snapshot_id {
+    if !has_index {
         bail!("Shared Browser action requires one valid index and its fresh snapshotId");
     }
     Ok(())
