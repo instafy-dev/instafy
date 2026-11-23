@@ -756,6 +756,21 @@ async fn run_case(case: Case) -> Result<()> {
                 .filter(|item| item["type"] == "function_call_output")
                 .count();
             assert_eq!(outputs, 1, "retry input: {retry_input}");
+            // Unbilled: a turn is charged from the first run log that ends its turn
+            // (runtime-controller `extract_turn_usage_from_artifacts`), and that is the first
+            // attempt's, which holds its read. The retry's own run log comes after it.
+            let run_logs: Vec<&Value> = execution
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact["kind"] == "codex/run-log")
+                .collect();
+            assert_eq!(run_logs.len(), 2, "one run log per attempt");
+            assert_eq!(run_logs[0]["metadata"]["attempt"], 1);
+            let charged = run_logs[0]["events"].to_string();
+            assert!(
+                charged.contains("turn.completed") && charged.contains("instafy web read"),
+                "{charged}"
+            );
             // Its words, above the one card, which waits for the person's press.
             assert_eq!(execution.summary, REFUSED_WORDS);
         }
