@@ -857,7 +857,10 @@ mod tests {
             true,
         );
         for handle in &several {
-            assert_eq!(scoped[handle].mode, AgentWriteScopeMode::CoordinationRequired);
+            assert_eq!(
+                scoped[handle].mode,
+                AgentWriteScopeMode::CoordinationRequired
+            );
             assert!(!scoped[handle].takes_turns());
         }
         // A send that may not take turns (a team plan, an evaluation, an

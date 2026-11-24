@@ -2318,8 +2318,7 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
 /// ready on its own login and runs nothing (D46 and D47 alone would let them
 /// run at once), and goes once the earlier one has ended.
 #[tokio::test]
-async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> anyhow::Result<()>
-{
+async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> anyhow::Result<()> {
     with_lane(
         "lane-in-turns-two-logins",
         |_, _| {},
