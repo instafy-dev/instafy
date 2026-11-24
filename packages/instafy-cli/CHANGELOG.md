@@ -1,5 +1,12 @@
 # @instafy/cli
 
+## 0.5.16
+
+### Patch Changes
+
+- f6c7fbc: `instafy bind check` on a comparison now ends with one line for the reply: how many of its values the page shows, in all and per column, in the page's order ("The page shows 1 of 9 values: Location 1 of 3, What reviewers say 0 of 3, Price for 12–14 February 0 of 3."), and with `--json` the same line as `for_the_reply`, its last key. It counts what the page draws: a value with its page, an estimate, or a price a check read; a value with no page, a page read without the value and a dash count as none. On a page from what Octo knows the line says none is checked. The card's command, or the step its card waits for, is still named as the next step, just before that line. A reply had said a comparison page covered location, reviews and prices for three hotels when the page showed one of those nine values.
+- 8758063: `instafy web read`, in an Instafy turn, no longer reads an address past a site's home page that no message, page read or search result gave the turn. It answers `skipped` with `code: "not_given"`, fetches nothing for it (not even robots.txt), remembers no stop, and names the site's home page to read instead, never "Give the person the plain link."; a search address on a site nobody gave names no home page. The turn's record is the folder the runtime names in `INSTAFY_TURN_GIVEN_DIR`, kept the way Instafy's browser keeps its own: fingerprints of each address's site and path, never an address. Each page the reader reads adds its own address, its links and the addresses its text spells out, and `instafy web search` adds its results. Without that folder, as on a person's own computer, nothing is refused, and nor is anything after one of the turn's searches lists none of the pages it found (its record is then marked `anyAddress`). A stop the turn or the workspace already holds for the address or its site answers first, with its own words, and an address a text spells out ends where its sentence's own marks begin, those of Chinese, Japanese and Korean too (`。`, `、`, `（`), and without the asterisks of emphasis around it, so the address a person's message gave in such a sentence is read. A reader asked for a product address no page gave read it, and the turn's reply and card passed it on as the shop's own page. A read without `--find` now returns up to 12,000 characters (it was 4,000; `--find` passages keep 4,000), and a cut read says so on its text line, not only in its JSON: a status page cut at 4,000 characters came back without its end.
+
 ## 0.5.15
 
 ### Patch Changes
