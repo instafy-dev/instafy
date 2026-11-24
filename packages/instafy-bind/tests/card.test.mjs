@@ -509,7 +509,7 @@ test("typed \"checked <date>\" words hold the card: the check names no card comm
     assert.equal(values.status, 1, values.stdout + values.stderr);
     assert.match(values.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
     assert.doesNotMatch(values.stdout, /TYPED/);
-    // the value with no page reads "Not checked", so the page shows one price fewer
+    // the price with no page reads "Unknown", so the page shows one price fewer
     assert.deepEqual(lastTwo(values.stdout), [`next: post its card: (cd sites/options && ${OPEN})`,
       "The page shows 9 of 12 values: Price 1 of 3, Weight 3 of 3, Rating 3 of 3, Warranty 2 of 3."]);
     assert.equal(JSON.parse(s.run(["check", "sites/options", "--expect", name, "--json"]).stdout).next, `post its card: (cd sites/options && ${OPEN})`);

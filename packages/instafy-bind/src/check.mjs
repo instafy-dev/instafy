@@ -1044,8 +1044,8 @@ export function checkValues(dir) {
 
 /** Does the compare starter draw a value in this cell (app.js valueOf and cell, site.trust)? A fact with its page or
  *  an estimate; in the price column a price a check read, unless that check found the store blocked; on a page from
- *  what Octo knows, any value ("<value>, not checked"). A fact without its page reads "Not checked", and a page read
- *  without the value "Not found": neither is a value. */
+ *  what Octo knows, any value ("<value>, not checked"). Neither a fact without its page nor a page read without the
+ *  value draws one. */
 function drawsValue(cell, records, memory) {
   const { fact } = cell;
   if (memory) return hasValue(fact);

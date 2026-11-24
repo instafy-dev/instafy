@@ -986,8 +986,9 @@ fn a_pages_captions_come_from_the_starter_never_typed() {
 /// names such values once and offers Instafy's browser. A reply still opened "The comparison page
 /// covers location, reviewer comments and date-specific prices for all three hotels" over one of
 /// those nine values, and a value only a web search gave read "Weeks; exact duration not stated in
-/// the page read" (local tests, Nov 23): the first line says what the page has as `instafy bind
-/// check`'s last line counts it, and what nobody read is "not checked".
+/// the page read" (local tests, Nov 23): the first line says what the page has, on a comparison
+/// as `instafy bind check`'s last line counts it (only a comparison's check prints that count),
+/// and what nobody read is "not checked".
 #[test]
 fn a_reply_leads_with_what_the_page_has_and_an_unread_value_is_not_checked() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -995,7 +996,7 @@ fn a_reply_leads_with_what_the_page_has_and_an_unread_value_is_not_checked() {
         include_str!("../../assets/instafy/.agents/skills/instafy-interactive-artifacts/SKILL.md");
     let reply = flat(hub.split("## 4. Reply").nth(1).expect("reply section"));
     for needle in [
-        "2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says what the page has, as `instafy bind check`'s last line counts it (\"The page shows 1 of 9 values: …\"), never something it lacks (prices, reviews, a route it doesn't show).",
+        "2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says what the page has, on a comparison as `instafy bind check`'s last line counts it (\"The page shows 1 of 9 values: …\"), never something it lacks (prices, reviews, a route it doesn't show).",
         "Values whose page couldn't be read are named once, as not checked, with an offer to look in Instafy's browser.",
     ] {
         assert!(reply.contains(needle), "{needle}");

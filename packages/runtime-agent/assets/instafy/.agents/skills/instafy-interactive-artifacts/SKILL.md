@@ -93,9 +93,9 @@ own kind of page.
 
 ## 4. Reply
 
-2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says
-what the page has, as `instafy bind check`'s last line counts it ("The page shows 1 of 9 values: …"), never something
-it lacks (prices, reviews, a route it doesn't show). Values whose page couldn't be read are named once, as not
+2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says what
+the page has, on a comparison as `instafy bind check`'s last line counts it ("The page shows 1 of 9 values: …"), never
+something it lacks (prices, reviews, a route it doesn't show). Values whose page couldn't be read are named once, as not
 checked, with an offer to look in Instafy's browser. An `Assumed:` line only for a default you chose that the person
 didn't give (dates, a currency, which models), and none when there is none. A page they want to share says in one line
 who can open it (people in this space) and how to get a link anyone can open (ask for a public link), not as an

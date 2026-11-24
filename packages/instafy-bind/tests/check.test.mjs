@@ -1241,7 +1241,7 @@ test("a comparison's check ends with how many of its values the page shows, for 
 
 // The count is of what the compare starter draws (app.js and site.trust): a value with its page or an estimate, and in
 // the price column a price a check read, unless that check found the store blocked (the seed is drawn then). A value
-// with no page reads "Not checked", a page read without the value "Not found", "—" nothing: none is a value. On a page
+// with no page, a page read without the value and "—" draw none: each of their cells reads "Unknown". On a page
 // from what Octo knows every value is drawn, "<value>, not checked", and the line says none is checked. A sixth column
 // is never drawn, and a page with no columns (ranked, timeline, blank) or no rows has no such line.
 test("the line for the reply counts the values the page draws, as the compare starter draws them", () => {

@@ -4,6 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { shownLine } from "../src/check.mjs";
 
 const SKILLS = new URL("../../runtime-agent/assets/instafy/.agents/skills/", import.meta.url);
 const read = (rel) => fs.readFileSync(new URL(rel, SKILLS), "utf8");
@@ -79,4 +81,16 @@ test("the bound-sites skill teaches Ask Octo as the clicker's own message, never
 test("the bound-sites skill checks the page against every item the request named before replying", () => {
   const bound = flat(BOUND);
   assert.match(bound, /Then `instafy bind check <dir> --expect "<each item asked for>"`: add each item it lists as missing, or name it in the reply\./);
+});
+
+// A comparison's check ends with one line for the reply ("The page shows 1 of 9 values: …"), which its first line
+// follows. Only a comparison's check prints it: told to every page, a ranked list's, a timeline's or a checklist's
+// turn was pointed at a count its check never gives.
+test("the page skill's reply follows the check's count only on a comparison, the one page whose check prints it", () => {
+  const reply = flat(read("instafy-interactive-artifacts/SKILL.md").split("## 4. Reply")[1]);
+  assert.match(reply, /The first line says what the page has, on a comparison as `instafy bind check`'s last line counts it \("The page shows 1 of 9 values: …"\), never something it lacks/);
+  for (const starter of ["compare", "ranked", "timeline", "checklist", "blank"]) {
+    const line = shownLine(fileURLToPath(new URL(`../src/starters/${starter}/`, import.meta.url)));
+    assert.equal(line !== null, starter === "compare", `${starter}: ${line}`);
+  }
 });
