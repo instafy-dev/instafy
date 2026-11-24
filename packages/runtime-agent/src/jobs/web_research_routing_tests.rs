@@ -1726,7 +1726,13 @@ fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_p
 /// is the shape it rules out). "I didn't find" is only for a value looked for. Which sites were tried is not the
 /// skill's to ask for: where a browser turn's words are posted, the replies guide already has them say where they
 /// looked, and in a page's hand-back they reach neither the person nor the build. A run's own web search, and the
-/// missing line for a review still without a page, stay.
+/// missing line for a review still without a page, stay. Then a comparison's first pass wrote reviews in its missing
+/// line with no reviewer's site opened, and its fill-in opened three reviewers' home pages: one read with no review of
+/// the model on it, one whose search a cookie notice covered and one a privacy notice covered; every review cell said
+/// "I didn't find" (local tests, Nov 22). Two reviewers are tried in the same pass before a review goes in the missing
+/// line, a home page with no review of the model is not a look (the site's own search box, a search that stays on its
+/// site, or its reviews section is), so a review is a value not found only once a reviewer's search results or reviews
+/// section was read, and a reviewer a notice covered is "not checked".
 #[test]
 fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_found() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1735,8 +1741,10 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
     let mut at = 0;
     for line in [
         "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.",
-        "- With no search, open up to two reviewers' own sites that way and follow their links. Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
-        "- A review no reviewer's page could be read for (none could be tried, or each one stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
+        "- With no search, try up to two reviewers' own sites that way, in the same pass, before a review goes in the missing line.",
+        "A home page with no review of the model is not a look: search the site with its own box (a search that stays on its site needs no prompt) or open its reviews section, and open the model's review from there.",
+        "Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
+        "- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
     ] {
         let found = comparing[at..]
             .find(line)
@@ -1776,18 +1784,49 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
             json!({ "browserTransport": transport }),
         );
         assert!(
-            prompt.contains("- With no search, open up to two reviewers' own sites that way"),
+            prompt.contains(
+                "- With no search, try up to two reviewers' own sites that way, in the same pass"
+            ),
             "{transport}"
         );
         assert!(
-            prompt.contains("Only once a reviewer's page was read is a review you have no address or link for a value you didn't find"),
+            prompt.contains("Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find"),
             "{transport}"
         );
         assert!(
-            prompt.contains("- A review no reviewer's page could be read for (none could be tried, or each one stopped you)"),
+            prompt.contains("- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you)"),
             "{transport}"
         );
     }
+}
+
+/// A comparison's first pass left a product page's "Show all technical specs" closed, though its reading listed it, and
+/// put the weights in its missing line; a warranty's support articles said where the warranty is and that its terms
+/// differ by country, and each cell said "I didn't find warranty"; and a page put a sibling hotel's line, from that
+/// hotel's own site, under another hotel of the same district (local tests, Nov 22). A toggle the item's page names is
+/// opened in the same pass before a value is missing, what a page read says of a value fills its cell even in part, and
+/// a fact is an item's only from a page that names that item.
+#[test]
+fn a_comparison_opens_a_pages_toggle_keeps_part_of_a_value_and_no_siblings_fact() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let comparing = flat(COMPARING_SKILL);
+    for needle in [
+        "- A value is often behind a tab, toggle or link of the item's own page (specs, a \"Show all specs\" toggle, warranty, support, FAQ): open the one for it, in the same pass, before you call the value not found.",
+        "- A fact is an item's only when its page names that item; a sibling's page (a hotel of the same group or district, a model of the same line) is not its source.",
+        "- What a page read says of a value, even in part, fills its cell in the page's words (\"in the device's settings; the terms differ by country\"), never \"I didn't find\".",
+    ] {
+        assert!(comparing.contains(needle), "{needle}");
+    }
+    // A value read in part comes before what a value nobody found says.
+    let part = comparing
+        .find("- What a page read says of a value, even in part")
+        .unwrap();
+    assert!(part < comparing.find("- It reads `Unknown`, with why.").unwrap());
+    assert!(
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len() <= TOPIC_SKILLS_MAX_BYTES,
+        "{} bytes",
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len()
+    );
 }
 
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no
