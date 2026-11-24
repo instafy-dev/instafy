@@ -3095,8 +3095,8 @@ fn a_refused_planner_field_is_the_persons_and_an_unsent_planner_is_not_run() {
 /// to share and "keep going" ended with no route, and "keep going" opened the planner's address four more times, while
 /// the place's own page said in a closed question which tram and bus go there from the main station, and nobody opened
 /// it (a local test, Nov 20). `instafy-getting-around` says that when a planner's fields never show, or one is the
-/// person's, the place's own getting-there tab or question is opened, a closed one clicked open, before a highlight or
-/// the end, and its lines and stop are given as the place's words, linked, with "the planner wasn't run, so no times";
+/// person's, or no stop could be chosen, the place's own getting-there tab or question is opened, a closed one clicked
+/// open, before a highlight or the end, and its lines are given, linked, with "the planner wasn't run, so no times";
 /// that a planner that showed no fields in the chat isn't opened the same way again but linked, with the start and stop
 /// to type; and that a click's answer saying a field still holds what was typed means none of its suggestions is
 /// chosen, in the browser's own words. A listing, a map snippet and memory still give no route, the planner is still
@@ -3107,7 +3107,8 @@ fn a_planner_that_cant_be_run_gives_the_places_own_lines_and_isnt_opened_again()
     let route = flat(GETTING_AROUND_SKILL);
     let section = "\n## When the planner can't be run\n";
     for line in [
-        "- When a planner's fields never show, or one is the person's, open the place's own getting-there tab or question (click a closed one open) before you highlight a field or end. Give the lines and stop it names as the place's words, with its link and \"the planner wasn't run, so no times\". A listing, a map snippet and memory stay out.",
+        "- When a planner's fields never show, one is the person's, or no stop could be chosen, open the place's own getting-there tab or question (click a closed one open) before you highlight a field or end.",
+        "Say \"the planner wasn't run, so no times\". A listing, a map snippet and memory stay out.",
         "- A planner that showed no fields in this chat isn't opened the same way again (its address, whatever values it carries): give its link and the start and stop to type in it.",
     ] {
         let at = GETTING_AROUND_SKILL
@@ -3143,10 +3144,69 @@ fn a_planner_that_cant_be_run_gives_the_places_own_lines_and_isnt_opened_again()
         );
         assert!(prompt.contains(section), "{transport}");
         assert!(
-            prompt.contains("with its link and \"the planner wasn't run, so no times\""),
+            prompt.contains("Say \"the planner wasn't run, so no times\"."),
             "{transport}"
         );
     }
+}
+
+/// A planner's start field opened its list as the stop was typed, and no suggestion came: the turn then mis-copied
+/// its reading's id, was refused, and wrote that the planner did not accept its step; its spare typed into the same
+/// field again, and so did the page to share's browser part. The lines it gave were a city site's, credited to the
+/// place, unlinked and without a closed stop the page named (a local test, Nov 23). `instafy-getting-around` says a
+/// planner whose list opened with no suggestion isn't typed into the same way again in the message, but opened once
+/// from the operator's own planner page, else linked with the start and stop; that a step that didn't work is said as
+/// the turn's own, never as the planner's refusal; that the lines given without a route are the place's own, else an
+/// official city or tourism page's, each page's words, named by its site and linked, closures too, and never a city
+/// page's lines as the place's; and that a page asked for after a route turn carries its lines and doesn't run the
+/// planner again. The type step's answer the skill reads is the browser's own, and the lines a planner that can't be
+/// run gives still come after its own page and stay out of a listing, a map snippet and memory.
+#[test]
+fn a_planner_whose_list_opened_empty_is_tried_once_from_its_own_page_and_each_line_keeps_its_page()
+{
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let route = flat(GETTING_AROUND_SKILL);
+    for line in [
+        "- A planner whose list opened with no suggestion isn't typed into the same way again in this message: open the operator's own planner page once, from its menu's journey link, else give its link and the start and stop to type in it.",
+        "Say a step that didn't work as your own, never as the planner refusing it.",
+        "Give the place's own lines or, where its page gives none, an official city or tourism page's: every line and stop it names, closures too, as the words of the page they're on, named by its site and linked; a city or tourism page's lines are that page's, never the place's.",
+        "- A page asked for after a route turn carries that turn's lines and their sources, with \"the planner wasn't run\" where it wasn't, and doesn't run the planner again.",
+    ] {
+        assert!(route.contains(line), "{line}");
+    }
+    // Each line under its own section: what to do when the planner can't be run, and what a page built from a
+    // route carries.
+    for (line, section) in [
+        (
+            "- A planner whose list opened with no suggestion",
+            "\n## When the planner can't be run\n",
+        ),
+        (
+            "- A page asked for after a route turn",
+            "\n## A page or reply built from a route\n",
+        ),
+    ] {
+        let at = GETTING_AROUND_SKILL
+            .find(line)
+            .unwrap_or_else(|| panic!("{line}"));
+        let heading = GETTING_AROUND_SKILL[..at]
+            .rfind("\n## ")
+            .unwrap_or_else(|| panic!("{line}"));
+        assert!(
+            GETTING_AROUND_SKILL[heading..].starts_with(section),
+            "{line}"
+        );
+    }
+    // The words it reads are the browser's own: a type step's list that opened and stayed empty, and a step whose
+    // snapshotId the browser never gave, which says nothing was done on the page.
+    let browser = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/shared-browser-cli.js"
+    ));
+    assert!(browser.contains("Its list opened, but no suggestion came within"));
+    assert!(browser.contains("isn't one this browser gave in this run"));
+    assert!(browser.contains("Nothing was done on the page."));
+    assert!(GETTING_AROUND_SKILL.len() <= PROJECT_MEMORY_MAX_FILE_BYTES);
 }
 
 /// A cookie notice is never a step Octo pauses on by itself: the skill's line of the person's steps once named
