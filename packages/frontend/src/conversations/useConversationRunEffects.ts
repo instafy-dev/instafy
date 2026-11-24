@@ -6,7 +6,6 @@ import {
   isQueuedRunStale,
   resolveAwaitingLeaseRunExpiresAt,
 } from "./runLiveness";
-import { waitsForEarlierTurn } from "./messageTurns";
 import type { ConversationState, ConversationsAction } from "./conversationState";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
@@ -87,9 +86,9 @@ export function useConversationRunEffects({
         run.status === "success" ||
         run.status === "failed" ||
         run.status === "canceled" ||
-        // A turn that waits for an earlier agent's turn in its message is
+        // A turn that waits for an earlier agent's turn of its message is
         // not stuck, however long that turn takes (messageTurns).
-        (isQueuedRunStale(run, nowMs) && !waitsForEarlierTurn(run, runs))
+        isQueuedRunStale(run, nowMs, runs)
       ) {
         staleRunIdsToUnlink.add(run.id);
       }

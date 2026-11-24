@@ -1946,26 +1946,43 @@ Each lands on its own and dark, with its tests and the sections of this document
 A person's message can name several of their agents and give each its own part, "@a do x, @b do y": dispatch splits a message that starts with a mention at each agent's mention, and each job gets its part (11.10). Until D53, such a message with write intent, which Studio and the CLI send by default, gave every agent `coordination_required` unless it named disjoint owned paths for each, which no client sends. Codex, own-key and Instafy AI agents then finished without changing a file, and a Claude Code agent among them refused the whole send (`write_scope`, 11.4). So the message worked for no AI.
 
 **In turns (D53).** When a person's own message names two or more agents, may change files (`writeIntent`), and gives none of them a write scope of its own, each agent's turn gets the whole space (`unscoped`, with `inTurns: true` in its write scope), and the turns run one after another, in the order the message names them:
-- Dispatch records on each agent's job after the first the job of the agent named before it, `agent_jobs.after_job_id`, in the transaction that queues them, and stamps the job's run with `takesTurns: {version: 1, afterRunId, afterAgent}` (RC/message_turns.rs). A client's own `takesTurns` is removed.
-- The lease and the idle poll pass over a queued job while the job it waits for is queued or leased. Once that job has ended, however it ended (completed, failed, stopped, canceled), the later turn may run, on whatever runtime and AI its agent uses. Stopping one turn lets the next go, and stopping the chat stops them all.
-- Each turn starts where the one before it left the space: its runtime moves the checkout to main before the turn, after the earlier turn's save.
-- Studio reads the stamp. While the earlier turn's run has not ended, the waiting turn's row reads "Waiting for @a to finish…", and its queued run never goes stale, however long the earlier turn takes.
+- Dispatch records on each agent's job after the first the jobs of every agent named before it, `agent_jobs.after_job_ids`, in the transaction that queues them. It stamps the job's run with those runs and agents, `takesTurns: {version: 1, after: [{runId, agent}, …]}` (RC/message_turns.rs). A client's own `takesTurns` is removed.
+- The lease and the idle poll pass over a queued job while any job it waits for is queued or leased. Once they have all ended, however each ended (completed, failed, expired, canceled), the turn may run, on whatever runtime and AI its agent uses.
+  - Since a turn waits for every earlier one, not just the one before it, stopping a middle turn while it waits never lets the next start beside the first.
+  - Stopping the running turn lets the next go, and stopping the chat stops them all.
+- Each turn starts where the ones before it left the space: its runtime moves the checkout to main before the turn, after the earlier turns' saves.
+- A turn that has not started and still waits keeps only its own person's agent busy, as a waiting Claude Code turn does (11.7). The busy chat's check and the send queue's drain leave out a teammate's such turn, and that person's own later messages to the agent wait behind it.
+- A runtime's stop unpins such a turn without counting it as interrupted. It gets no `requeuedAt`, so the requeue expiry never fails a turn that never had its turn. When its turn comes it runs on any runtime of the space that can lease it, as any unpinned queued turn does.
+- Studio reads the stamp. While an earlier turn's run has not ended, the waiting turn's row reads "Waiting for @a to finish…", naming the latest earlier agent still running. Its queued run never goes stale meanwhile, and its own wait counts from when the last earlier turn ended.
 
-Only a person's own message takes turns: not a team plan, whose workers keep their own scopes, an evaluation, the service role or an agent's job. A message that gives any of its agents a write scope keeps the owned-path rules, and one without write intent still runs every agent at once, read-only.
+Only a person's own message takes turns. These keep their own rules:
+- a team plan, whose workers keep their own scopes;
+- an evaluation, ambient or an automation's;
+- the service role;
+- an agent's job.
+
+A message that gives any of its agents a write scope keeps the owned-path rules, and one without write intent still runs every agent at once, read-only. A browser hand-back that continues an agent's turn as a new job is not one of the message's turns, so it can run beside the next agent's turn. No Claude Code agent takes part in one, since a lane turn has no browser.
 
 **Why one after another.** Two writers at once would mix their saves. A save is its folder's git-status delta, sent without the blob ids the origin could check, so on two runtimes the later save overwrites the earlier one's files, and on one computer two lane turns cannot share the folder (D47). In turns each agent sees the space as the one before it left it, and nothing is overwritten. The cost is time, since the turns never overlap. Running them at once, each in a folder of its own that is merged back afterwards, is the follow-up D47 names.
 
 **Claude Code.** A Claude Code agent's turn in turns has the whole space, which Claude Code can be held to (11.4), so `write_scope` no longer refuses the message. Its turn waits for the earlier turn and then, as any lane turn does, for one of its person's computers (11.7). D46 and D47 still hold: taking turns only adds a wait. The runtime runs an `unscoped` turn as it always has (11.12).
 
-**A Claude Code agent's words.** A part such as "@alpha create notes.txt," opens with the agent's own mention. Claude Code 2.1.325 reads a leading `@name` as another agent to hand the work to. In the first run on two logins, it called its ListAgents tool, which lists its person's own Claude Code sessions on that computer, found no "alpha", and only then did the work, saying so in its reply. So dispatch gives a Claude Code agent its text after the mentions it opens with, and the commas or colons after them, whether the text is the agent's part or a whole message: "create notes.txt,". The admission checks (L3) read those words. The text stays whole when nothing would remain, when what remains would start with `/`, which Claude Code would run as its own command (L3 refuses such text), and when a mention runs into other text, such as "@alpha's". Other AIs keep the mention, since they are told who they are (D42 otherwise holds: nothing is added).
+**A Claude Code agent's words.** A part such as "@alpha create notes.txt," opens with the agent's own mention. Claude Code 2.1.325 reads a leading `@name` as another agent to hand the work to. In the first run on two logins, it called its ListAgents tool, which lists its person's own Claude Code sessions on that computer, found no "alpha", and only then did the work, saying so in its reply. So dispatch gives a Claude Code agent its text after the mentions of the message's own agents it opens with, and the commas or colons after them, whether the text is the agent's part or a whole message: "create notes.txt,". Any other leading `@word`, such as a person's name or a Java annotation (`@Override`), stays, with everything after it. The admission checks (L3) read those words. The text stays whole when nothing would remain, when what remains would start with `/`, which Claude Code would run as its own command (L3 refuses such text), and when the first mention runs into other text, such as "@alpha's". Other AIs keep the mention, since they are told who they are (D42 otherwise holds: nothing is added).
 
 **The first runs** (2026-11-24, Claude Code 2.1.325). They used this change's own controller and runtime-agent, with an isolated database and the runtime's own origin, and no git remote, so nothing was published. Each sent one message to two Claude Code agents of one person, @alpha and @beta, on two logins signed in to two different Claude accounts.
-- In both runs @alpha's turn was leased at once. @beta's waited, queued, with `after_job_id` set to @alpha's job, and was leased 1 s after @alpha's turn ended, on the other login.
+- In both runs @alpha's turn was leased at once. @beta's waited, queued, with its `after_job_id` naming @alpha's job, and was leased 1 s after @alpha's turn ended, on the other login.
 - Each agent got its own part, created its file with the right word, which its runtime applied to the space (`apply/files`), and replied under its own name.
 - The first run ("@alpha create notes.txt containing only the word alpha, @beta create todo.txt …") gave each its part with its mention. @alpha looked for an agent named alpha first, as above, and ran 17 s.
 - The second ("@alpha create one.txt …, @beta create two.txt …"), after the change above, gave each its words alone. @alpha ran 10 s and @beta 6 s, neither looked for another agent, and the replies said only what they had done.
 
-**This change.** It lands on its own, with its tests: the bare `after_job_id` column (its own migration, which holds `ACCESS EXCLUSIVE` on `agent_jobs` alone), the write-scope plan, dispatch's records, the lease's and the idle poll's clause, and Studio's line and liveness.
+**This change.** It lands on its own, with its tests:
+- the bare `after_job_ids` column, in its own migration, which holds `ACCESS EXCLUSIVE` on `agent_jobs` alone;
+- the write-scope plan;
+- dispatch's records and a Claude Code agent's words;
+- the lease's, the idle poll's, the busy checks' and the runtime stop's clauses;
+- Studio's line and liveness.
+
+The first runs used its first cut, whose `after_job_id` named only the job before. A review then found that a middle turn stopped while it waited let the next start beside the first, and the column became the list.
 
 ---
 

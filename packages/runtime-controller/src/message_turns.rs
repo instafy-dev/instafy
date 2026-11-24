@@ -2,17 +2,20 @@
 //! another, in the order the message names them (docs/Local-Engine-Turns.md
 //! 11.22, D53). Each agent's turn may change any file of the space
 //! (`unscoped`, `agent_write_scopes`), whatever AI the agent uses, and waits,
-//! queued, until the turn of the agent named before it has ended, however it
-//! ended. So no two of them change the space at once, and each starts from
-//! the space as the one before it left it.
+//! queued, until the turns of every agent named before it have ended, however
+//! they ended. So no two of them change the space at once, and each starts
+//! from the space as the ones before it left it.
 //!
 //! - Dispatch decides it with the write scopes
 //!   (`agent_write_scopes::build_agent_write_scope_plan`), records on each
-//!   later job the job it waits for ([`wait_for`], `agent_jobs.after_job_id`),
-//!   and stamps each later run with the run and the agent it waits for
-//!   ([`stamp_run`]), which Studio words.
-//! - The lease and the idle poll pass over a queued job while the job it
-//!   waits for is queued or leased ([`waits_for_an_earlier_turn`]).
+//!   later job the jobs it waits for ([`wait_for`], `agent_jobs.after_job_ids`):
+//!   every earlier one, so stopping a middle turn while it waits never lets
+//!   the next start beside the first. It stamps each later run with the runs
+//!   and the agents before it ([`stamp_run`]), which Studio words.
+//! - The lease and the idle poll pass over a queued job while any job it
+//!   waits for is queued or leased ([`waits_for_an_earlier_turn`]). So do the
+//!   busy checks for a teammate's turn, and a runtime's stop, which never
+//!   counts such a turn as interrupted.
 
 use axum::http::StatusCode;
 use axum::Json;
@@ -22,22 +25,22 @@ use uuid::Uuid;
 
 use crate::{internal_error, ApiError};
 
-/// The key, on a run's metadata, of the run and the agent whose turn it
+/// The key, on a run's metadata, of the runs and the agents whose turns it
 /// waits for. Only dispatch writes it ([`strip_client_marks`]).
 pub(crate) const RUN_KEY: &str = "takesTurns";
 
-/// The SQL condition that a job, by the alias given, waits for the turn
-/// before it: the job it waits for (`after_job_id`) is still queued or
-/// leased. A job that waits for none, or whose earlier job completed,
-/// failed, was stopped or was canceled, may be leased.
+/// The SQL condition that a job, by the alias or table name given, waits for
+/// an earlier turn: one of the jobs it waits for (`after_job_ids`) is still
+/// queued or leased. A job that waits for none, or whose earlier jobs all
+/// completed, failed, expired or were canceled, may be leased.
 macro_rules! waits_for_an_earlier_turn {
     ($job:literal) => {
         concat!(
             "exists (
                 select 1 from agent_jobs earlier_turn
-                 where earlier_turn.id = ",
+                 where earlier_turn.id = any(",
             $job,
-            ".after_job_id
+            ".after_job_ids)
                    and earlier_turn.status in ('queued', 'leased')
             )"
         )
@@ -45,53 +48,47 @@ macro_rules! waits_for_an_earlier_turn {
 }
 pub(crate) use waits_for_an_earlier_turn;
 
-/// Records that `job_id`'s turn waits for `earlier_job_id`'s, in the
-/// dispatch transaction that queued both, so no lease sees the later job
-/// before it waits.
+/// Records that `job_id`'s turn waits for those of `earlier_job_ids`, in
+/// the dispatch transaction that queued them all, so no lease sees the later
+/// job before it waits.
 pub(crate) async fn wait_for(
     transaction: &Transaction<'_>,
     project_id: &Uuid,
     job_id: &Uuid,
-    earlier_job_id: &Uuid,
+    earlier_job_ids: &[Uuid],
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let updated = transaction
         .execute(
             "update agent_jobs
-                set after_job_id = $3
+                set after_job_ids = $3
               where id = $2
                 and project_id = $1
                 and status = 'queued'",
-            &[project_id, job_id, earlier_job_id],
+            &[project_id, job_id, &earlier_job_ids],
         )
         .await
         .map_err(|error| {
             internal_error(format!(
-                "failed to make job {job_id} wait for job {earlier_job_id}: {error}"
+                "failed to make job {job_id} wait for the turns before it: {error}"
             ))
         })?;
     if updated != 1 {
         return Err(internal_error(format!(
-            "job {job_id} is not queued, so it cannot wait for job {earlier_job_id}"
+            "job {job_id} is not queued, so it cannot wait for the turns before it"
         )));
     }
     Ok(())
 }
 
-/// Stamps a run's metadata with the run and the agent whose turn it waits
-/// for, which Studio words while it waits ("Waiting for @a to finish…").
-pub(crate) fn stamp_run(
-    metadata: &mut JsonMap<String, JsonValue>,
-    earlier_run_id: &Uuid,
-    earlier_handle: &str,
-) {
-    metadata.insert(
-        RUN_KEY.to_string(),
-        json!({
-            "version": 1,
-            "afterRunId": earlier_run_id,
-            "afterAgent": earlier_handle,
-        }),
-    );
+/// Stamps a run's metadata with the runs and the agents whose turns it waits
+/// for, in the order the message names them, which Studio words while it
+/// waits: "Waiting for @a to finish…", by the latest of them still running.
+pub(crate) fn stamp_run(metadata: &mut JsonMap<String, JsonValue>, earlier: &[(Uuid, &str)]) {
+    let after: Vec<JsonValue> = earlier
+        .iter()
+        .map(|(run_id, handle)| json!({ "runId": run_id, "agent": handle }))
+        .collect();
+    metadata.insert(RUN_KEY.to_string(), json!({ "version": 1, "after": after }));
 }
 
 /// Removes a client's own copy of [`RUN_KEY`], so a run says it waits for
@@ -109,21 +106,23 @@ mod tests {
     #[test]
     fn the_lease_clause_reads_the_earlier_job_by_the_alias_given() {
         let clause = waits_for_an_earlier_turn!("aj");
-        assert!(clause.contains("earlier_turn.id = aj.after_job_id"));
+        assert!(clause.contains("earlier_turn.id = any(aj.after_job_ids)"));
         assert!(clause.contains("earlier_turn.status in ('queued', 'leased')"));
     }
 
     #[test]
-    fn a_run_names_the_run_and_agent_it_waits_for() {
-        let earlier = Uuid::nil();
+    fn a_run_names_the_runs_and_agents_it_waits_for() {
+        let (first, second) = (Uuid::nil(), Uuid::max());
         let mut metadata = JsonMap::new();
-        stamp_run(&mut metadata, &earlier, "a");
+        stamp_run(&mut metadata, &[(first, "a"), (second, "b")]);
         assert_eq!(
             metadata.get(RUN_KEY),
             Some(&json!({
                 "version": 1,
-                "afterRunId": earlier,
-                "afterAgent": "a",
+                "after": [
+                    { "runId": first, "agent": "a" },
+                    { "runId": second, "agent": "b" },
+                ],
             }))
         );
     }
@@ -131,7 +130,7 @@ mod tests {
     #[test]
     fn a_client_cannot_say_a_run_waits() {
         let mut metadata = json!({
-            RUN_KEY: {"version": 1, "afterRunId": Uuid::nil(), "afterAgent": "a"},
+            RUN_KEY: {"version": 1, "after": [{"runId": Uuid::nil(), "agent": "a"}]},
             "other": true,
         });
         strip_client_marks(&mut metadata);

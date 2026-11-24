@@ -212,7 +212,7 @@ export function isThreadPreviewRunInFlight(params: {
         !isAwaitingLeaseRunStale(params.pendingRunSubmittedAt[normalizedJobId], nowMs)
       );
     }
-    if (isRunActivelyProgressing(directRun, nowMs)) {
+    if (isRunActivelyProgressing(directRun, nowMs, params.runs)) {
       return true;
     }
   }
@@ -222,7 +222,7 @@ export function isThreadPreviewRunInFlight(params: {
       continue;
     }
     const pendingRun = params.runs?.[pendingRunId];
-    if (pendingRun && isRunActivelyProgressing(pendingRun, nowMs) && activeRunMatchesJob(pendingRun)) {
+    if (pendingRun && isRunActivelyProgressing(pendingRun, nowMs, params.runs) && activeRunMatchesJob(pendingRun)) {
       return true;
     }
     if (
@@ -243,7 +243,7 @@ export function isThreadPreviewRunInFlight(params: {
   return Object.values(params.runs ?? {}).some(
     (run) =>
       run.conversationId === normalizedConversationId &&
-      isRunActivelyProgressing(run, nowMs) &&
+      isRunActivelyProgressing(run, nowMs, params.runs) &&
       activeRunMatchesJob(run),
   );
 }

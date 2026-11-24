@@ -80,7 +80,7 @@ export function deriveAgentConversationActivity({
     if (id ? identity?.id !== id : identity?.handle !== handle) continue;
     const lastAt =
       parseTimestamp(run.updatedAt) || parseTimestamp(run.createdAt);
-    const active = isRunActivelyProgressing(run, now);
+    const active = isRunActivelyProgressing(run, now, runs);
     const existing = runActivityByConversationId.get(run.conversationId);
     if (existing) {
       existing.active = existing.active || active;

@@ -418,7 +418,7 @@ export function useAgentJobThreadPreviewState({
     // for a build Continue sent again. It goes quiet only as its run does.
     if (handBackPending) {
       const run = pendingHandBackRunId ? runs?.[pendingHandBackRunId] : undefined;
-      return !run || !(isQueuedRunStale(run) || isInProgressRunStale(run));
+      return !run || !(isQueuedRunStale(run, Date.now(), runs) || isInProgressRunStale(run));
     }
     if (!jobId) {
       return false;

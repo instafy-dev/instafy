@@ -641,7 +641,7 @@ The intended memory model is explicit recovery, not global agent memory.
 | Two write-heavy agents have disjoint explicit file scopes | Jobs get `writeScope.mode = owned` and can lease normally. Prompt text alone is insufficient for editable scope. | controller unit/integration tests; 2026-05-26 Studio smoke |
 | Two write-heavy agents touch the same file scope | Jobs get `writeScope.mode = coordination_required`; runtime-agent completes with a coordination-required answer and does not edit files. | controller + runtime-agent unit tests; 2026-05-31 Studio smoke |
 | Read-only multi-agent work | Jobs get `writeScope.mode = read_only` and are unrestricted by editable write scope. | controller unit tests |
-| A person's message names two agents, may write, and gives neither a scope ("@a do x, @b do y") | Each job gets `writeScope.mode = unscoped` with `inTurns: true`; the later job's `after_job_id` names the earlier one, and no runtime leases it until that job has ended, whatever AI each agent uses. | controller write-scope and lane DB tests (`tests_claude_code_lane.rs`) |
+| A person's message names two agents, may write, and gives neither a scope ("@a do x, @b do y") | Each job gets `writeScope.mode = unscoped` with `inTurns: true`; each later job's `after_job_ids` names every earlier one, and no runtime leases it until they have all ended, whatever AI each agent uses. | controller write-scope and lane DB tests (`tests_claude_code_lane.rs`) |
 | Credits run out while jobs are queued | Chat should show only the live out-of-credits blocker and vanish after refill. | Runtime & AI/credits UI tests |
 
 ## Manual Smoke Notes

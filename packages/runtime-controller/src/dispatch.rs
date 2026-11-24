@@ -551,6 +551,7 @@ fn apply_agent_prompt_segment(
     request: &mut DispatchPromptNormalized,
     prompt_segments: &HashMap<String, String>,
     target: &AgentTarget,
+    message_handles: &[String],
 ) {
     if let Some(segment) = prompt_segments
         .get(&target.handle)
@@ -560,41 +561,52 @@ fn apply_agent_prompt_segment(
         request.prompt_text = segment.to_string();
     }
     if target.claude_code {
-        request.prompt_text = claude_code_words(&request.prompt_text).to_string();
+        request.prompt_text = claude_code_words(&request.prompt_text, message_handles).to_string();
     }
 }
 
-/// The words a Claude Code agent's turn gets: its text after the mentions it
-/// opens with, and the commas or colons after them, as in "@claude, fix the
-/// build" (docs/Local-Engine-Turns.md 11.22). Claude Code reads a leading
-/// `@name` as another agent to hand the work to, and looks for one among its
-/// person's own sessions before it starts. The text stays whole when nothing
-/// would remain, when what remains would start with `/`, which Claude Code
-/// would run as its own command, and when a mention runs into other text,
-/// such as "@claude's".
-fn claude_code_words(text: &str) -> &str {
+/// The words a Claude Code agent's turn gets: its text after the mentions of
+/// the message's own agents (`message_handles`) it opens with, and the commas
+/// or colons after them, as in "@claude, fix the build"
+/// (docs/Local-Engine-Turns.md 11.22). Claude Code reads a leading `@name` as
+/// another agent to hand the work to, and looks for one among its person's
+/// own sessions before it starts. Any other leading `@word`, such as a Java
+/// annotation or a person's name, stays, and so does everything after it. The
+/// text stays whole when nothing would remain, when what remains would start
+/// with `/`, which Claude Code would run as its own command, and when the
+/// first mention runs into other text, such as "@claude's".
+fn claude_code_words<'a>(text: &'a str, message_handles: &[String]) -> &'a str {
+    let ours: HashSet<String> = message_handles
+        .iter()
+        .filter_map(|handle| normalize_agent_handle(handle))
+        .collect();
+    let separator = |ch: char| ch.is_whitespace() || ch == ',' || ch == ':';
     let mut rest = text.trim_start();
-    if !rest.starts_with('@') {
-        return text;
-    }
+    let mut cut = false;
     loop {
-        rest = rest.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':');
-        if !rest.starts_with('@') {
+        let candidate = if cut {
+            rest.trim_start_matches(separator)
+        } else {
+            rest
+        };
+        let Some((handle, end)) = candidate
+            .starts_with('@')
+            .then(|| parse_agent_mention_at(candidate, 0))
+            .flatten()
+        else {
+            rest = candidate;
+            break;
+        };
+        let after = candidate.get(end..).unwrap_or_default();
+        if !ours.contains(&handle) || !(after.is_empty() || after.starts_with(separator)) {
+            rest = candidate;
             break;
         }
-        let Some((_handle, end)) = parse_agent_mention_at(rest, 0) else {
-            return text;
-        };
-        let after = rest.get(end..).unwrap_or_default();
-        if !(after.is_empty()
-            || after.starts_with(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':'))
-        {
-            return text;
-        }
         rest = after;
+        cut = true;
     }
     let rest = rest.trim();
-    if rest.is_empty() || rest.starts_with('/') {
+    if !cut || rest.is_empty() || rest.starts_with('/') {
         text
     } else {
         rest
@@ -1667,18 +1679,28 @@ pub(crate) async fn process_dispatch_prompt_timed(
         // A teammate's local-engine turn that still waits for their own
         // computer, possibly for days, keeps nobody else's agent busy: its
         // handle names their agent, not this person's
-        // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7).
+        // (crate::claude_code_lane, docs/Local-Engine-Turns.md 11.7). Nor does
+        // a teammate's turn that has not started and still waits for an
+        // earlier agent's turn of its message (crate::message_turns, 11.22),
+        // which may itself wait for their computer.
         let rows = transaction
             .query(
-                "select payload from agent_jobs
+                concat!(
+                    "select payload from agent_jobs
                  where conversation_id = $1
                    and status in ('queued','leased')
                    and not (
-                       engine is not null
-                       and status = 'queued'
+                       status = 'queued'
                        and lease_attempts = 0
                        and (payload ->> 'user_id') is distinct from $2
-                   )",
+                       and (
+                           engine is not null
+                           or ",
+                    crate::message_turns::waits_for_an_earlier_turn!("agent_jobs"),
+                    "
+                       )
+                   )"
+                ),
                 &[
                     &conversation.id,
                     &context.user_id.map(|user_id| user_id.to_string()),
@@ -2078,11 +2100,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // NO_RESPONSE decline protocol as ambient evaluations. Keep this outside
     // the ambient gate: automations are ordinary billed runs and must not gain
     // ambient roster or deferred-billing semantics.
-    if should_mark_silent_automation_decline(
+    let automation_evaluation = should_mark_silent_automation_decline(
         request.allow_silent_automation_decline,
         request.thread_kind.as_deref(),
         conversation.thread_kind.as_deref(),
-    ) {
+    );
+    if automation_evaluation {
         crate::group_participation::inject_automation_agent_evaluation_metadata(
             &mut request.metadata,
         );
@@ -2125,6 +2148,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
         && !context.is_service_role
         && has_explicit_agent_mentions(&request.metadata)
         && !skill_mode_ambient_evaluation
+        && !automation_evaluation
         && request.delegating_job_id.is_none()
         && request.plan_seed.is_none()
         && request.intent != "multi_agent_plan"
@@ -2171,6 +2195,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     .map(|segment| segment.trim())
                     .filter(|segment| !segment.is_empty())
                     .unwrap_or(request.prompt_text.as_str()),
+                &agent_handles,
             );
             let refused = crate::claude_code_lane::refuses_turn(
                 &state.config,
@@ -2190,6 +2215,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
             );
         }
     }
+    // The agents the message names, whose leading mentions a Claude Code
+    // agent's words leave out (`claude_code_words`).
+    let message_handles = agent_handles.clone();
     let mut agent_targets = resolve_agent_targets(
         &transaction,
         &project.id,
@@ -2238,6 +2266,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                     .map(|segment| segment.trim())
                     .filter(|segment| !segment.is_empty())
                     .unwrap_or(request.prompt_text.as_str()),
+                &message_handles,
             );
             crate::claude_code_lane::check_target(
                 &state.config,
@@ -2384,21 +2413,20 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     insert_prompt_record(&transaction, &project, context, &request, &prompt_id).await?;
 
-    // The run of the agent named before each, while the agents take turns.
-    let mut earlier_turn_run: Option<(Uuid, &str)> = None;
+    // The runs of the agents named before each, while the agents take turns.
+    let mut earlier_turn_runs: Vec<(Uuid, &str)> = Vec::new();
     for (run_id, target) in agent_runs.iter() {
         let mut run_request = request.clone();
-        apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
+        apply_agent_prompt_segment(&mut run_request, &prompt_segments, target, &message_handles);
         inject_agent_target_metadata(&mut run_request.metadata, target);
         if takes_turns {
-            if let Some((earlier_run_id, earlier_handle)) = earlier_turn_run {
+            if !earlier_turn_runs.is_empty() {
                 crate::message_turns::stamp_run(
                     ensure_object(&mut run_request.metadata),
-                    &earlier_run_id,
-                    earlier_handle,
+                    &earlier_turn_runs,
                 );
             }
-            earlier_turn_run = Some((*run_id, target.handle.as_str()));
+            earlier_turn_runs.push((*run_id, target.handle.as_str()));
         }
         if target.claude_code {
             crate::claude_code_lane::stamp(
@@ -3113,14 +3141,19 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
     let mut research_dispatch_parent = None;
-    // The job of the agent named before each, while the agents take turns.
-    let mut earlier_turn_job: Option<Uuid> = None;
+    // The jobs of the agents named before each, while the agents take turns.
+    let mut earlier_turn_jobs: Vec<Uuid> = Vec::new();
     for (run_id, target) in agent_runs.iter() {
         if is_skipped(run_id) {
             continue;
         }
         let mut agent_request = request.clone();
-        apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
+        apply_agent_prompt_segment(
+            &mut agent_request,
+            &prompt_segments,
+            target,
+            &message_handles,
+        );
         inject_agent_target_metadata(&mut agent_request.metadata, target);
         // Only this target's own copy says whether its job runs on its
         // person's own Claude Code.
@@ -3300,19 +3333,19 @@ pub(crate) async fn process_dispatch_prompt_timed(
         )
         .await?;
         if let Some(job_uuid) = job_id {
-            // Each agent's turn after the first waits, queued, until the turn
-            // of the agent named before it has ended (crate::message_turns).
+            // Each agent's turn after the first waits, queued, until the turns
+            // of every agent named before it have ended (crate::message_turns).
             if takes_turns {
-                if let Some(earlier_job_id) = earlier_turn_job {
+                if !earlier_turn_jobs.is_empty() {
                     crate::message_turns::wait_for(
                         &transaction,
                         &project.id,
                         &job_uuid,
-                        &earlier_job_id,
+                        &earlier_turn_jobs,
                     )
                     .await?;
                 }
-                earlier_turn_job = Some(job_uuid);
+                earlier_turn_jobs.push(job_uuid);
             }
             research_dispatch_parent.get_or_insert(job_uuid);
             // The run is the frontend's authoritative live-activity record,
@@ -8359,6 +8392,7 @@ mod tests {
 
     #[test]
     fn a_claude_code_turn_gets_its_words_after_the_mentions_they_open_with() {
+        let ours = ["alpha".to_string(), "beta".to_string()];
         for (text, words) in [
             (
                 "@alpha create notes.txt containing only alpha,",
@@ -8366,27 +8400,40 @@ mod tests {
             ),
             ("  @alpha, fix the build", "fix the build"),
             ("@alpha: fix the build", "fix the build"),
+            ("@ALPHA fix the build", "fix the build"),
             ("@alpha @beta, review the docs", "review the docs"),
             ("@alpha,@beta fix it", "fix it"),
+            // Only the message's own agents: a person's name, an annotation
+            // or any other @word stays, with everything after it.
+            (
+                "@alpha @sam asked for dark mode, add it",
+                "@sam asked for dark mode, add it",
+            ),
+            (
+                "@Override annotations are missing in Foo.java",
+                "@Override annotations are missing in Foo.java",
+            ),
+            ("@types/node is out of date", "@types/node is out of date"),
             // Nothing to cut: no leading mention.
             (
                 "Fix the build, then ask @alpha",
                 "Fix the build, then ask @alpha",
             ),
-            // Kept whole: nothing would remain, a command would remain, or a
-            // mention runs into other text.
+            (
+                "me@example.com is my address",
+                "me@example.com is my address",
+            ),
+            // Kept whole: nothing would remain, a command would remain, or the
+            // first mention runs into other text.
             ("@alpha", "@alpha"),
             ("@alpha, @beta", "@alpha, @beta"),
             ("@alpha /review", "@alpha /review"),
             ("@alpha's notes need a fix", "@alpha's notes need a fix"),
             ("@alpha.fix the build", "@alpha.fix the build"),
-            (
-                "me@example.com is my address",
-                "me@example.com is my address",
-            ),
         ] {
-            assert_eq!(claude_code_words(text), words, "{text:?}");
+            assert_eq!(claude_code_words(text, &ours), words, "{text:?}");
         }
+        assert_eq!(claude_code_words("@alpha fix it", &[]), "@alpha fix it");
     }
 
     #[test]
@@ -8440,7 +8487,7 @@ mod tests {
             sign_in: None,
         };
 
-        apply_agent_prompt_segment(&mut normalized, &segments, &target);
+        apply_agent_prompt_segment(&mut normalized, &segments, &target, &handles);
 
         assert_eq!(
             normalized.prompt_text,

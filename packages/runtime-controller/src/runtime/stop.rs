@@ -3077,10 +3077,20 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
                      active_input_ready_turn_id = null,
                      heartbeat_at = null,
                      target_runtime_id = null,
-                     payload = payload || jsonb_build_object(
-                         'requeuedAt', to_jsonb(now()),
-                         'requeuedReason', $3::text
-                     ),
+                     -- A turn that never started and still waits for an
+                     -- earlier agent's turn of its message was not
+                     -- interrupted (`message_turns`): it keeps waiting,
+                     -- unpinned, and the requeue expiry never fails it.
+                     payload = case
+                         when status = 'queued'
+                              and lease_attempts = 0
+                              and {waits_for_an_earlier_turn}
+                         then payload
+                         else payload || jsonb_build_object(
+                             'requeuedAt', to_jsonb(now()),
+                             'requeuedReason', $3::text
+                         )
+                     end,
                      updated_at = now()
                  where project_id = $2
                    and (
@@ -3089,7 +3099,9 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
                    )
                    and {BROWSER_TRANSPORT_SQL} not in ('desktop-personal', 'shared')
                    and engine is null
-                 returning id"
+                 returning id",
+                waits_for_an_earlier_turn =
+                    crate::message_turns::waits_for_an_earlier_turn!("agent_jobs"),
             ),
             &[&runtime.id, &runtime.project_id, &requeue_reason],
         )

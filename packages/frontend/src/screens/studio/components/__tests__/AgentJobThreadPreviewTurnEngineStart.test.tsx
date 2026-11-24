@@ -247,7 +247,7 @@ describe("a turn row before its first step", () => {
   // runs their turns one after another, and a later one waits for the agent
   // named before it, whatever AI either uses.
   const EARLIER_RUN = "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
-  const TAKES_TURNS = { takesTurns: { version: 1, afterRunId: EARLIER_RUN, afterAgent: "helper" } };
+  const TAKES_TURNS = { takesTurns: { version: 1, after: [{ runId: EARLIER_RUN, agent: "helper" }] } };
 
   it("waits for the agent named before it in its message, whatever its AI", async () => {
     live.runStatus = "queued";

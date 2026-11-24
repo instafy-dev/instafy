@@ -808,15 +808,15 @@ impl Lane {
         Ok(())
     }
 
-    /// `run`'s job, and the job whose turn it waits for
+    /// `run`'s job, and the jobs whose turns it waits for
     /// (crate::message_turns, docs/Local-Engine-Turns.md 11.22).
-    async fn turn_of(&self, run: Uuid) -> anyhow::Result<(Uuid, Option<Uuid>)> {
+    async fn turn_of(&self, run: Uuid) -> anyhow::Result<(Uuid, Option<Vec<Uuid>>)> {
         let row = self
             .pool()
             .get()
             .await?
             .query_one(
-                "select id, after_job_id from agent_jobs where run_id = $1",
+                "select id, after_job_ids from agent_jobs where run_id = $1",
                 &[&run],
             )
             .await?;
@@ -2284,7 +2284,7 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
                 let (first_job, first_waits_for) = lane.turn_of(first_run).await?;
                 let (second_job, second_waits_for) = lane.turn_of(second_run).await?;
                 assert_eq!(first_waits_for, None, "{what}");
-                assert_eq!(second_waits_for, Some(first_job), "{what}");
+                assert_eq!(second_waits_for, Some(vec![first_job]), "{what}");
                 let run_metadata = "select metadata from runs where id = $1";
                 let first_stamp = lane.metadata_of(run_metadata, first_run).await?;
                 assert!(
@@ -2294,7 +2294,7 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
                 let second_stamp = lane.metadata_of(run_metadata, second_run).await?;
                 assert_eq!(
                     second_stamp["takesTurns"],
-                    json!({ "version": 1, "afterRunId": first_run, "afterAgent": order[0] }),
+                    json!({ "version": 1, "after": [{ "runId": first_run, "agent": order[0] }] }),
                     "{what}: {second_stamp}"
                 );
 
@@ -2378,7 +2378,7 @@ async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> an
                 .await?;
             let (worker_job, worker_waits_for) = lane.turn_of(run_of_login(second_login)).await?;
             assert_eq!(claude_waits_for, None);
-            assert_eq!(worker_waits_for, Some(claude_job));
+            assert_eq!(worker_waits_for, Some(vec![claude_job]));
 
             lane.leases_nothing(lane.second_desktop, "@worker waits for @claude")
                 .await?;
@@ -2391,6 +2391,186 @@ async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> an
                 leased["claude_code_login_id"],
                 json!(second_login.to_string())
             );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A later turn waits for every earlier turn of its message, not just the
+/// one before it (docs/Local-Engine-Turns.md 11.22): with three agents, a
+/// Stop of the middle one while it waits never lets the third start beside
+/// the first, and the third goes once the first has ended.
+#[tokio::test]
+async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::Result<()> {
+    with_lane(
+        "lane-in-turns-three",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let second_login = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&second_login, &space.owner],
+            )
+            .await?;
+            let worker = lane.claude_code_agent(space.owner, "worker").await?;
+            sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&worker, &second_login],
+            )
+            .await?;
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(Some(space.owner), lane_ready_on(&[second_login])),
+            )
+            .await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    lane.chat().await?,
+                    &json!({
+                        "promptText": "@claude fix the build, @helper review the docs, @worker update the changelog",
+                        "intent": "feature",
+                        "runtimeId": lane.desktop.to_string(),
+                        "metadata": metadata_for(&[CLAUDE, "helper", "worker"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (lane_jobs, others) = lane.jobs_of(&response).await?;
+            assert_eq!((lane_jobs.len(), others.len()), (2, 1), "{response}");
+            let run_on = |login: Uuid| {
+                lane_jobs
+                    .iter()
+                    .find(|job| job.claude_code_login_ids == Some(vec![login]))
+                    .and_then(|job| job.run_id)
+                    .expect("a job on the login")
+            };
+            let (claude_job, claude_waits_for) =
+                lane.turn_of(run_on(first_login_of(space.owner))).await?;
+            let (helper_job, helper_waits_for) =
+                lane.turn_of(others[0].run_id.expect("run")).await?;
+            let (worker_job, worker_waits_for) = lane.turn_of(run_on(second_login)).await?;
+            assert_eq!(claude_waits_for, None);
+            assert_eq!(helper_waits_for, Some(vec![claude_job]));
+            assert_eq!(worker_waits_for, Some(vec![claude_job, helper_job]));
+
+            lane.lease_one(lane.desktop, claude_job).await?;
+            // The person stops @helper's turn while it waits, as a Stop of
+            // that one turn cancels it.
+            sql(
+                lane.pool(),
+                "update agent_jobs set status = 'canceled', completed_at = now() where id = $1",
+                &[&helper_job],
+            )
+            .await?;
+            lane.leases_nothing(lane.second_desktop, "@worker still waits for @claude")
+                .await?;
+            lane.end_job(claude_job).await?;
+            lane.lease_one(lane.second_desktop, worker_job).await?;
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A teammate's turn that has not started and waits for an earlier agent's
+/// turn of its message keeps nobody else's agent busy (11.22), as a waiting
+/// Claude Code turn keeps nobody else's (11.7): the owner's @helper waits
+/// behind their @claude, which waits for their computer, and the member's
+/// send to their own @helper in that chat is admitted at once.
+#[tokio::test]
+async fn a_teammates_turn_that_waits_for_an_earlier_agent_keeps_no_one_elses_agent_busy(
+) -> anyhow::Result<()> {
+    with_lane(
+        "lane-in-turns-busy",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let chat = lane.chat().await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    chat,
+                    &json!({
+                        "promptText": "@claude fix the build, @helper review the docs",
+                        "intent": "feature",
+                        "runtimeId": space.runtime.to_string(),
+                        "metadata": metadata_for(&[CLAUDE, "helper"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (status, response) = lane
+                .send(
+                    &lane.token(space.member),
+                    chat,
+                    &json!({
+                        "promptText": "@helper read the logs",
+                        "intent": "feature",
+                        "runtimeId": lane.member_desktop.to_string(),
+                        "expectedLaneIdle": true,
+                        "metadata": metadata_for(&["helper"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            assert_eq!(
+                sql_one::<i64>(
+                    lane.pool(),
+                    "select count(*) from conversation_send_queue where conversation_id = $1",
+                    &[&chat],
+                )
+                .await?,
+                0,
+                "the teammate's send was queued: {response}"
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A runtime's stop never counts a turn that waits for an earlier agent as
+/// interrupted (11.22): the turn is unpinned and keeps waiting, with no
+/// `requeuedAt`, so the requeue expiry never fails a turn that never had
+/// its turn.
+#[tokio::test]
+async fn a_runtime_stop_leaves_a_waiting_turn_waiting() -> anyhow::Result<()> {
+    with_lane(
+        "lane-in-turns-stop",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    lane.chat().await?,
+                    &json!({
+                        "promptText": "@claude fix the build, @helper review the docs",
+                        "intent": "feature",
+                        "runtimeId": space.runtime.to_string(),
+                        "metadata": metadata_for(&[CLAUDE, "helper"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (_, others) = lane.jobs_of(&response).await?;
+            let (helper_job, waits_for) = lane.turn_of(others[0].run_id.expect("run")).await?;
+            assert!(waits_for.is_some(), "@helper waits for @claude");
+            assert_eq!(
+                lane.job(helper_job).await?.target_runtime_id,
+                Some(space.runtime)
+            );
+            let (requeued, _) = lane.stop_runtime(space.runtime).await?;
+            assert!(requeued.contains(&helper_job), "{requeued:?}");
+            let job = lane.job(helper_job).await?;
+            assert_eq!(job.status, "queued");
+            assert_eq!(job.target_runtime_id, None);
+            assert!(job.payload.get("requeuedAt").is_none(), "{}", job.payload);
             Ok(())
         },
     )
