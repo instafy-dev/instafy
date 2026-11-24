@@ -10,7 +10,7 @@ import { RuntimeStateProvider, useRuntimeState } from "../../../../runtime/Runti
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
 import { ChatRunStopControl } from "../ChatRunStopControl";
-import { resolveChatRunStopTargets } from "../chatRunStopTargets";
+import { chatRunStopEndedIds, resolveChatRunStopTargets } from "../chatRunStopTargets";
 import {
   CHAT_RUN_STOP_HANDOVER_MS, CHAT_RUN_STOP_TIMEOUT_MS, useChatRunStop, type ChatRunStopController, type ChatRunStopOptions,
   type ChatRunStopTarget,
@@ -294,6 +294,140 @@ describe("useChatRunStop", () => {
       await render();
       await act(async () => controller!.requestStop());
       await render({ targets: [] });
+      expect(controller!.visible).toBe(false);
+    });
+  });
+
+  // A local test, Nov 22: after every Stop, Stop and "A reply is in progress.
+  // Stop is available" came back for 0.5 to 1.5 s once the turn's row read
+  // "Stopped". The turn's run record and the chat's notice of the Stop
+  // reached the chat 20 to 90 ms before the Stop's own answer, so the turn
+  // left the targets with nothing yet accepted: Stop read it as a turn that
+  // ended by itself and kept its place for a next part of the message
+  // (CHAT_RUN_STOP_HANDOVER_MS, longer while the page's timers ran late).
+  describe("once the turn's row reads Stopped", () => {
+    it("is gone, though the run's record comes before the Stop's answer", async () => {
+      const pending = deferred<ControllerConversationStopResult>(); cancel.mockReturnValue(pending.promise);
+      await render();
+      await act(async () => controller!.requestStop());
+      expect(controller!.phase).toBe("stopping");
+      // The run's record says canceled: the row reads "Stopped".
+      await render({ targets: [], stopped: new Set(["r1"]) });
+      expect(controller!.visible).toBe(false);
+      await act(async () => pending.resolve(accepted("octo-1")));
+      expect(controller!.visible).toBe(false);
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS));
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("is gone when the chat's notice of the Stop comes first, naming the turn's job", async () => {
+      const pending = deferred<ControllerConversationStopResult>(); cancel.mockReturnValue(pending.promise);
+      await render();
+      await act(async () => controller!.requestStop());
+      await render({ targets: [], stopped: new Set(["octo-1"]) });
+      await act(async () => pending.resolve(accepted("octo-1")));
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("is gone after a Stop pressed between two parts, once the part it stopped reads Stopped", async () => {
+      const build: ChatRunStopTarget = { ...octo, jobId: "build-1", runId: "r4" };
+      const pending = deferred<ControllerConversationStopResult>(); cancel.mockReturnValue(pending.promise);
+      await render({ targets: [], between: true });
+      await act(async () => controller!.requestStop());
+      await render({ targets: [build], followOnTargets: [build], between: false });
+      expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["build-1"]);
+      await render({ targets: [], followOnTargets: [], stopped: new Set(["r4", "build-1"]) });
+      expect(controller!.visible).toBe(false);
+      await act(async () => pending.resolve(accepted("build-1")));
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("is gone at once after someone else's Stop, which answers nothing here", async () => {
+      const JOB = "aaaaaaaa-0000-4000-8000-000000000001";
+      const running: RunRecord = {
+        id: "r1", status: "in_progress", projectId: "project", sessionId: null, conversationId: "chat", promptId: null,
+        runType: "prompt", progress: 0, progressStage: null, previewUrl: null, lastMessage: null, createdAt: null, updatedAt: null,
+        metadata: { jobId: JOB, initiatingUserId: "another-person", agent: { handle: "octo" } },
+      };
+      const notice = { id: "n1", role: "assistant", content: "Stopped this run.", timestamp: 2, metadata: {
+        source: "controller", kind: "run_cancellation", runId: "r1",
+        details: { stopRequested: true, actorUserId: "another-person", runIds: ["r1"], jobIds: [JOB] },
+      } } as unknown as ChatMessage;
+      await render({ targets: resolveChatRunStopTargets([running], []) });
+      expect(controller!.visible).toBe(true);
+      // The notice is in, the run's own record not yet: the row reads "Stopped".
+      await render({ targets: resolveChatRunStopTargets([running], [notice]), stopped: chatRunStopEndedIds([running], [notice]) });
+      expect(controller!.visible).toBe(false);
+      // Then the record.
+      const canceled = { ...running, status: "canceled" as const };
+      await render({ targets: resolveChatRunStopTargets([canceled], [notice]), stopped: chatRunStopEndedIds([canceled], [notice]) });
+      expect(controller!.visible).toBe(false);
+    });
+
+    it("offers no Retry for a Stop whose turn reads Stopped, though its answer never came", async () => {
+      cancel.mockReturnValueOnce(new Promise(() => undefined));
+      await render();
+      await act(async () => controller!.requestStop());
+      await render({ targets: [], stopped: new Set(["r1"]) });
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_TIMEOUT_MS));
+      expect(controller!.visible).toBe(false);
+      expect(controller!.error).toBeNull();
+      // The next turn's Stop is a Stop of that turn, not a Retry of the last.
+      const next: ChatRunStopTarget = { ...octo, jobId: "octo-2", runId: "r2" };
+      await render({ targets: [next], stopped: new Set(["r1"]) });
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("idle");
+      cancel.mockResolvedValueOnce(accepted("octo-2"));
+      await act(async () => controller!.requestStop());
+      expect(cancel).toHaveBeenLastCalledWith("chat", ["octo-2"]);
+    });
+
+    it("still stays between two parts of a message, whatever else was stopped", async () => {
+      const earlier = new Set(["r0", "octo-0"]);
+      // A turn that ends by itself: Stop keeps its place for a next part.
+      await render({ stopped: earlier });
+      await render({ targets: [], stopped: earlier });
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("idle");
+      // The next part is on its way: Stop stays as long.
+      await render({ targets: [], between: true, stopped: earlier });
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS * 10));
+      expect(controller!.visible).toBe(true);
+      // A press there stops that part as it starts.
+      const build: ChatRunStopTarget = { ...octo, jobId: "build-1", runId: "r4" };
+      cancel.mockResolvedValueOnce(accepted("build-1"));
+      await act(async () => controller!.requestStop());
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("stopping");
+      await render({ targets: [build], followOnTargets: [build], between: false, stopped: earlier });
+      expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", ["build-1"]);
+    });
+
+    it("still stays through a pause on the person's fields, until a Stop ends the turn that paused", async () => {
+      const JOB = "aaaaaaaa-0000-4000-8000-000000000001";
+      const pausing: RunRecord = {
+        id: "r1", status: "in_progress", projectId: "project", sessionId: null, conversationId: "chat", promptId: null,
+        runType: "prompt", progress: 0, progressStage: null, previewUrl: null, lastMessage: null, createdAt: null, updatedAt: null,
+        metadata: { jobId: JOB, initiatingUserId: "viewer", agent: { handle: "octo" }, browserTransport: "shared" },
+      };
+      const pause = { id: "m1", role: "assistant", content: "Tool call completed: instafy_shared_browser/request_human_input",
+        timestamp: 1, metadata: { runId: "r1", jobId: JOB, type: "mcp_tool_call",
+          details: { tool: "request_human_input", status: "completed" } } } as unknown as ChatMessage;
+      const earlierNotice = { id: "n0", role: "assistant", content: "Stopped this run.", timestamp: 0, metadata: {
+        source: "controller", kind: "run_cancellation", runId: "r0", details: { stopRequested: true, runIds: ["r0"], jobIds: ["octo-0"] },
+      } } as unknown as ChatMessage;
+      const chat = [earlierNotice, pause];
+      await render({ targets: resolveChatRunStopTargets([pausing], chat), stopped: chatRunStopEndedIds([pausing], chat) });
+      await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_HANDOVER_MS * 10));
+      expect(controller!.visible).toBe(true);
+      expect(controller!.targets.map((target) => target.jobId)).toEqual([JOB]);
+      // The person's Stop is answered, and the run's record follows: Stop goes with it.
+      cancel.mockResolvedValueOnce(accepted(JOB));
+      await act(async () => controller!.requestStop());
+      expect(cancel).toHaveBeenCalledExactlyOnceWith("chat", [JOB]);
+      expect(controller!.phase).toBe("requested");
+      const canceled = { ...pausing, status: "canceled" as const };
+      await render({ targets: resolveChatRunStopTargets([canceled], chat), stopped: chatRunStopEndedIds([canceled], chat) });
       expect(controller!.visible).toBe(false);
     });
   });

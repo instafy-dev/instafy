@@ -20,10 +20,14 @@ vi.mock("../../../../workspace/useActiveWorkspaceVersioning", () => ({
 }));
 
 import { markUnsavedWorkSeen, resetUnsavedWorkSeenForTests } from "../../../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests, setUnsavedWorkLiveOrigins } from "../../../../workspace/unsavedWorkStore";
+import {
+  getUnsavedWorkSnapshot,
+  resetUnsavedWorkStoreForTests,
+  setUnsavedWorkLiveOrigins,
+} from "../../../../workspace/unsavedWorkStore";
 import { useUnsavedWorkNotice, type UnsavedWorkNotice } from "../useUnsavedWorkNotice";
 
-type Message = { metadata?: Record<string, unknown> | null };
+type Message = { metadata?: Record<string, unknown> | null; timestamp?: number };
 
 function recovery(ref: string, extra: Record<string, unknown> = {}) {
   return {
@@ -184,6 +188,128 @@ describe("useUnsavedWorkNotice", () => {
     const seen = window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1") ?? "";
     expect(seen).toContain("refs/instafy/recovery/w2/working@");
     expect(seen).not.toContain("refs/instafy/recovery/w1/working@");
+  });
+
+  // A local test, Nov 22: a change stopped before its save was put back by
+  // the chat's next turn, its row read "Undone" and History kept it under
+  // Unsaved work, and then a "Some work wasn't saved" card showed in every
+  // chat of the space.
+  describe("work kept when a change was taken back", () => {
+    const FILE = "sites/visit/index.html";
+    // Kept at 23:27:37 UTC, as its name says.
+    const KEPT = "refs/instafy/recovery/o/20261122T232737Z-undone-1";
+    const KEPT_AT = Date.UTC(2026, 10, 22, 23, 27, 37);
+    const MINUTE = 60_000;
+    const undoLine = (paths: string[], by: Record<string, unknown>, timestamp: number): Message => ({
+      timestamp,
+      metadata: {
+        source: "controller", kind: "change_undone", presentation: { hidden: true },
+        undoneMessageId: "stopped-row", undoneRunId: "stopped-run", undonePaths: paths, ...by,
+      },
+    });
+    // Each line is recorded a moment after its work was kept (54 ms for the
+    // next turn's, in that test).
+    const putBackByNextTurn = undoLine([FILE], { putBackByJobId: "next-turn-job" }, KEPT_AT + 54);
+    const undoneByPerson = undoLine([`./${FILE}`], { actorUserId: "user-1" }, KEPT_AT + 800);
+
+    beforeEach(() => {
+      mocks.fetchRecovery.mockResolvedValue(ok([recovery(KEPT, { kind: "undone", paths: [FILE] })]));
+    });
+
+    it("tells no chat of what Octo's next turn put back, and History keeps it", async () => {
+      // The chat it happened in, then another chat of the space.
+      await render("user-1", [putBackByNextTurn]);
+      expect(notice).toBeNull();
+      await render("user-1", []);
+      expect(notice).toBeNull();
+      expect(getUnsavedWorkSnapshot("project-1", "origin-1").entries.map((entry) => entry.ref)).toEqual([KEPT]);
+      expect(window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1")).toBeNull();
+    });
+
+    // In that test, the person then undid the next change, which was saved,
+    // to the same file (88 s later). Undo of a saved change keeps nothing.
+    it("still tells no chat of it once the person undoes a later change to that file", async () => {
+      const laterUndo = undoLine([FILE], { actorUserId: "user-1" }, KEPT_AT + 88_500);
+      await render("user-1", [putBackByNextTurn, laterUndo]);
+      expect(notice).toBeNull();
+      await render("user-1", [laterUndo]);
+      expect(notice).toBeNull();
+    });
+
+    it("tells of a person's own Undo only in the chat it was made in", async () => {
+      await render("user-1", [undoneByPerson]);
+      expect(notice?.count).toBe(1);
+      await render("user-1", []);
+      expect(notice).toBeNull();
+      // Undos in other chats are not the one that kept it: of other files,
+      // or of the same file minutes before or after. Nor is a line only
+      // claiming to be an Undo's: only the controller writes one.
+      for (const elsewhere of [
+        undoLine(["sites/other/index.html"], { actorUserId: "user-1" }, KEPT_AT + 800),
+        undoLine([FILE], { actorUserId: "user-1" }, KEPT_AT - 5 * MINUTE),
+        undoLine([FILE], { actorUserId: "user-2" }, KEPT_AT + 10 * MINUTE),
+        undoLine([FILE], { actorUserId: "user-2", source: "user" }, KEPT_AT + 800),
+      ]) {
+        await render("user-1", [elsewhere]);
+        expect(notice).toBeNull();
+      }
+      // Back in its own chat, Dismiss retires it.
+      await render("user-1", [undoneByPerson]);
+      expect(notice?.count).toBe(1);
+      await act(async () => notice?.onDismiss());
+      expect(notice).toBeNull();
+    });
+
+    it("tells only of the person's own Undo in a chat that took one file back twice", async () => {
+      // Octo's next turn put back one stopped change; five minutes later the
+      // person undid another stopped change to the same file.
+      mocks.fetchRecovery.mockResolvedValue(ok([
+        recovery(KEPT, { kind: "undone", paths: [FILE] }),
+        recovery("refs/instafy/recovery/o/20261122T233237Z-undone-2", { kind: "undone", paths: [FILE] }),
+      ]));
+      const laterUndo = undoLine([FILE], { actorUserId: "user-1" }, KEPT_AT + 5 * MINUTE + 800);
+      await render("user-1", [putBackByNextTurn, laterUndo]);
+      expect(notice?.count).toBe(1);
+      await act(async () => notice?.onDismiss());
+      const seen = window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1") ?? "";
+      expect(seen).toContain("-undone-2@");
+      expect(seen).not.toContain("-undone-1@");
+    });
+
+    it("ties the work to the line nearest when it was kept, a moment early too", async () => {
+      // The machine that kept it may run a little ahead of the chat's server.
+      const earlyUndo = undoLine([FILE], { actorUserId: "user-1" }, KEPT_AT - 2_000);
+      await render("user-1", [earlyUndo]);
+      expect(notice?.count).toBe(1);
+      // Beside a take-back recorded nearer that moment, the work is the take-back's.
+      await render("user-1", [earlyUndo, undoLine([FILE], { putBackByJobId: "next-turn-job" }, KEPT_AT + 300)]);
+      expect(notice).toBeNull();
+    });
+
+    it("reads when the work was kept from the entry's date too", async () => {
+      mocks.fetchRecovery.mockResolvedValue(ok([
+        recovery("refs/instafy/recovery/o/kept", { kind: "undone", paths: [FILE], date: "2026-11-22T23:27:37+00:00" }),
+      ]));
+      await render("user-1", [undoneByPerson]);
+      expect(notice?.count).toBe(1);
+      await render("user-1", [putBackByNextTurn]);
+      expect(notice).toBeNull();
+    });
+
+    it("tells of other work kept as before, beside a change taken back", async () => {
+      mocks.fetchRecovery.mockResolvedValue(ok([
+        recovery(KEPT, { kind: "undone", paths: [FILE] }),
+        recovery("refs/instafy/recovery/o/20261122T232800Z-conflict-2", { kind: "conflict", paths: ["sites/visit/app.js"] }),
+      ]));
+      await render("user-1", [putBackByNextTurn]);
+      expect(notice?.count).toBe(1);
+      await render("user-1", []);
+      expect(notice?.count).toBe(1);
+      await act(async () => notice?.onDismiss());
+      const seen = window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1") ?? "";
+      expect(seen).toContain("-conflict-2@");
+      expect(seen).not.toContain("-undone-1@");
+    });
   });
 
   it("lists again when a finished turn reports a new recovery ref", async () => {

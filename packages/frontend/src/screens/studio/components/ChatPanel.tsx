@@ -144,7 +144,12 @@ import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import { useChatRunStop } from "./useChatRunStop";
-import { chatRunStopBetweenParts, chatRunStopFollowOnTargets, resolveChatRunStopTargets } from "./chatRunStopTargets";
+import {
+  chatRunStopBetweenParts,
+  chatRunStopEndedIds,
+  chatRunStopFollowOnTargets,
+  resolveChatRunStopTargets,
+} from "./chatRunStopTargets";
 import { runIdsEndedByStop } from "./controllerConversationNotice";
 import { ChatRunStopNoticeProvider } from "./ChatRunStopNotice";
 import { useChatRunStopContinuation } from "./useChatRunStopContinuation";
@@ -6007,11 +6012,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // Cancellation authority comes from controller job state, not a preview's
   // animation, activity timeout, command history, or lingering typing snapshot.
   const stopConversationId = activeConversationEntry?.controllerId ?? null;
+  const stopConversationRuns = useMemo(
+    () => Object.values(runs ?? {}).filter((run) => run.conversationId === stopConversationId),
+    [runs, stopConversationId],
+  );
   const stopTargets = useMemo(() => resolveChatRunStopTargets(
-    Object.values(runs ?? {}).filter((run) => run.conversationId === stopConversationId),
+    stopConversationRuns,
     messages,
     { getAgentDisplayName: (handle) => agentByHandle.get(handle)?.displayName },
-  ), [agentByHandle, messages, runs, stopConversationId]);
+  ), [agentByHandle, messages, stopConversationRuns]);
+  // The chat's turns someone stopped: their rows read "Stopped", from their
+  // run's record or the chat's notice, whichever comes first. None of them
+  // keeps Stop, as a turn or as a part of a message on its way.
+  const stoppedTurns = useMemo(
+    () => chatRunStopEndedIds(stopConversationRuns, messages),
+    [messages, stopConversationRuns],
+  );
   // Who may stop: a writer of the space, in the chat itself. Never in a job
   // thread's tab, which is not the chat.
   const canStopRuns = projectCapabilitiesResolved === true && canWriteProject === true
@@ -6025,6 +6041,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handBackDue: browserHandBack.due,
     newestRow: displayedMessages[displayedMessages.length - 1],
     routedWaitingKeys: routedBrowserWaiting,
+    stopped: stoppedTurns,
   });
   const stopFollowOnTargets = useMemo(() => chatRunStopFollowOnTargets(stopTargets, messages), [messages, stopTargets]);
   const runStop = useChatRunStop({
@@ -6032,6 +6049,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     targets: stopTargets,
     between: stopBetweenParts,
     followOnTargets: stopFollowOnTargets,
+    stopped: stoppedTurns,
     canStop: canStopRuns,
     viewerUserId: currentUserId,
     // Stop is in the composer, which every view of the chat keeps (Chat, its

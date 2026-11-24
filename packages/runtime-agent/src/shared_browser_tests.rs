@@ -3812,7 +3812,12 @@ async fn a_failed_step_or_the_end_of_the_run_reaches_the_model_in_its_own_words(
             "Instafy's browser closed or stopped responding",
         ),
     ] {
-        let view = model_view(terminal_consent_call_result_with_step(code, Some("click"))).await;
+        let view = model_view(terminal_consent_call_result_with_step(
+            code,
+            Some("click"),
+            false,
+        ))
+        .await;
         assert!(view.cell.contains(words), "{code}: {}", view.cell);
         assert!(view.direct.contains(words), "{code}: {}", view.direct);
         let direct: JsonValue = serde_json::from_str(&view.direct).expect("structured content");
@@ -3855,7 +3860,7 @@ async fn the_call_that_ends_the_run_names_its_step_in_its_answer() {
     ));
     let step = server.terminal_step.lock().await.take();
     assert_eq!(step, Some("search"));
-    let answer = terminal_consent_call_result_with_step("approval_denied", step);
+    let answer = terminal_consent_call_result_with_step("approval_denied", step, false);
     let structured = answer.structured_content.expect("structured");
     assert_eq!(structured["activity"], json!({"step": "search"}));
     assert_eq!(structured["terminalConsent"]["code"], "approval_denied");
@@ -5358,7 +5363,7 @@ async fn a_second_yes_left_unused_by_a_changing_page_ends_the_run() {
     ));
     let step = server.terminal_step.lock().await.take();
     assert_eq!(step, Some("submit"));
-    let answer = terminal_consent_call_result_with_step("approval_stale", step);
+    let answer = terminal_consent_call_result_with_step("approval_stale", step, false);
     let structured = answer.structured_content.expect("structured");
     assert_eq!(structured["terminalConsent"]["code"], "approval_stale");
     assert_eq!(structured["activity"], json!({"step": "submit"}));
@@ -6707,7 +6712,7 @@ async fn terminal_consent_failure_latches_mutations_and_keeps_status_redacted() 
     ));
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
 
-    let tool_result = terminal_consent_call_result("approval_denied");
+    let tool_result = terminal_consent_call_result("approval_denied", false);
     assert_eq!(tool_result.is_error, Some(true));
     assert_eq!(
         tool_result
@@ -6941,7 +6946,7 @@ async fn human_input_latch_blocks_every_later_observation_or_action() {
             "human_input_required"
         ))
     ));
-    let result = terminal_consent_call_result("human_input_required");
+    let result = terminal_consent_call_result("human_input_required", false);
     assert_ne!(result.is_error, Some(true));
     assert_eq!(
         result.structured_content.unwrap()["terminalConsent"]["retryable"],
@@ -6987,7 +6992,7 @@ async fn a_cookie_notice_pause_ends_the_run_like_a_sign_in_pause() {
             "cookie_notice_required"
         ))
     ));
-    let result = terminal_consent_call_result("cookie_notice_required");
+    let result = terminal_consent_call_result("cookie_notice_required", false);
     assert_ne!(result.is_error, Some(true));
     let structured = result.structured_content.unwrap();
     assert_eq!(
@@ -7099,7 +7104,7 @@ async fn a_run_stops_after_two_calls_in_a_row_find_the_browser_unavailable() {
         "browser_unavailable"
     );
 
-    let result = terminal_consent_call_result("browser_unavailable");
+    let result = terminal_consent_call_result("browser_unavailable", false);
     assert_eq!(result.is_error, Some(true));
     let text = format!("{:?}", result.content);
     assert!(text.contains("End this turn now"), "{text}");
@@ -8180,7 +8185,7 @@ async fn the_runtime_reads_each_steps_signals_from_its_result() {
         "approval_denied",
         BROWSER_UNAVAILABLE_CODE,
     ] {
-        let result = terminal_consent_call_result_with_step(code, Some("click"));
+        let result = terminal_consent_call_result_with_step(code, Some("click"), false);
         let words = result.content[0].as_text().expect("text").text.clone();
         let projected = adapter.collect(&end("click", read(result).await));
         assert_eq!(projected[0]["item"]["terminalConsent"]["code"], code);
@@ -10561,7 +10566,7 @@ fn a_site_prompt_and_its_step_prompt_share_one_deadline() {
 
 #[test]
 fn an_unanswered_prompt_ends_the_turn_without_reading_as_a_denial() {
-    let unanswered = terminal_consent_call_result("approval_timeout");
+    let unanswered = terminal_consent_call_result("approval_timeout", false);
     assert_ne!(unanswered.is_error, Some(true));
     let text = serde_json::to_string(&unanswered.content).expect("content JSON");
     assert!(text.contains("has not answered"), "{text}");
@@ -10581,7 +10586,7 @@ fn an_unanswered_prompt_ends_the_turn_without_reading_as_a_denial() {
         })
     );
 
-    let denied = terminal_consent_call_result("approval_denied");
+    let denied = terminal_consent_call_result("approval_denied", false);
     assert_eq!(denied.is_error, Some(true));
     assert_eq!(
         denied.structured_content.expect("terminal consent signal")["terminalConsent"]["code"],
@@ -15147,45 +15152,68 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     // consent is blocked or to start a fresh run. Every later call says the
     // browser is done for the turn: the person never saw those steps, and a
     // turn told only "Don't try it another way" carried on calling the browser.
-    let server = SharedBrowserMcpServer::new();
-    let latch = server.clone();
-    let mut wire = McpWire::connect(server).await;
-    *latch.terminal_consent_failure.lock().await = Some("approval_denied");
-    *latch.terminal_step.lock().await = Some("search");
-    for (text, activity) in [
+    // A turn whose reply is the person's answer says once that nothing was
+    // sent and asks what to try instead, as Instafy adds no line of its own
+    // under it; one whose findings go back to the building turn says neither,
+    // as that build's reply ends in Instafy's line. Every later call of the
+    // run asks the same: a step run from code may print only a later call's
+    // answer, so the call the person said no to may be the one it never read.
+    for (hands_back, first, later) in [
         (
+            false,
+            "The person said no, so this step didn't happen. Don't try it another way. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.",
+            "The person said no to an earlier step, so the browser is done for this turn. End this turn now. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.",
+        ),
+        (
+            true,
             "The person said no, so this step didn't happen. Don't try it another way. Instafy tells them so and asks what to try instead: your reply says neither.",
-            Some(json!({ "step": "search" })),
-        ),
-        (
             "The person said no to an earlier step, so the browser is done for this turn. End this turn now.",
-            None,
-        ),
-        (
-            "The person said no to an earlier step, so the browser is done for this turn. End this turn now.",
-            None,
         ),
     ] {
-        let blocked = wire.call("snapshot", json!({})).await;
-        let mut answered = signal("approval_denied");
-        if activity.is_none() {
-            answered[ENDED_EARLIER_KEY] = json!(true);
+        let server = SharedBrowserMcpServer::new().handing_back(hands_back);
+        let latch = server.clone();
+        let mut wire = McpWire::connect(server).await;
+        *latch.terminal_consent_failure.lock().await = Some("approval_denied");
+        *latch.terminal_step.lock().await = Some("search");
+        for (text, activity) in [
+            (first, Some(json!({ "step": "search" }))),
+            (later, None),
+            (later, None),
+        ] {
+            let blocked = wire.call("snapshot", json!({})).await;
+            let mut answered = signal("approval_denied");
+            if activity.is_none() {
+                answered[ENDED_EARLIER_KEY] = json!(true);
+            }
+            let mut structured = json!({
+                "terminalConsent": answered,
+                "message": text,
+            });
+            if let Some(activity) = activity {
+                structured["activity"] = activity;
+            }
+            assert_eq!(
+                blocked["result"],
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": structured,
+                    "isError": true,
+                }),
+                "hands back: {hands_back}: {blocked}"
+            );
         }
-        let mut structured = json!({
-            "terminalConsent": answered,
-            "message": text,
-        });
-        if let Some(activity) = activity {
-            structured["activity"] = activity;
-        }
+    }
+    // Only a no's words depend on it.
+    for code in [
+        "approval_timeout",
+        "approval_stale",
+        "human_input_required",
+        BROWSER_UNAVAILABLE_CODE,
+    ] {
         assert_eq!(
-            blocked["result"],
-            json!({
-                "content": [{ "type": "text", "text": text }],
-                "structuredContent": structured,
-                "isError": true,
-            }),
-            "{blocked}"
+            format!("{:?}", terminal_consent_call_result(code, true)),
+            format!("{:?}", terminal_consent_call_result(code, false)),
+            "{code}"
         );
     }
 }

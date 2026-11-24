@@ -177,8 +177,8 @@ function jobIdOf(message: ChatMessage): string | null {
 /**
  * A browser step whose result ended its run on the approval lane
  * (`terminalConsent` blocked: a step the person said no to or left, or a
- * page that waits for their input). The runtime then replaces the turn's
- * reply with its own sentence.
+ * page that waits for their input). The runtime then settles the turn's
+ * reply, with its own sentence or the turn's words that say it.
  */
 function endsTheRunOnItsApprovalLane(message: ChatMessage): boolean {
   if (message.role !== "assistant" || messageType(message) !== "mcp_tool_call") {
@@ -796,9 +796,10 @@ export function useAgentJobThreadPreviewState({
     workspaceStarting,
   ]);
   // A browser step that ended the run on its approval lane (the person said
-  // no, or left it, or the page asked for their input): the runtime answers
-  // with its own sentence ("You said no, so that step didn't happen…"), so
-  // what the model drafts until then is never the reply.
+  // no, or left it, or the page asked for their input): the runtime settles
+  // the reply, with its own sentence ("Your OK didn't come in time…") or the
+  // turn's own words where they say it (after a no), so what the model drafts
+  // until then is never shown.
   const replyIsTheRuntimes = useMemo(() => threadMessages.some(endsTheRunOnItsApprovalLane), [threadMessages]);
 
   useEffect(() => {

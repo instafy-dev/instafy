@@ -38,7 +38,7 @@ export const CHANGE_UNDONE_KIND = "change_undone";
  * whatever it claims, is null.
  */
 export function readChangeUndone(
-  message: ChatMessage,
+  message: Pick<ChatMessage, "metadata">,
 ): { messageId: string; runId: string | null; paths: readonly string[] } | null {
   const metadata = message.metadata;
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;

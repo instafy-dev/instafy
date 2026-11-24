@@ -88,8 +88,8 @@ use crate::shared_browser::{
     APPROVAL_DIR_ENV as SHARED_BROWSER_APPROVAL_DIR_ENV,
     APPROVAL_TIMEOUT_MS_ENV as SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
     BROWSER_SESSION_ENV as SHARED_BROWSER_SESSION_ENV, CDP_PORT_ENV as SHARED_BROWSER_CDP_PORT_ENV,
-    CDP_URL_ENV as SHARED_BROWSER_CDP_URL_ENV, MCP_COMMAND as SHARED_BROWSER_MCP_COMMAND,
-    PAGE_ID_ENV as SHARED_BROWSER_PAGE_ID_ENV,
+    CDP_URL_ENV as SHARED_BROWSER_CDP_URL_ENV, HANDS_BACK_ENV as SHARED_BROWSER_HANDS_BACK_ENV,
+    MCP_COMMAND as SHARED_BROWSER_MCP_COMMAND, PAGE_ID_ENV as SHARED_BROWSER_PAGE_ID_ENV,
     PLAYWRIGHT_MODULE_PATH_ENV as SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
     SPACE_LINK_ONLY_FILE_ENV as SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV,
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
@@ -344,6 +344,10 @@ pub(crate) enum CodexFallbackSummaryKind {
     /// (`jobs::refused_browser_card`). Its summary is the model's own, so
     /// `classify_internal_codex_fallback_summary` never returns it.
     RefusedBrowserCard,
+    /// The answer links a page the turn's own reader was refused and posts no `request_browser`
+    /// card (`jobs::no_card_for_a_page_it_couldnt_read`). Its summary is the model's own, so
+    /// `classify_internal_codex_fallback_summary` never returns it.
+    NoCardForAPageItCouldntRead,
 }
 
 pub(crate) fn classify_internal_codex_fallback_summary(
@@ -1167,6 +1171,12 @@ pub struct CodexRunOptions {
     pub personal_browser: bool,
     pub shared_browser: bool,
     pub shared_browser_page_id: Option<String>,
+    /// The Shared Browser turn's findings go back to the building turn
+    /// (`jobs::browser_hand_back::hands_back`): its browser's answer to a step the person said no
+    /// to tells it to say neither that the step didn't happen nor what to try, since the build's
+    /// reply ends in the runtime's line for it; any other turn's reply says so itself
+    /// (`crate::shared_browser::HANDS_BACK_ENV`).
+    pub shared_browser_hands_back: bool,
     /// A run of another chat held the Shared Browser page last: this turn
     /// starts on that chat's page (see
     /// `crate::shared_browser::page_left_by_another_conversation`). The turn
@@ -2317,6 +2327,7 @@ impl CodexClient {
                 options.personal_browser,
                 shared_browser_mode,
                 options.shared_browser_page_id.as_deref(),
+                options.shared_browser_hands_back,
                 local_browser_config.as_ref(),
                 self.workspace_dir(),
             )?;
@@ -4449,17 +4460,22 @@ fn scope_configured_mcp_server_environment(servers: &mut HashMap<String, McpServ
     }
 }
 
-/// The Shared Browser MCP relay's explicit environment: the page, the
-/// runtime's browser settings (a lazy host's CDP port, private Playwright and
-/// Node among them) and the session flag the relay checks.
+/// The Shared Browser MCP relay's explicit environment: the page, whether the
+/// turn's findings go back to the building turn (`hands_back`), the runtime's
+/// browser settings (a lazy host's CDP port, private Playwright and Node among
+/// them) and the session flag the relay checks.
 fn shared_browser_mcp_environment(
     page_id: String,
     workspace: &Path,
+    hands_back: bool,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<HashMap<String, String>> {
     let mut environment =
         HashMap::from([(SHARED_BROWSER_SESSION_ENV.to_string(), "1".to_string())]);
     environment.insert(SHARED_BROWSER_PAGE_ID_ENV.to_string(), page_id);
+    if hands_back {
+        environment.insert(SHARED_BROWSER_HANDS_BACK_ENV.to_string(), "1".to_string());
+    }
     // The space's copy of the web-research skill's link-only list: the
     // controller adds what it lists to the bundled list (it never removes).
     environment.insert(
@@ -4506,6 +4522,7 @@ fn install_browser_mcp_servers(
     personal_enabled: bool,
     shared_enabled: bool,
     shared_page_id: Option<&str>,
+    shared_hands_back: bool,
     local_browser: Option<&crate::local_browser::LocalBrowserConfig>,
     workspace: &Path,
 ) -> Result<Option<crate::mcp_process_groups::McpProcessGroupRegistry>> {
@@ -4569,7 +4586,8 @@ fn install_browser_mcp_servers(
             .parent()
             .context("runtime-agent executable has no trusted parent directory")?
             .to_path_buf();
-        let mut environment = shared_browser_mcp_environment(page_id, workspace, optional_env)?;
+        let mut environment =
+            shared_browser_mcp_environment(page_id, workspace, shared_hands_back, optional_env)?;
         let process_groups = crate::mcp_process_groups::McpProcessGroupRegistry::create()?;
         environment.insert(
             crate::mcp_process_groups::REGISTRY_ENV.to_string(),
@@ -5323,6 +5341,25 @@ fn escape_json_control_chars_in_strings(input: &str) -> Option<String> {
 struct CommandExecutionState {
     command: String,
     aggregated_output: String,
+    /// The whole output so far of a read by the turn's own reader (`instafy web read`), for the
+    /// pages it reported (`jobs::browser_request::pages_the_reader_reported`), however little of
+    /// it the room keeps. None for any other command, and for a read whose output outgrew
+    /// [`MAX_READER_OUTPUT_BYTES`].
+    reader_output: Option<Vec<u8>>,
+}
+
+/// The most of a read's output kept whole for the pages its reader reported
+/// (`CommandExecutionState::reader_output`): a read of its most pages prints far less.
+const MAX_READER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+fn keep_the_whole_read(whole: &mut Option<Vec<u8>>, chunk: &[u8]) {
+    if let Some(kept) = whole.as_mut() {
+        if kept.len() + chunk.len() > MAX_READER_OUTPUT_BYTES {
+            *whole = None;
+        } else {
+            kept.extend_from_slice(chunk);
+        }
+    }
 }
 
 /// Codex's thread token total at the start of each turn, keyed by turn id.
@@ -5952,11 +5989,16 @@ impl CodexEventStreamAdapter {
             })],
             EventMsg::ExecCommandBegin(command) => {
                 let command_text = shell_join(&command.command);
+                let reads_pages = crate::jobs::browser_request::runs_the_reader(
+                    Some(&json!(command.command)),
+                    &command_text,
+                );
                 self.command_states.insert(
                     command.call_id.clone(),
                     CommandExecutionState {
                         command: command_text.clone(),
                         aggregated_output: String::new(),
+                        reader_output: reads_pages.then(Vec::new),
                     },
                 );
                 let mut started = json!({
@@ -5981,6 +6023,7 @@ impl CodexEventStreamAdapter {
                     return Vec::new();
                 };
                 append_capped_command_output(&mut state.aggregated_output, &delta.chunk);
+                keep_the_whole_read(&mut state.reader_output, &delta.chunk);
                 Vec::new()
             }
             EventMsg::ExecCommandEnd(command) => {
@@ -5998,6 +6041,22 @@ impl CodexEventStreamAdapter {
                 // A web search's result list is for Octo only: the room keeps the query and the count.
                 let aggregated_output = web_search_activity_output(&command_text, output_text)
                     .unwrap_or_else(|| compact_command_output_for_event(output_text));
+                // A read by the turn's own reader: the pages it reported, from the whole of its
+                // output, of which the room may keep only the end.
+                let reader_pages = state
+                    .as_ref()
+                    .and_then(|state| state.reader_output.as_deref())
+                    .and_then(|whole| {
+                        if whole.is_empty() {
+                            crate::jobs::browser_request::pages_the_reader_reported(
+                                &command.aggregated_output,
+                            )
+                        } else {
+                            crate::jobs::browser_request::pages_the_reader_reported(
+                                &String::from_utf8_lossy(whole),
+                            )
+                        }
+                    });
                 let status = match command.status {
                     codex_protocol::protocol::ExecCommandStatus::Completed => "completed",
                     codex_protocol::protocol::ExecCommandStatus::Failed => "failed",
@@ -6017,6 +6076,9 @@ impl CodexEventStreamAdapter {
                 });
                 if let Some(folder) = self.command_folder(&command.cwd.to_path_buf()) {
                     completed["item"]["cwd"] = folder;
+                }
+                if let Some(pages) = reader_pages {
+                    completed["item"][crate::jobs::browser_request::READER_PAGES_KEY] = pages;
                 }
                 vec![completed]
             }
@@ -8892,8 +8954,11 @@ mod tests {
                 "- A denial, an approval that ran out of time, or a replayed approval is final for that attempted action. Do not retry it automatically; wait for a new user instruction. A step that ran out of its own time (`stepTimedOut: true`) is not one of these: it answered with the page as it is, so take a snapshot to see what it did and go on from there.\n"
             ));
             assert!(!policy.contains("A denial, timeout,"));
-            // The step that did not go through is said once, by the runtime's own line under
-            // the reply (`jobs::terminal_shared_browser_summary`): told to say it too, a turn
+            // The step that did not go through is said once, and the run's policy never asks
+            // for it: the step's own answer says who says it (`shared_browser`'s
+            // `terminal_consent_call_result`), the runtime's line under the reply
+            // (`jobs::terminal_shared_browser_summary`) after a prompt left to run out, or the
+            // turn's own words after a no in a turn with no build after it. Told by both, a turn
             // ended a denied submit with its own account and next step ("submit the order on
             // the page yourself") right above that line and its "Tell Octo what to try
             // instead." (a local test, Nov 20).
@@ -9506,12 +9571,26 @@ mod tests {
             ("RUNTIME_ACCESS_TOKEN", "runtime-secret"),
         ]);
         let workspace = Path::new("/workspace/space");
-        let environment = shared_browser_mcp_environment("page-1".to_string(), workspace, |key| {
-            lazy_environment.get(key).map(|value| value.to_string())
-        })
-        .expect("relay environment");
+        let lookup = |key: &str| lazy_environment.get(key).map(|value| value.to_string());
+        let environment =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, false, lookup)
+                .expect("relay environment");
         assert_eq!(environment[SHARED_BROWSER_SESSION_ENV], "1");
         assert_eq!(environment[SHARED_BROWSER_PAGE_ID_ENV], "page-1");
+        // Only a turn whose findings go back to the building turn says so to its browser, whose
+        // answer to a step the person said no to then tells it to say neither.
+        assert!(!environment.contains_key(SHARED_BROWSER_HANDS_BACK_ENV));
+        let handing_back =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, true, lookup)
+                .expect("relay environment");
+        assert_eq!(handing_back[SHARED_BROWSER_HANDS_BACK_ENV], "1");
+        // The relay reads it as it is written.
+        assert!(crate::shared_browser::hands_back_in(|key| {
+            handing_back.get(key).cloned()
+        }));
+        assert!(!crate::shared_browser::hands_back_in(|key| {
+            environment.get(key).cloned()
+        }));
         // The controller reads the space's own copy of the link-only list.
         assert_eq!(
             environment[SHARED_BROWSER_SPACE_LINK_ONLY_FILE_ENV],
@@ -9534,7 +9613,8 @@ mod tests {
         assert!(!environment.contains_key("INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON"));
         assert!(!environment.contains_key("RUNTIME_ACCESS_TOKEN"));
 
-        let missing = shared_browser_mcp_environment("page-1".to_string(), workspace, |_| None);
+        let missing =
+            shared_browser_mcp_environment("page-1".to_string(), workspace, false, |_| None);
         assert!(
             missing.is_err(),
             "the trusted Playwright paths are required"
@@ -12742,6 +12822,98 @@ required = true
         });
         assert_eq!(completed.len(), 1);
         completed[0]["item"]["aggregated_output"].clone()
+    }
+
+    /// A read by the turn's own reader carries, beside the end of its output the room keeps, the
+    /// pages its reader reported from the whole of it: a read of several pages that ran long kept
+    /// no word of its first page's stop, so an answer that linked that page ran no retry for its
+    /// card. Any other command's item carries none.
+    #[test]
+    fn a_reads_item_carries_the_pages_its_reader_reported() {
+        let head = "{\n \"ok\": true,\n \"pages\": [\n  {\n   \"requestedUrl\": \"https://shop.example/help/returns\",\n   \"status\": \"stopped\",\n   \"code\": \"robots\"\n  },\n  {\n   \"requestedUrl\": \"https://shop.example/help/contact\",\n   \"status\": \"read\",\n   \"text\": \"";
+        let filler = " ".repeat(9_000);
+        let tail = "\"\n  }\n ]\n}\n";
+        let completed = |script: &str| -> JsonValue {
+            let mut adapter = CodexEventStreamAdapter::default();
+            let cwd = AbsolutePathBuf::from_absolute_path(Path::new("/tmp")).unwrap();
+            let argv = vec![
+                "/bin/bash".to_string(),
+                "-lc".to_string(),
+                script.to_string(),
+            ];
+            adapter.collect(&Event {
+                id: "read_begin".into(),
+                msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                    call_id: "read_call".into(),
+                    process_id: None,
+                    turn_id: "read_turn".into(),
+                    started_at_ms: 0,
+                    command: argv.clone(),
+                    cwd: cwd.clone().into(),
+                    parsed_cmd: Vec::new(),
+                    source: ExecCommandSource::Agent,
+                    interaction_input: None,
+                    plugin_id: None,
+                    script_path: None,
+                }),
+            });
+            for chunk in [head, filler.as_str(), tail] {
+                adapter.collect(&Event {
+                    id: "read_delta".into(),
+                    msg: EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
+                        call_id: "read_call".into(),
+                        stream: ExecOutputStream::Stdout,
+                        chunk: chunk.as_bytes().to_vec(),
+                    }),
+                });
+            }
+            let mut completed = adapter.collect(&Event {
+                id: "read_end".into(),
+                msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                    call_id: "read_call".into(),
+                    process_id: None,
+                    turn_id: "read_turn".into(),
+                    completed_at_ms: 0,
+                    command: argv,
+                    cwd: cwd.into(),
+                    parsed_cmd: Vec::new(),
+                    source: ExecCommandSource::Agent,
+                    interaction_input: None,
+                    aggregated_output: String::new(),
+                    exit_code: 0,
+                    duration: Duration::from_millis(5),
+                    status: ExecCommandStatus::Completed,
+                    plugin_id: None,
+                    script_path: None,
+                }),
+            });
+            assert_eq!(completed.len(), 1);
+            completed.remove(0)
+        };
+        let read = completed(
+            "instafy web read https://shop.example/help/returns https://shop.example/help/contact --json",
+        );
+        let kept = read["item"]["aggregated_output"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            kept.starts_with(COMMAND_OUTPUT_KEPT_TAIL) && !kept.contains("robots"),
+            "{kept}"
+        );
+        assert_eq!(
+            read["item"][crate::jobs::browser_request::READER_PAGES_KEY],
+            json!([
+                {"url": "https://shop.example/help/returns", "status": "stopped", "code": "robots", "went": []},
+                {"url": "https://shop.example/help/contact", "status": "read", "code": "", "went": []},
+            ])
+        );
+        let other = completed("cat /tmp/a-saved-read.json");
+        assert!(
+            other["item"]
+                .get(crate::jobs::browser_request::READER_PAGES_KEY)
+                .is_none(),
+            "{other}"
+        );
     }
 
     #[test]

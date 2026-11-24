@@ -131,7 +131,7 @@ const FINDING_LINES: &str = "End your reply with one finding per page, each one 
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|unreachable|timed-out|covered\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site \
 (never retry such a page another way), at an address with no page, one the browser couldn't reach or no answer in time, or under a cookie notice or dialog the browser couldn't close. \
-A step the person said no to, or didn't answer in time, stopped no page: give it no stop, Instafy says so. \
+A step the person said no to, or didn't answer in time, stopped no page: give it no stop. \
 Report only what the pages showed, never a secret; Instafy adds when and in which browser each page was read. \
 Octo's later turns read only these lines, never your reply's words: write each fact as \"Finding a page\" says.";
 
@@ -2151,25 +2151,34 @@ fn name_the_addresses_the_browser_couldnt_reach(summary: &mut String, tried: &Br
 
 /// What the second pass of a browser turn whose findings go back to the building turn reads
 /// (`jobs::read_the_unread_pages`): only the pages its unread line named, as it wrote them,
-/// and to end as before, its missing line with them ([`MISSING_LINE`]), which names each value
-/// still missing and so replaces the first pass's ([`add_the_second_pass`]). A page it read
-/// already is opened again only for a tab or link the line names on it, such as a product page's
-/// Specs tab ([`UNREAD_LINE`]). Its own unread line starts no third pass.
+/// then one sentence on what it read, and to end as before, its missing line with them
+/// ([`MISSING_LINE`]), which names each value still missing and so replaces the first pass's
+/// ([`add_the_second_pass`]). A page it read already is opened again only for a tab or link the
+/// line names on it, such as a product page's Specs tab ([`UNREAD_LINE`]). Its own unread line
+/// starts no third pass. Its words follow the first pass's in the reply the person reads: asked
+/// only for finding lines, a comparison's second pass read the three product pages its first
+/// pass couldn't, and the person read only the first pass's "I couldn't read the specs or price
+/// pages" (a local test, Nov 23).
 pub(super) fn unread_pages_prompt(pages: &[String]) -> String {
     let named = serde_json::to_string(pages)
         .unwrap_or_default()
         .replace('`', "\\u0060");
     format!(
-        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read, except to open a tab or link your line names on it. Then end your reply as before: one finding line per page you read now, the missing line for each value you still didn't find, and the unread line for any of them you still didn't open."
+        "Your unread line named pages this request still needs: {named}. Read only those now, as your part of this request says, and no page you already read, except to open a tab or link your line names on it. Then start your reply with one sentence on what you read now (\"Then read 3 more pages on <site>.\"), and end it as before: one finding line per page you read now, the missing line for each value you still didn't find, and the unread line for any of them you still didn't open."
     )
 }
 
 /// The second pass's answer added to the turn's: the words of both, first then second, so the
 /// person still reads a first line that said a page stopped the turn, then the finding lines of
-/// both. Each pass's lines are its own: one that wrote none adds the pages its own steps opened
+/// both. A second pass that wrote no words of its own says what it read in the runtime's, after
+/// the first pass's ([`what_the_second_pass_read`]): with the first pass's words alone, the person
+/// read that the product pages couldn't be read, though the second pass had read all three (a
+/// local test, Nov 23). Each pass's lines are its own: one that wrote none adds the pages its own steps opened
 /// (`opened`), by address ([`finding_lines_from_pages`]), as the end of a turn with none does, so
 /// no page it read is lost beside the other pass's lines; one that opened none either adds
-/// nothing. Its unread line is taken out like the first's. Its missing line names what is still
+/// nothing. A first pass's line that a page stopped it goes when the second read that page
+/// ([`stopped_at_a_page_read_since`]): the page was read. Its unread line is taken out like the
+/// first's. Its missing line names what is still
 /// missing after both passes ([`unread_pages_prompt`]), so the first's goes, and stays only when
 /// the second wrote none: kept beside it, a comparison's first pass named ten values missing, its
 /// second pass found most of them in the reviews it read and named the three still missing, and
@@ -2190,9 +2199,26 @@ pub(super) fn add_the_second_pass(summary: &mut String, answer: &str, opened: &[
     };
     let (mut first_words, first_lines) =
         split_findings(summary).unwrap_or_else(|| (summary.trim().to_string(), Vec::new()));
+    // One that wrote no words of its own says what it read in the runtime's, after the first
+    // pass's words and before its missing line when it wrote one. With no words of either pass,
+    // the turn's reply stays without words, as it was.
+    let says_nothing = words_of(&words).is_empty() && !words_of(&first_words).is_empty();
+    let words = match what_the_second_pass_read(&lines).filter(|_| says_nothing) {
+        Some(read) => [read, words]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => words,
+    };
     if words.lines().any(|line| missing_line(line).is_some()) {
         take_missing_names(&mut first_words);
     }
+    let read_now = pages_read_in(&lines);
+    let first_lines: Vec<String> = first_lines
+        .into_iter()
+        .filter(|line| !stopped_at_a_page_read_since(line, &read_now))
+        .collect();
     let words = [first_words, words]
         .into_iter()
         .filter(|words| !words.is_empty())
@@ -2207,6 +2233,81 @@ pub(super) fn add_the_second_pass(summary: &mut String, answer: &str, opened: &[
             .collect::<Vec<_>>()
             .join("\n"),
     );
+}
+
+/// What the runtime says a browser turn's second pass read when it wrote no words of its own
+/// ([`add_the_second_pass`]), as a turn says it ([`SAY_WHAT_YOU_READ`]): "Then read <N> more pages
+/// on <site>.", from its finding lines for the pages it read, each page once, and their sites as
+/// a person names them ([`site_of`]), in the order it read them. None when they name no page it
+/// read.
+fn what_the_second_pass_read(lines: &[String]) -> Option<String> {
+    let mut pages: Vec<String> = Vec::new();
+    let mut sites: Vec<String> = Vec::new();
+    for url in lines
+        .iter()
+        .filter(|line| finding_line(line) == Some(true))
+        .filter_map(|line| {
+            json_object_line(line)?
+                .get("url")?
+                .as_str()
+                .map(str::to_string)
+        })
+    {
+        let page = comparable_address(&url);
+        if pages.contains(&page) {
+            continue;
+        }
+        pages.push(page);
+        if let Some(site) = site_of(&url).filter(|site| !sites.contains(site)) {
+            sites.push(site);
+        }
+    }
+    let count = match pages.len() {
+        0 => return None,
+        1 => "1 more page".to_string(),
+        pages => format!("{pages} more pages"),
+    };
+    Some(match sites.as_slice() {
+        [] => format!("Then read {count}."),
+        [site] => format!("Then read {count} on {site}."),
+        [rest @ .., last] => format!("Then read {count} on {} and {last}.", rest.join(", ")),
+    })
+}
+
+/// The pages that finding lines say were read, as [`site_and_page`] gives them: a full address,
+/// and no stop.
+fn pages_read_in(lines: &[String]) -> Vec<(String, String)> {
+    lines
+        .iter()
+        .filter(|line| finding_line(line) == Some(true))
+        .filter_map(|line| json_object_line(line))
+        .filter_map(
+            |object| match site_and_page(object.get("url")?.as_str()?)? {
+                (Some(site), page) => Some((site, page)),
+                (None, _) => None,
+            },
+        )
+        .collect()
+}
+
+/// Whether a finding line says a page stopped the turn at one of `read`, the pages a later pass
+/// read: the same site and path, and the same query where both give one ([`names_page`]). A
+/// product page the first pass found unreachable, which the second pass then read, stood as
+/// "couldn't be reached" beside what the second read there.
+fn stopped_at_a_page_read_since(line: &str, read: &[(String, String)]) -> bool {
+    let Some(object) = json_object_line(line).filter(|object| stop_of(object).is_some()) else {
+        return false;
+    };
+    let Some((Some(site), page)) = object
+        .get("url")
+        .and_then(JsonValue::as_str)
+        .and_then(site_and_page)
+    else {
+        return false;
+    };
+    read.iter().any(|(read_site, read_page)| {
+        *read_site == site && (names_page(&page, read_page) || names_page(read_page, &page))
+    })
 }
 
 /// The turn's answer when its second pass stopped for the person (a pause for their input, a
@@ -3494,9 +3595,10 @@ mod tests {
         }
         assert!(
             unread_pages_prompt(&["Laptop 12's Specs tab".to_string()]).contains(
-                "Then end your reply as before: one finding line per page you read now, the \
-                 missing line for each value you still didn't find, and the unread line for any \
-                 of them you still didn't open."
+                "Then start your reply with one sentence on what you read now (\"Then read 3 more \
+                 pages on <site>.\"), and end it as before: one finding line per page you read \
+                 now, the missing line for each value you still didn't find, and the unread line \
+                 for any of them you still didn't open."
             )
         );
     }
@@ -6662,11 +6764,36 @@ mod tests {
         }
     }
 
+    /// Who tells the person that a step didn't happen is for that step's own answer to say:
+    /// Instafy, after a prompt left to run out or a no in a part whose build answers after it,
+    /// and the turn itself, once, after a no in any other turn. The finding lines every browser
+    /// turn reads say only that such a step stopped no page: told also that "Instafy says so", a
+    /// turn with no build after it read the opposite of its step's answer after a no.
+    #[test]
+    fn the_finding_lines_leave_who_says_a_step_didnt_happen_to_its_answer() {
+        assert!(FINDING_LINES.contains(
+            "A step the person said no to, or didn't answer in time, stopped no page: give it no stop. "
+        ));
+        for metadata in [
+            json!({ "browserTransport": "shared" }),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            }),
+        ] {
+            let contract =
+                format_browser_findings_contract_section(Some(&metadata)).expect("a browser turn");
+            assert!(!contract.contains("Instafy says so"), "{contract}");
+        }
+    }
+
     /// The second pass's findings join the turn's, after the words of both passes, first then
-    /// second: the person still reads the first's line that a page stopped the turn. Each pass's
-    /// lines are its own: a second pass that wrote none adds the pages its steps opened, by
-    /// address, beside the first's lines, which kept the wrap-up from asking for them. One that
-    /// read nothing adds nothing. Its unread line goes too.
+    /// second: the person still reads the first's line that a page stopped the turn. One that
+    /// wrote no words says what it read in the runtime's. Each pass's lines are its own: a second
+    /// pass that wrote none adds the pages its steps opened, by address, beside the first's
+    /// lines, which kept the wrap-up from asking for them. One that read nothing adds nothing.
+    /// Its unread line goes too.
     #[test]
     fn the_second_pass_adds_its_findings_after_both_passes_words() {
         let home = r#"{"url": "https://maker.example/", "title": "Laptops"}"#;
@@ -6694,7 +6821,7 @@ mod tests {
         assert_eq!(
             summary,
             format!(
-                "The Laptop 12 review didn't answer, so I read 1 page on maker.example.\n\n{home}\n{timed_out}\n{twelve}"
+                "The Laptop 12 review didn't answer, so I read 1 page on maker.example.\n\nThen read 1 more page on maker.example.\n\n{home}\n{timed_out}\n{twelve}"
             )
         );
         // A second pass that read pages and wrote no line: the pages its steps opened.
@@ -6714,6 +6841,149 @@ mod tests {
         let mut summary = first.clone();
         add_the_second_pass(&mut summary, "I couldn't open them.", &[]);
         assert_eq!(summary, first);
+    }
+
+    /// The chat's browser message agrees with both passes. A comparison's first pass read the
+    /// shop's home page, couldn't reach one product's page and said it couldn't read the specs or
+    /// price pages; its second pass read the three product pages its unread line named and wrote
+    /// only its finding lines and its missing line, and the person read only that they couldn't
+    /// be read (a local test, Nov 23). The runtime now says what the second pass read, from its
+    /// lines, after the first pass's words: "Then read 3 more pages on <site>." A second pass
+    /// that says it itself, as it is asked to, keeps its own sentence, and one that read nothing
+    /// adds none.
+    #[test]
+    fn a_second_pass_that_wrote_only_lines_says_what_it_read() {
+        let words = "I read the shop's home page and found links naming the Reader 6, Reader 6 Colour and Reader 7 Colour, but the product page wouldn't load. I couldn't read the specs or price pages, so the comparison still needs them.";
+        let home = r#"{"url":"https://www.shop.example/","title":"Shop","facts":["The eReaders menu names the Reader 6, Reader 6 Colour and Reader 7 Colour."]}"#;
+        let unreachable =
+            r#"{"url":"https://old.shop.example/products/reader-6","stopped":"unreachable"}"#;
+        let first = format!(
+            "{words}\n{home}\n{unreachable}\n{}\n{}",
+            json!({ "missing": ["screen size", "battery life", "weight", "price"] }),
+            json!({ "unread": ["Reader 6's product page", "Reader 6 Colour's product page", "Reader 7 Colour's product page"] }),
+        );
+        let products = [
+            r#"{"url":"https://ereader.shop.example/en/products/reader-6-colour","title":"Reader 6 Colour","facts":["6-inch colour screen","Up to 42 days of battery"]}"#,
+            r#"{"url":"https://ereader.shop.example/en/products/reader-6","title":"Reader 6","facts":["6-inch screen","Up to 53 days of battery"]}"#,
+            r#"{"url":"https://ereader.shop.example/en/products/reader-7-colour","title":"Reader 7 Colour","facts":["7-inch colour screen","Up to 40 days of battery"]}"#,
+        ]
+        .join("\n");
+        let still_missing = json!({ "missing": ["weight", "price"] });
+        let second = format!("{products}\n{still_missing}\n{{\"unread\":[]}}");
+        let hands_back = reading_the_note(browser_job(json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        })));
+        let posted_after = |second: &str| {
+            let mut summary = first.clone();
+            assert_eq!(take_unread_pages(&mut summary).len(), 3);
+            add_the_second_pass(&mut summary, second, &[]);
+            let mut turn = execution(&summary);
+            move_findings_into_details(&hands_back, &mut turn);
+            (turn.summary, turn.final_messages[0].content.clone())
+        };
+        // A page stopped the turn, so it posts its words: both passes', the second's said by
+        // the runtime from its lines.
+        let (posted, note) = posted_after(&second);
+        let read = "Then read 3 more pages on ereader.shop.example.";
+        assert_eq!(posted, format!("{words}\n\n{read}"));
+        // The note keeps every line, and the second pass's missing line in place of the first's.
+        for line in products.lines().chain([home, unreachable]) {
+            assert!(note.contains(line), "{line}: {note}");
+        }
+        assert_eq!(missing_names_in(&note), ["weight", "price"]);
+        // The second pass's own sentence stands in place of the runtime's.
+        let (posted, _) = posted_after(&format!(
+            "Then read the three product pages on the shop's eReader store.\n{second}"
+        ));
+        assert_eq!(
+            posted,
+            format!("{words}\n\nThen read the three product pages on the shop's eReader store.")
+        );
+        // Pages on several sites, and one page read twice, counted once.
+        let review = r#"{"url":"https://reviews.example/reader-6","title":"Reader 6 review","facts":["Light at 1.0 kg"]}"#;
+        let mut summary = first.clone();
+        add_the_second_pass(
+            &mut summary,
+            &format!("{products}\n{review}\n{review}"),
+            &[],
+        );
+        assert!(
+            summary.contains(
+                "\n\nThen read 4 more pages on ereader.shop.example and reviews.example.\n"
+            ),
+            "{summary}"
+        );
+        // A first pass that wrote no words of its own leaves the reply without words, as it was.
+        let mut summary = format!("{home}\n{unreachable}");
+        add_the_second_pass(&mut summary, &products, &[]);
+        assert_eq!(words_of(&summary), "", "{summary}");
+        // A second pass that read nothing but stopped at a page says nothing of its own.
+        let mut summary = first.clone();
+        take_unread_pages(&mut summary);
+        let before = words_of(&summary);
+        let blocked = r#"{"url":"https://reviews.example/reader-6","stopped":"blocked"}"#;
+        add_the_second_pass(&mut summary, blocked, &[]);
+        assert_eq!(words_of(&summary), before);
+        assert!(summary.ends_with(blocked), "{summary}");
+    }
+
+    /// A page the first pass called unreadable and the second read no longer stands as
+    /// unreadable: the build was told the page "couldn't be reached" beside what the second pass
+    /// read on it. Compared as pages: `www.` and a closing slash tell none apart. A page the first
+    /// pass couldn't read at another address stays as it said. With no page left that stopped it,
+    /// a turn whose findings go back to the building turn posts no words of its own, as one that
+    /// read every page it named: the build's reply is the answer.
+    #[test]
+    fn a_page_the_second_pass_read_no_longer_stands_as_unreadable() {
+        let home = r#"{"url":"https://maker.example/","title":"Laptops","facts":["Lists the Laptop 12."]}"#;
+        let timed_out = r#"{"url":"https://maker.example/laptop-12/","stopped":"timed-out"}"#;
+        let elsewhere = r#"{"url":"https://old.maker.example/laptop-12","stopped":"unreachable"}"#;
+        let twelve = r#"{"url":"https://www.maker.example/laptop-12","title":"Laptop 12","facts":["Weight: 1.3 kg"]}"#;
+        let first = format!("Laptop 12's page didn't answer in time.\n{home}\n{timed_out}");
+        let hands_back = reading_the_note(browser_job(json!({
+            "browserTransport": "shared",
+            "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            "browserHandsBack": true,
+        })));
+        let mut summary = first.clone();
+        add_the_second_pass(
+            &mut summary,
+            &format!("Read Laptop 12's page.\n{twelve}"),
+            &[],
+        );
+        assert_eq!(
+            summary,
+            format!(
+                "Laptop 12's page didn't answer in time.\n\nRead Laptop 12's page.\n\n{home}\n{twelve}"
+            )
+        );
+        let mut turn = execution(&summary);
+        move_findings_into_details(&hands_back, &mut turn);
+        assert_eq!(
+            turn.summary, "",
+            "every page it names was read: the build answers"
+        );
+        assert!(!turn.final_messages[0].content.contains("timed-out"));
+        // The same page at another address stays as the first pass wrote it, and so does its
+        // word to the person.
+        let mut summary = format!("Laptop 12's page didn't answer in time.\n{home}\n{elsewhere}");
+        add_the_second_pass(&mut summary, twelve, &[]);
+        assert!(summary.contains(elsewhere), "{summary}");
+        let mut turn = execution(&summary);
+        move_findings_into_details(&hands_back, &mut turn);
+        assert_eq!(
+            turn.summary,
+            "Laptop 12's page didn't answer in time.\n\nThen read 1 more page on maker.example."
+        );
+        // A page the second pass stopped at too still stands.
+        let mut summary = first.clone();
+        add_the_second_pass(&mut summary, timed_out, &[]);
+        assert!(
+            summary.ends_with(&format!("{timed_out}\n{timed_out}")),
+            "{summary}"
+        );
     }
 
     /// A second pass's missing line replaces the first's ([`add_the_second_pass`]): the build
