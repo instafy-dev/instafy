@@ -131,7 +131,7 @@ const FINDING_LINES: &str = "End your reply with one finding per page, each one 
 or `{\"url\": \"<address>\", \"stopped\": \"login|captcha|paywall|blocked|robots|download|secret|link-only|no-page|unreachable|timed-out|covered\"}` for one that ended at a sign-in, \
 a bot check, a paywall, a block or HTTP 401/403/429, robots.txt, a download, a page showing secrets or a link-only site \
 (never retry such a page another way), at an address with no page, one the browser couldn't reach or no answer in time, or under a cookie notice or dialog the browser couldn't close. \
-A step the person said no to, or didn't answer in time, stopped no page: give it no stop, Instafy says so. \
+A step the person said no to, or didn't answer in time, stopped no page: give it no stop. \
 Report only what the pages showed, never a secret; Instafy adds when and in which browser each page was read. \
 Octo's later turns read only these lines, never your reply's words: write each fact as \"Finding a page\" says.";
 
@@ -6760,6 +6760,30 @@ mod tests {
             ] {
                 assert!(!line.contains(topic), "{topic}: {line}");
             }
+        }
+    }
+
+    /// Who tells the person that a step didn't happen is for that step's own answer to say:
+    /// Instafy, after a prompt left to run out or a no in a part whose build answers after it,
+    /// and the turn itself, once, after a no in any other turn. The finding lines every browser
+    /// turn reads say only that such a step stopped no page: told also that "Instafy says so", a
+    /// turn with no build after it read the opposite of its step's answer after a no.
+    #[test]
+    fn the_finding_lines_leave_who_says_a_step_didnt_happen_to_its_answer() {
+        assert!(FINDING_LINES.contains(
+            "A step the person said no to, or didn't answer in time, stopped no page: give it no stop. "
+        ));
+        for metadata in [
+            json!({ "browserTransport": "shared" }),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": true,
+            }),
+        ] {
+            let contract =
+                format_browser_findings_contract_section(Some(&metadata)).expect("a browser turn");
+            assert!(!contract.contains("Instafy says so"), "{contract}");
         }
     }
 

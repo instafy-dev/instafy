@@ -44,7 +44,7 @@ use uuid::Uuid;
 
 pub(crate) mod activity_labels;
 pub(crate) mod browser_hand_back;
-mod browser_request;
+pub(crate) mod browser_request;
 #[cfg(test)]
 mod browser_turn_prompt_tests;
 #[cfg(test)]
@@ -5103,7 +5103,9 @@ fn refused_browser_card(
 
 /// An answer that links a page this turn's own reader was refused for what the site gave the
 /// reader alone (robots.txt, HTTP 403 or 429: `browser_request::links_a_page_its_reader_was_refused`)
-/// and posts no `request_browser` card, on a turn that may ask for the browser. Such a page ends
+/// and posts no `request_browser` card, on a turn that may ask for the browser and that someone
+/// watches: an unattended turn's prompt offers no card ([`browser_choice_applies`]), and nobody
+/// would press one in a scheduled automation's chat or a space review's. Such a page ends
 /// in a few plain words, its link and one card the person may press (the research skill's Stops),
 /// and a policy question with search on ended in the words and the link alone: "I couldn't check
 /// the shop's return policy… You can read its returns and claims page", with nothing to open it
@@ -5114,7 +5116,9 @@ fn refused_browser_card(
 /// card, or one that changed files, keeps its answer, and so does one that answers in plain text
 /// (`plain_text`: a plain-text report or write), which no card goes with. A card the retry writes
 /// opens a page the reader didn't read, so it waits for the person's press
-/// (`hold_cards_for_pages_its_reader_did_not_read`), with the retry's words above it.
+/// (`hold_cards_for_pages_its_reader_did_not_read`), with the retry's words above it. The retry is
+/// asked for that card alone: if it fails, or brings no card, the first answer is the turn's,
+/// with no card, as with no retry ([`nothing_from_a_failed_retry`]).
 fn no_card_for_a_page_it_couldnt_read(
     job: &LeaseJob,
     outcome: &CodexOutcome,
@@ -5130,6 +5134,7 @@ fn no_card_for_a_page_it_couldnt_read(
         && !changed_files
         && !plain_text
         && !browser_request_unsupported(job)
+        && !job_is_unattended(job)
         && browser_request::links_a_page_its_reader_was_refused(&outcome.summary, &[events]))
     .then_some(CodexFallbackSummaryKind::NoCardForAPageItCouldntRead)
 }
@@ -9015,10 +9020,7 @@ impl JobProcessor {
             shared_browser_page_id,
             // After a step the person said no to, its build's reply says so, never this turn's
             // ([`end_on_the_persons_answer`]).
-            shared_browser_hands_back: job
-                .payload
-                .get("metadata")
-                .is_some_and(browser_hand_back::hands_back),
+            shared_browser_hands_back: shared_browser_hands_back(job),
             shared_browser_page_left_by_other_chat,
             expect_mcp_tools: expects_generic_mcp_tool_execution,
             reasoning_effort: sequential_job_reasoning_effort(
@@ -10428,7 +10430,26 @@ impl JobProcessor {
             held_pages
                 .put_back(&workspace_dir, git_status_before.as_ref(), retry_steps)
                 .await;
-            let retry_output = retry_output_result?;
+            // The retry for a page's missing card follows an answer that is a true account: when
+            // it fails, that answer still ends the turn, with no card, as it did with no retry. A
+            // Stop still stops the turn.
+            let retry_output = match retry_output_result {
+                Ok(retry_output) => retry_output,
+                Err(error)
+                    if adds_a_missing_card
+                        && !cancel_signal
+                            .as_ref()
+                            .is_some_and(JobCancelSignal::is_canceled) =>
+                {
+                    warn!(
+                        job_id = %job_id,
+                        error = %format!("{error:#}"),
+                        "the retry for a page's missing card failed: the first answer stands"
+                    );
+                    nothing_from_a_failed_retry(&output)
+                }
+                Err(error) => return Err(error),
+            };
             drop(codex_guard);
             if !codex_run_options.input_images.is_empty() {
                 annotate_prompt_context_native_image_inputs(
@@ -10450,8 +10471,23 @@ impl JobProcessor {
             );
             let retry_safety_check_downgrade_warning =
                 extract_safety_check_downgrade_warning(&retry_raw_messages);
-            let mut retry_outcome = extract_codex_outcome(&retry_output.final_json)?;
-            user_input_request::validate_outcome_scope(job, &retry_outcome)?;
+            let mut retry_outcome = match extract_codex_outcome(&retry_output.final_json).and_then(
+                |outcome| {
+                    user_input_request::validate_outcome_scope(job, &outcome).map(|()| outcome)
+                },
+            ) {
+                Ok(outcome) => outcome,
+                // As when it fails: it brings no card, and the first answer stands.
+                Err(error) if adds_a_missing_card => {
+                    warn!(
+                        job_id = %job_id,
+                        error = %format!("{error:#}"),
+                        "the retry for a page's missing card wrote no answer that could be read: the first answer stands"
+                    );
+                    extract_codex_outcome(&JsonValue::Null)?
+                }
+                Err(error) => return Err(error),
+            };
             retry_outcome.read_files =
                 normalize_codex_read_files(&workspace_dir, retry_outcome.read_files);
             held_pages.leave_out_returned(&workspace_dir, &mut retry_outcome.files);
@@ -10621,21 +10657,33 @@ impl JobProcessor {
             }
             // A retry that returned actions or wrote files did work of its
             // own that the first answer does not describe, so it keeps its own.
+            // The retry for a page's missing card was asked for that card alone: unless it
+            // brings one, the first answer, a true account, is the turn's, as with no retry.
+            let card_retry_brought_no_card = adds_a_missing_card
+                && !retry_outcome
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, CodexAction::RequestBrowser(_)));
             let kept_first_attempt_answer = retry_shared_browser_terminal_consent_failure.is_none()
-                && retry_outcome.actions.is_empty()
                 && retry_own_files_len == 0
-                && keep_first_attempt_answer(
-                    &outcome.summary,
-                    first_ran_command,
-                    retried_only_for_command_observation,
-                    &retry_outcome.summary,
-                    retry_codex_fallback_summary_kind,
-                    routing_evidence::ran_program_beyond_literal_output(&retry_messages, false),
-                );
+                && (card_retry_brought_no_card
+                    || (retry_outcome.actions.is_empty()
+                        && keep_first_attempt_answer(
+                            &outcome.summary,
+                            first_ran_command,
+                            retried_only_for_command_observation,
+                            &retry_outcome.summary,
+                            retry_codex_fallback_summary_kind,
+                            routing_evidence::ran_program_beyond_literal_output(
+                                &retry_messages,
+                                false,
+                            ),
+                        )));
             if kept_first_attempt_answer {
                 tracing::info!(
                     job_id = %job_id,
-                    "keeping the first attempt's answer: the evidence retry brought no answer of its own"
+                    card_retry = adds_a_missing_card,
+                    "keeping the first attempt's answer: the retry brought no answer of its own"
                 );
                 // The saved provider thread is still the retry's, so the next
                 // turn's history ends with the retry's empty reply while the
@@ -10724,7 +10772,11 @@ impl JobProcessor {
                     "kind": "codex/final-message-kept-from-attempt",
                     "metadata": {
                         "attempt": 1,
-                        "reason": "evidence_retry_without_answer",
+                        "reason": if adds_a_missing_card {
+                            "card_retry_without_card"
+                        } else {
+                            "evidence_retry_without_answer"
+                        },
                     }
                 }));
             }
@@ -17013,6 +17065,24 @@ fn summary_has_substance(summary: &str) -> bool {
     }
 }
 
+/// What a retry that failed brought: no answer and no step of its own, on the first attempt's
+/// thread, where it ran. Only the retry for a page's missing card stands one in for its failure
+/// ([`no_card_for_a_page_it_couldnt_read`]): it follows an answer that is a true account, which
+/// then stays the turn's, with no card, as with no retry. Every other retry follows an answer
+/// that failed, and its failure fails the turn.
+fn nothing_from_a_failed_retry(first_attempt: &CodexRunOutput) -> CodexRunOutput {
+    CodexRunOutput {
+        final_json: JsonValue::Null,
+        events: Vec::new(),
+        provider_conversation_state: first_attempt.provider_conversation_state.clone(),
+        native_image_inputs: 0,
+        browser_pages: Vec::new(),
+        browser_secret_screen: false,
+        browser_not_given: Vec::new(),
+        browser_tried: Default::default(),
+    }
+}
+
 /// A retry that ran only to collect command-observation evidence keeps the
 /// first attempt's answer when that answer rests on a completed command that
 /// ran a program beyond literal output, and the retry brings no answer of its
@@ -17570,26 +17640,38 @@ fn end_on_the_persons_answer(
     browser_hand_back::add_the_pages_it_opened(summary, pages);
     let metadata = job.payload.get("metadata");
     if !browser_hand_back::its_build_answers(metadata, summary)
-        && !says_the_persons_no_itself(metadata, summary, code)
+        && !says_the_persons_no_itself(job, summary, code)
     {
         browser_hand_back::add_under_the_words(summary, terminal_shared_browser_summary(code));
     }
 }
 
+/// Whether a Shared Browser turn's findings go back to the building turn, as its browser is told
+/// (`CodexRunOptions::shared_browser_hands_back`, `shared_browser::HANDS_BACK_ENV`): its answer to
+/// a step the person said no to then tells the turn to say neither that the step didn't happen
+/// nor what to try, since its build's reply ends in the runtime's line for that step
+/// ([`end_with_the_step_not_done`]). Any other turn's reply says it once
+/// ([`says_the_persons_no_itself`]).
+fn shared_browser_hands_back(job: &LeaseJob) -> bool {
+    job.payload
+        .get("metadata")
+        .is_some_and(browser_hand_back::hands_back)
+}
+
 /// Whether a turn's own words end it after the person said no to one of its steps
 /// (`approval_denied`), with no line of the runtime's under them: its findings don't go back to
-/// the building turn, so its reply is the person's answer, and its browser's answer to that step
-/// told it to say once that nothing from it was sent and to ask what to try instead
-/// (`shared_browser::HANDS_BACK_ENV`). Under the runtime's line, which the turn was told to leave
-/// to it, a denied order ended twice, in the turn's words ("it was not submitted because the
-/// submit step was declined… let me know if you want to try again") and then the runtime's
-/// (local tests, Nov 20 and Nov 22). The step's row still says it ("you said no to a click"). A
+/// the building turn ([`shared_browser_hands_back`]), so its reply is the person's answer, and
+/// its browser's answer to that step, and to every later call of the run, told it to say once
+/// that nothing from it was sent and to ask what to try instead. Under the runtime's line, which
+/// the turn was told to leave to it, a denied order ended twice, in the turn's words ("it was not
+/// submitted because the submit step was declined… let me know if you want to try again") and
+/// then the runtime's (local tests, Nov 20 and Nov 22). The step's row still says it ("you said no to a click"). A
 /// turn that wrote no words of its own ends in the runtime's line alone, and one whose findings
 /// go back to the building turn, told to say neither, keeps the line where no build answers
 /// after it.
-fn says_the_persons_no_itself(metadata: Option<&JsonValue>, summary: &str, code: &str) -> bool {
+fn says_the_persons_no_itself(job: &LeaseJob, summary: &str, code: &str) -> bool {
     code == "approval_denied"
-        && !metadata.is_some_and(browser_hand_back::hands_back)
+        && !shared_browser_hands_back(job)
         && !browser_hand_back::words_of(summary).is_empty()
 }
 
@@ -33442,6 +33524,18 @@ mod tests {
             json!({"metadata": {"browserTransport": "shared"}}),
         );
         assert_eq!(kind(&browser_turn, &no_card, &robots, false), None);
+        // Nor is an unattended turn, a scheduled automation's or a space review's: its prompt
+        // offers no card (`browser_choice_applies`), and nobody watches its chat to press one.
+        for (key, value) in [
+            ("automation", json!({ "id": "automation-1" })),
+            ("spaceReview", json!({ "id": "review-1" })),
+            ("controllerDispatch", json!({ "suppressUserMessage": true })),
+        ] {
+            let mut unattended = chat_turn(json!([]), request, 1);
+            unattended.payload["metadata"][key] = value;
+            assert!(job_is_unattended(&unattended), "{key}");
+            assert_eq!(kind(&unattended, &no_card, &robots, false), None, "{key}");
+        }
         // A reply that links no page its reader was refused, and a sign-in page, which gets only
         // its link.
         let unlinked = json!({"summary": "I couldn't check the shop's return policy.", "files": [], "actions": []});
@@ -35259,6 +35353,15 @@ mod tests {
                 let mut words = said.to_string();
                 end_on_the_persons_answer(&question, &mut words, &mut None, code, &[]);
                 assert_eq!(words, said, "one ending, in the turn's words");
+                // Whatever those words say: a reply that claims the step happened is posted as
+                // written, with no line under it, and the step's row and the turn's done line say
+                // the no ("you said no to a click"), from the step's own code. The step's answer,
+                // and every later call's, told the turn to say it once (`shared_browser`'s
+                // `mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result`).
+                let claimed = "Done — the requested browser action succeeded.";
+                let mut words = claimed.to_string();
+                end_on_the_persons_answer(&question, &mut words, &mut None, code, &[]);
+                assert_eq!(words, claimed);
             } else {
                 let mut words = "Done — the requested browser action succeeded.".to_string();
                 let mut no_fallback = None;
@@ -35677,6 +35780,31 @@ mod tests {
         assert!(!denied.contains("Octo"), "{denied}");
         // Nothing else the turn reads asks it for an ending of its own: its run instructions say
         // only that the step is final (`codex`'s `a_step_that_ran_out_of_its_own_time_goes_on_from_a_snapshot`).
+    }
+
+    /// What a turn tells its browser of where its findings go, which the browser's answer to a step
+    /// the person said no to depends on (`CodexRunOptions::shared_browser_hands_back`): a browser
+    /// part whose findings go back to its build says so, and that build's reply says the no; a
+    /// question's browser turn, or one whose card asked for no build after it, doesn't, and says
+    /// the no itself.
+    #[test]
+    fn a_browser_turn_tells_its_browser_whether_its_findings_go_back() {
+        assert!(shared_browser_hands_back(&browser_then_build_job()));
+        for metadata in [
+            json!({ "browserTransport": "shared" }),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+            }),
+            json!({
+                "browserTransport": "shared",
+                "browserRequestOf": "job:00000000-0000-4000-8000-0000000000a1",
+                "browserHandsBack": false,
+            }),
+        ] {
+            let turn = test_lease_job(Some("feature"), json!({ "metadata": metadata }));
+            assert!(!shared_browser_hands_back(&turn), "{metadata}");
+        }
     }
 
     /// One ending after a Deny. A form's browser turn with no build after it filled in a test

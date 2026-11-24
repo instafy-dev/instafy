@@ -14491,15 +14491,19 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
     // A turn whose reply is the person's answer says once that nothing was
     // sent and asks what to try instead, as Instafy adds no line of its own
     // under it; one whose findings go back to the building turn says neither,
-    // as that build's reply ends in Instafy's line.
-    for (hands_back, first) in [
+    // as that build's reply ends in Instafy's line. Every later call of the
+    // run asks the same: a step run from code may print only a later call's
+    // answer, so the call the person said no to may be the one it never read.
+    for (hands_back, first, later) in [
         (
             false,
             "The person said no, so this step didn't happen. Don't try it another way. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.",
+            "The person said no to an earlier step, so the browser is done for this turn. End this turn now. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.",
         ),
         (
             true,
             "The person said no, so this step didn't happen. Don't try it another way. Instafy tells them so and asks what to try instead: your reply says neither.",
+            "The person said no to an earlier step, so the browser is done for this turn. End this turn now.",
         ),
     ] {
         let server = SharedBrowserMcpServer::new().handing_back(hands_back);
@@ -14509,14 +14513,8 @@ async fn mcp_wire_answers_every_call_of_a_blocked_run_with_its_terminal_result()
         *latch.terminal_step.lock().await = Some("search");
         for (text, activity) in [
             (first, Some(json!({ "step": "search" }))),
-            (
-                "The person said no to an earlier step, so the browser is done for this turn. End this turn now.",
-                None,
-            ),
-            (
-                "The person said no to an earlier step, so the browser is done for this turn. End this turn now.",
-                None,
-            ),
+            (later, None),
+            (later, None),
         ] {
             let blocked = wire.call("snapshot", json!({})).await;
             let mut answered = signal("approval_denied");

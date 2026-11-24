@@ -50,6 +50,19 @@ pub const SPACE_LINK_ONLY_FILE_ENV: &str = "INSTAFY_SHARED_BROWSER_SPACE_LINK_ON
 /// ends in the runtime's line for that step, and any other turn's reply is the
 /// person's answer, which says it.
 pub const HANDS_BACK_ENV: &str = "INSTAFY_SHARED_BROWSER_HANDS_BACK";
+
+/// Whether a relay's environment says its turn's findings go back to the
+/// building turn ([`HANDS_BACK_ENV`], which `codex::shared_browser_mcp_environment`
+/// sets).
+pub(crate) fn hands_back_in(environment: impl Fn(&str) -> Option<String>) -> bool {
+    environment(HANDS_BACK_ENV).is_some_and(|value| value == "1")
+}
+
+/// What a step the person said no to asks a turn whose reply is the person's
+/// answer, as every later call of its run asks again
+/// ([`terminal_consent_later_call_result`]).
+const SAY_THE_NO_ONCE: &str = "Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.";
+
 pub const MCP_COMMAND: &str = "shared-browser-mcp";
 pub(crate) const DEFAULT_ACTIONS_FILE: &str = "/tmp/instafy/playwright/actions.jsonl";
 const DEFAULT_AGENT_CONTROL_FILE: &str = "/run/instafy/browser/agent-control.json";
@@ -3455,7 +3468,9 @@ fn terminal_consent_call_result(code: &'static str, hands_back: bool) -> CallToo
             true,
         ),
         "approval_denied" => (
-            "The person said no, so this step didn't happen. Don't try it another way. Say once in your reply that nothing from it was sent, and ask what they'd like to try instead.".to_string(),
+            format!(
+                "The person said no, so this step didn't happen. Don't try it another way. {SAY_THE_NO_ONCE}"
+            ),
             true,
         ),
         _ => (
@@ -3482,10 +3497,18 @@ fn terminal_consent_call_result(code: &'static str, hands_back: bool) -> CallToo
 /// person saw, not to this one, and ends the browser for the turn. Its step did not happen and
 /// asked the person nothing, so it is an error, marked as ended at an earlier call
 /// ([`ENDED_EARLIER_KEY`]): taken for a step that ended without one, a later open after a prompt
-/// left unanswered would count as a page opened.
-fn terminal_consent_later_call_result(code: &'static str) -> CallToolResult {
+/// left unanswered would count as a page opened. After a no in a turn whose findings don't go
+/// back to the building turn (`hands_back`), it asks again for the turn to say the no once
+/// ([`SAY_THE_NO_ONCE`]): steps run from code may print only a later call's answer, never the one
+/// the person said no to.
+fn terminal_consent_later_call_result(code: &'static str, hands_back: bool) -> CallToolResult {
     let message = if code == "approval_denied" {
-        "The person said no to an earlier step, so the browser is done for this turn. End this turn now.".to_string()
+        let done = "The person said no to an earlier step, so the browser is done for this turn. End this turn now.";
+        if hands_back {
+            done.to_string()
+        } else {
+            format!("{done} {SAY_THE_NO_ONCE}")
+        }
     } else {
         // Only a no's words depend on whether the turn hands back.
         let first = terminal_consent_call_result(code, false);
@@ -3740,7 +3763,7 @@ impl ServerHandler for SharedBrowserMcpServer {
                 let step = self.terminal_step.lock().await.take();
                 // The first such answer is the call that ended the run's.
                 Ok(if self.terminal_answered.swap(true, Ordering::SeqCst) {
-                    terminal_consent_later_call_result(code)
+                    terminal_consent_later_call_result(code, self.hands_back)
                 } else {
                     terminal_consent_call_result_with_step(code, step, self.hands_back)
                 }
@@ -3966,7 +3989,7 @@ pub async fn run_mcp_stdio() -> Result<()> {
     crate::mcp_process_groups::register_current_process_group()
         .context("Shared Browser MCP could not record its process group")?;
     let running = SharedBrowserMcpServer::new()
-        .handing_back(std::env::var(HANDS_BACK_ENV).is_ok_and(|value| value == "1"))
+        .handing_back(hands_back_in(|key| std::env::var(key).ok()))
         .serve((tokio::io::stdin(), tokio::io::stdout()))
         .await
         .context("failed to start the Shared Browser MCP server")?;

@@ -1583,9 +1583,15 @@ reader was refused for what the site gave the reader alone (robots.txt, HTTP
 403 or 429) and posts no card runs once more the same way, asked only for the
 card, while its words stay as a true account: a return policy's turn with
 search on ended in the policy page's link and no card, so nothing opened it.
-A page that stopped the reader at a sign-in, a paywall, a bot check, a secret,
-a private address, a link-only site or a download gets only its link. Neither
-retry is billed, as no retry is. An address only Octo read,
+Which pages stopped the reader is what the reader reported, from the whole of
+its output (a long read of several pages kept only its end in the turn's
+events), never what a page wrote. Asked only for the card, that retry leaves
+the first answer as the turn's, with no card, when it fails or brings none. A
+page that stopped the reader at a sign-in, a paywall, a bot check, a secret,
+a private address, a link-only site or a download gets only its link, and a
+turn nobody watches (a scheduled automation's or a space review's), which is
+offered no card, isn't run again for one. Neither retry is billed, as no retry
+is. An address only Octo read,
 a search result's among them, still leaves the card a button until the person
 opens it ("How Studio opens it"). A card the routing step posts carries the
 person's own words, whatever they name.
@@ -2118,7 +2124,9 @@ happen. Don't try it another way. Say once in your reply that nothing from it
 was sent, and ask what they'd like to try instead." (the runtime tells the
 browser which, `INSTAFY_SHARED_BROWSER_HANDS_BACK`), and each later call of
 the run "The person said no to an earlier step, so the browser is done for
-this turn. End this turn now.",
+this turn. End this turn now.", which asks any turn but the first kind again
+to say once that nothing from it was sent and what to try instead (steps run
+from code may print only a later call's answer),
 `approval_stale` (the page changed after the yes) reads "The page changed
 after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
