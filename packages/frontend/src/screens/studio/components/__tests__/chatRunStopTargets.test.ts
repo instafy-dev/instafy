@@ -15,6 +15,7 @@ import { collapseLifecycleMessages, shouldDisplayChatMessage, synthesizeAgentJob
 import { resolveRoutedBrowserFold } from "../routedBrowserFold";
 import {
   chatRunStopBetweenParts,
+  chatRunStopEndedIds,
   chatRunStopFollowOnTargets,
   chatRunStopNeedsConfirmation,
   groupChatRunStopTargets,
@@ -58,6 +59,27 @@ describe("chat run stop targets", () => {
     const targets = resolveChatRunStopTargets([run("r1", { jobId: JOB, userId: "viewer", details: { initiatingUserId: "viewer" } })], []);
     expect(targets[0].initiatingUserId).toBeNull();
     expect(chatRunStopNeedsConfirmation(targets, "viewer")).toBe(true);
+  });
+  // A turn's row reads "Stopped" from its run's record or from the chat's
+  // notice of the Stop, whichever comes first: either way nothing is left to stop.
+  it("leaves out a turn a stop notice names, though its run's record says it still runs", () => {
+    const notice = (details: Record<string, unknown>, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+      id: "notice", role: "assistant", content: "Stopped this run.", timestamp: 2,
+      metadata: { source: "controller", kind: "run_cancellation", details }, ...extra,
+    });
+    const runs = [run("r1", { jobId: JOB }), run("r2", { jobId: JOB_2 })];
+    expect(resolveChatRunStopTargets(runs, []).map((target) => target.jobId)).toEqual([JOB, JOB_2]);
+    expect(resolveChatRunStopTargets(runs, [notice({ runIds: ["r1"], jobIds: [] })]).map((target) => target.jobId))
+      .toEqual([JOB_2]);
+    expect(resolveChatRunStopTargets(runs, [notice({ runIds: [], jobIds: [JOB_2] })]).map((target) => target.jobId))
+      .toEqual([JOB]);
+    // A line someone wrote is no notice, whatever it claims.
+    expect(resolveChatRunStopTargets(runs, [notice({ runIds: ["r1"], jobIds: [JOB] }, { authorId: "user-1" })]))
+      .toHaveLength(2);
+    // The chat's stopped turns: canceled records and what its notices name.
+    expect(chatRunStopEndedIds([...runs, run("r3", { jobId: "job-3" }, "canceled")], [notice({ runIds: ["r1"], jobIds: [JOB] })]))
+      .toEqual(new Set(["r1", JOB, "r3", "job-3"]));
+    expect(chatRunStopEndedIds(runs, [])).toEqual(new Set());
   });
   it("reads canceled only the runs a committed Stop's answer names and the chat holds", () => {
     const runs = { r1: run("r1", { jobId: JOB }), r2: run("r2", { jobId: JOB_2 }), r3: run("r3", null, "canceled") };
@@ -175,7 +197,11 @@ describe("a message between two of its parts", () => {
     first.buildingStep, first.buildingReply];
 
   /** As ChatPanel reads it: the chat's rows, and the routed cards still standing in, while a turn is on its way or once none is. */
-  function between(messages: ChatMessage[], turnOnItsWay: boolean, gaps: { browserCardOpening?: boolean; handBackDue?: boolean } = {}) {
+  function between(
+    messages: ChatMessage[],
+    turnOnItsWay: boolean,
+    gaps: { browserCardOpening?: boolean; handBackDue?: boolean; stopped?: ReadonlySet<string> } = {},
+  ) {
     const collapsed = collapseLifecycleMessages(messages);
     const rows = synthesizeAgentJobThreadMessages(collapsed, collapsed.filter(shouldDisplayChatMessage), turnOnItsWay);
     return chatRunStopBetweenParts({
@@ -183,6 +209,7 @@ describe("a message between two of its parts", () => {
       handBackDue: gaps.handBackDue ?? false,
       newestRow: rows.at(-1),
       routedWaitingKeys: resolveRoutedBrowserFold(messages, turnOnItsWay).waitingCardKeys,
+      ...(gaps.stopped ? { stopped: gaps.stopped } : {}),
     });
   }
 
@@ -230,6 +257,27 @@ describe("a message between two of its parts", () => {
       .toBe(false);
   });
 
+  // The row of a hand-back or a retry someone stopped before it showed
+  // anything reads "Stopped" from its run's record, a moment before the
+  // chat's notice of the Stop: nothing of it is on its way.
+  it("is not for a hand-back or a retry someone stopped, and is for one nobody stopped", () => {
+    const handedBack = [...browserOnly, first.handBack];
+    expect(between(handedBack, false)).toBe(true);
+    expect(between(handedBack, false, { stopped: new Set(["earlier-run", "earlier-job"]) })).toBe(true);
+    expect(between(handedBack, false, { stopped: new Set([BUILDING_RUN]) })).toBe(false);
+    // Studio opening a card, or a hand-back due, is a gap whatever was stopped.
+    expect(between(handedBack, false, { stopped: new Set([BUILDING_RUN]), handBackDue: true })).toBe(true);
+    expect(between(handedBack, false, { stopped: new Set([BUILDING_RUN]), browserCardOpening: true })).toBe(true);
+    const retrying = message({ id: "row", metadata: { autoRetryPending: true, autoRetryRunId: "retry-run", autoRetryJobId: "retry-job" } });
+    const gap = (stopped: ReadonlySet<string>) =>
+      chatRunStopBetweenParts({ browserCardOpening: false, handBackDue: false, newestRow: retrying, routedWaitingKeys: new Set(), stopped });
+    expect(gap(new Set(["earlier-run"]))).toBe(true);
+    expect(gap(new Set(["retry-run"]))).toBe(false);
+    expect(gap(new Set(["retry-job"]))).toBe(false);
+    // A card standing in for its browser turn is a gap as before.
+    expect(between([first.ask, first.card, first.continuation], true, { stopped: new Set(["earlier-run"]) })).toBe(true);
+  });
+
   // ChatPanel is wired to a dozen providers, so mounting it in jsdom is not
   // practical (see chatPanelSharedBrowserLateAttach.test.ts): this reads the
   // source for what it gives Stop.
@@ -243,6 +291,17 @@ describe("a message between two of its parts", () => {
     expect(call).toContain("routedWaitingKeys: routedBrowserWaiting,");
     expect(chatPanel).toContain("between: stopBetweenParts,");
     expect(chatPanel).not.toContain("routedBrowserWaiting.size");
+  });
+
+  it("is told by ChatPanel which of the chat's turns someone stopped, as Stop is", () => {
+    const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
+    const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
+    expect(chatPanel).toContain("() => chatRunStopEndedIds(stopConversationRuns, messages),");
+    for (const opening of ["const stopBetweenParts = chatRunStopBetweenParts({", "const runStop = useChatRunStop({"]) {
+      const start = chatPanel.indexOf(opening);
+      expect(start).toBeGreaterThan(-1);
+      expect(chatPanel.slice(start, chatPanel.indexOf("});", start))).toContain("stopped: stoppedTurns,");
+    }
   });
 });
 
