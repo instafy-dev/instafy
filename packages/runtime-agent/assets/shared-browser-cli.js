@@ -3076,7 +3076,11 @@ const MAX_FIELD_LIST_NAME_CHARS = 80;
 // there shares the start of a word with what the field holds. So a calendar a
 // date field opens or names is no list of its stops, and neither is a list of
 // the page's own that a filter box names. `listOf(field, true)` leaves that
-// last check out: what stood at the field before a step typed.
+// last check out: what stood at the field before a step typed. It answers too
+// whether the field, or the combobox it sits in, says its list is open now
+// (`expanded`: aria-expanded is "true", for a popup that is no dialog or grid,
+// and no list it names is one or holds a grid or a table: a day field's
+// calendar).
 // `focusedField` is the focused element when a person types text into it (a
 // box that is ticked is none, whatever it names). `standIns(rows, elements,
 // fields)` gives, for each row, the element of `elements` that stands for it:
@@ -3170,7 +3174,7 @@ function fieldListRulesInPage() {
   };
   const listOf = (field, before = false) => {
     const doc = field.ownerDocument;
-    const answer = { named: false, lists: [], rows: [] };
+    const answer = { named: false, expanded: false, lists: [], rows: [] };
     const combobox = field.closest("[role=combobox]");
     const named = [];
     for (const node of [field, combobox]) {
@@ -3179,6 +3183,11 @@ function fieldListRulesInPage() {
       if (attribute("role") === "combobox" || ["list", "both", "inline"].includes(attribute("aria-autocomplete")) ||
         (attribute("aria-haspopup") !== "" && attribute("aria-haspopup") !== "false") || node.hasAttribute("aria-expanded")) {
         answer.named = true;
+      }
+      // A popup it says is a dialog or a grid (a day field's calendar) is no
+      // list of suggestions, open or not.
+      if (attribute("aria-expanded") === "true" && !["dialog", "grid"].includes(attribute("aria-haspopup"))) {
+        answer.expanded = true;
       }
       const root = node.getRootNode();
       const byId = (id) => typeof root.getElementById === "function" ? root.getElementById(id) : doc.getElementById(id);
@@ -3195,6 +3204,14 @@ function fieldListRulesInPage() {
       const active = activeId ? byId(activeId) : null;
       if (active) named.push(active.closest("[role=listbox], [role=grid], [role=tree], [role=menu]") || active);
       if (node === combobox && combobox !== field) answer.lists.push(combobox);
+    }
+    // Nor is a list it names that is a dialog or a grid, or holds a grid or a
+    // table: a day field's calendar, where the field says only that it opens
+    // something.
+    if (answer.expanded && named.some((list) =>
+      ["dialog", "alertdialog", "grid"].includes(String(list.getAttribute("role") || "").toLowerCase().trim()) ||
+      list.querySelector("[role=grid], table") !== null)) {
+      answer.expanded = false;
     }
     answer.lists.unshift(...named);
     const plain = (list) => {
@@ -3247,7 +3264,31 @@ function fieldListRulesInPage() {
     }
     return found;
   };
-  return { listOf, focusedField, standIns, inside, MAX_ROWS };
+  // Whether the list a field says is open (listOf's `expanded`, with its
+  // `lists`) shows anything a person could pick now, whatever its words: an
+  // option turned on in a list the field names, in the combobox around it or
+  // in a list drawn against it, looked for even when it names one; else a
+  // plain row of the list, else a link, a button or a cell with words (a
+  // calendar's days). The rows a type step names must share the start of a
+  // word with what was typed, which a time's, a postcode's or a line's ("U2")
+  // never do: a list showing them read as one that opened and stayed empty.
+  const showsAt = (field, list) => {
+    const on = (row) => !row.matches(":disabled") && !row.closest("[aria-disabled=true]");
+    const combobox = field.closest("[role=combobox]");
+    const picks = (popup) => {
+      const options = optionsOf(popup);
+      if (options.length) return options;
+      const rows = plainRowsOf(popup);
+      if (rows.length) return rows;
+      return Array.from(popup.querySelectorAll("a[href], button, [role=button], [role=link], [role=gridcell], td"))
+        .slice(0, MAX_NODES)
+        .filter((control) => shown(control) && /[\p{L}\p{N}]/u.test(wordsOf(control)));
+    };
+    const drawn = drawnAgainst(field);
+    return [...list.lists, ...(drawn ? [drawn] : [])].some((popup) =>
+      (popup === combobox && combobox !== field ? optionsOf(popup) : picks(popup)).some(on));
+  };
+  return { listOf, showsAt, focusedField, standIns, inside, MAX_ROWS };
 }
 
 // Runs inside the page through Playwright, with fieldListRulesInPage's rules
@@ -3266,14 +3307,18 @@ function fieldListRulesInPage() {
 // "No matches" row) is none. Once the step typed (`request.typed`), the field
 // counts with the one the page moved the focus to (a planner that opens its
 // search in a field of its own). Answers too whether a field says it opens a
-// list (`named`), the words of each set (`ownWords`, `freshWords`, with the
-// rows nothing in `request.elements` stands for, whose number is `unlisted`)
-// and of every option shown (`shown`), a row's own words for the control that
-// stands for it. Those words never leave the step: it only compares them.
+// list (`named`) and says it is open now (`expanded`), whether anything a
+// person could pick shows once it typed (`showing`: in the list it says is
+// open, whatever its words (fieldListRulesInPage's showsAt), or an option
+// turned on anywhere that didn't show before), the words of each set
+// (`ownWords`, `freshWords`, with the rows nothing in `request.elements`
+// stands for, whose number is `unlisted`) and of every option shown
+// (`shown`), a row's own words for the control that stands for it. Those
+// words never leave the step: it only compares them.
 function fieldListInPage(rules, field, request) {
   const answer = {
-    kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [],
-    unlisted: { own: 0, fresh: 0 },
+    kind: "field-list", named: false, expanded: false, showing: false, own: false, listed: [], fresh: [], ownWords: [],
+    freshWords: [], shown: [], unlisted: { own: 0, fresh: 0 },
   };
   try {
     const elements = Array.isArray(request && request.elements) ? request.elements.slice(0, 400) : [];
@@ -3300,6 +3345,8 @@ function fieldListInPage(rules, field, request) {
     for (const each of fields) {
       const list = rules.listOf(each, !typed);
       if (list.named) answer.named = true;
+      if (list.expanded) answer.expanded = true;
+      if (typed && list.expanded && rules.showsAt(each, list)) answer.showing = true;
       lists.push(...list.lists);
       rows.push(...list.rows);
     }
@@ -3330,11 +3377,15 @@ function fieldListInPage(rules, field, request) {
     answer.freshWords = [...fresh, ...freshLoose].map(said);
     answer.unlisted = { own: ownLoose.length, fresh: freshLoose.length };
     answer.shown = [...options, ...loose].map(said);
+    // A list the field doesn't name may be the one it opened.
+    if (typed && usable.some((option) => option.matches("[role=option]") && !before.has(said(option)))) {
+      answer.showing = true;
+    }
     return answer;
   } catch (_) {
     return {
-      kind: "field-list", named: false, own: false, listed: [], fresh: [], ownWords: [], freshWords: [], shown: [],
-      unlisted: { own: 0, fresh: 0 },
+      kind: "field-list", named: false, expanded: false, showing: false, own: false, listed: [], fresh: [], ownWords: [],
+      freshWords: [], shown: [], unlisted: { own: 0, fresh: 0 },
     };
   }
 }
@@ -3373,27 +3424,143 @@ async function optionsShownBefore(page, target) {
 // its own list's options once they differ from what it showed before the
 // step (one it narrowed is named whole), or else the options that came
 // (fieldListInPage), until they stop changing, for up to FIELD_LIST_WAIT_MS
-// when the field says it opens one or options came, and FIELD_LIST_QUIET_MS
-// otherwise. While only rows turned off show (a list's "Searching…"), it
-// keeps looking. Answers which of fieldListInPage's sets the step names
-// ("listed" or "fresh"), or null when no list came.
+// when the field says it opens one, says it is open or options came, and
+// FIELD_LIST_QUIET_MS otherwise. While only rows turned off show (a list's
+// "Searching…"), it keeps looking. Answers which of fieldListInPage's sets the
+// step names (`set`: "listed" or "fresh", or null when no list came) and, when
+// none came, whether the field's list opened and stayed empty (`empty`): the
+// field, or the combobox it sits in, still said it was open after the whole
+// FIELD_LIST_WAIT_MS, while nothing a person could pick showed
+// (openedEmpty). A planner's start field opened its list as its stop was
+// typed and showed nothing, the step said only that nothing was sent, and the
+// turn wrote that the planner did not accept its step (a local test, Nov 23).
 async function fieldListAfterTyping(page, target, before) {
   const started = Date.now();
   let last = null;
   for (;;) {
     const now = await fieldListOf(target, await shownOptions(page), before.shown, true);
-    if (!now) return null;
+    if (!now) return { set: null, empty: false };
     const set = now.own ? "listed" : "fresh";
     const words = (now.own ? now.ownWords : now.freshWords).join("\n");
     const came = words !== "" && words !== (now.own ? before.own.join("\n") : "");
-    if (came && last === words) return set;
+    if (came && last === words) return { set, empty: false };
     const waited = Date.now() - started;
-    if (waited >= (now.named || came ? FIELD_LIST_WAIT_MS : FIELD_LIST_QUIET_MS) || stepClock.isUp()) {
-      return came ? set : null;
+    if (waited >= (now.named || now.expanded || came ? FIELD_LIST_WAIT_MS : FIELD_LIST_QUIET_MS) || stepClock.isUp()) {
+      if (came) return { set, empty: false };
+      return { set: null, empty: waited >= FIELD_LIST_WAIT_MS && openedEmpty(now) };
     }
     last = came ? words : null;
     await page.waitForTimeout(FIELD_LIST_EVERY_MS).catch(() => {});
   }
+}
+
+// Whether fieldListInPage's answer, once the step typed, reads as a list that
+// opened and is empty: the field, or the combobox it sits in, says its list
+// is open, and nothing a person could pick shows, whatever its words
+// (`showing`). Rows that share no word with what was typed (a time's, a
+// postcode's), a list the field doesn't name and a calendar's days show.
+function openedEmpty(list) {
+  return list.expanded === true && list.showing === false && list.ownWords.length === 0 &&
+    list.freshWords.length === 0;
+}
+
+// Whether a type step's field's list that opened and stayed empty
+// (fieldListAfterTyping) still reads so as the step answers: what came after
+// the look, which its reading may list, is no list that stayed empty.
+async function stillOpenedEmpty(page, target, before) {
+  const now = await fieldListOf(target, await shownOptions(page), before.shown, true);
+  return Boolean(now) && openedEmpty(now);
+}
+
+// What a type step says when its field's list opened and stayed empty
+// (fieldListAfterTyping): that no suggestion came in the wait, then the
+// page's requests that failed meanwhile (`failed`, none for a withheld page),
+// by kind and site (failedRequestsOf), the browser's reason beside each.
+function emptyListLine(failed) {
+  const opened = `Its list opened, but no suggestion came within ${FIELD_LIST_WAIT_MS / 1000} s.`;
+  return failed.length ? `${opened} Meanwhile, these failed: ${loadsListed(failed)}.` : opened;
+}
+
+// The kinds of request a page makes that a list's suggestions can come by:
+// what its own code asks for (fetch, XHR, an event stream, a socket), a
+// script (a site's answer as code) and a frame's page (a "document" of a
+// frame, named a frame). Pictures, styles, fonts and media bring none.
+const LIST_REQUEST_KINDS = new Set(["fetch", "xhr", "eventsource", "websocket", "other", "script", "document"]);
+
+// Watches, from now on, the requests of the page that fail (failedLoadsOf
+// looks only at its scripts and frames, and only once a reading shows no main
+// part), and answers a function that stops watching and gives them: each by
+// its kind (LIST_REQUEST_KINDS), its site and, where the browser gives one,
+// its reason (a network error's code, or the error status the site answered
+// with), as failedLoadsOf gives them. The tab's own page loading is no part of
+// it, and a request the page cancelled itself (net::ERR_ABORTED: a list's
+// search for the text so far, dropped for the next key's) failed nothing.
+// A socket is no request to the browser: one that fails to open says so by
+// its own error. Only the site is kept, never the path or query. What the
+// browser itself kept from loading (its ad blocker) comes last.
+function failedRequestsOf(page) {
+  const loads = [];
+  let watching = true;
+  const keep = (kind, address, error) => {
+    const site = loadSiteOf(address);
+    if (watching && site && !loads.some((load) => load.kind === kind && load.site === site)) {
+      loads.push({ kind, site, ...(error ? { error } : {}) });
+    }
+  };
+  const add = (request, error) => {
+    try {
+      const type = request.resourceType();
+      if (!LIST_REQUEST_KINDS.has(type) || (type === "document" && request.frame() === page.mainFrame())) return;
+      keep(type === "document" ? "frame" : type, request.url(), error);
+    } catch (_) {
+      // A request the browser can no longer say anything of failed nothing.
+    }
+  };
+  const failed = (request) => {
+    let reason = "";
+    try {
+      reason = String((request.failure() && request.failure().errorText) || "");
+    } catch (_) {
+      reason = "";
+    }
+    const code = /net::ERR_[A-Z0-9_]{1,60}/.exec(reason);
+    if (code && code[0] === "net::ERR_ABORTED") return;
+    add(request, code ? code[0] : "");
+  };
+  const answered = (response) => {
+    let status = 0;
+    try {
+      status = response.status();
+    } catch (_) {
+      return;
+    }
+    if (Number.isSafeInteger(status) && status >= 400 && status <= 599) add(response.request(), `HTTP ${status}`);
+  };
+  // "Error in connection establishment: net::ERR_NAME_NOT_RESOLVED", or
+  // "Error during WebSocket handshake: Unexpected response code: 403".
+  const socket = (webSocket) => {
+    webSocket.on("socketerror", (message) => {
+      const said = String(message || "");
+      const code = /net::ERR_[A-Z0-9_]{1,60}/.exec(said);
+      const status = /response code: ([45][0-9]{2})\b/.exec(said);
+      try {
+        keep("websocket", webSocket.url().replace(/^ws(s?):/i, "http$1:"), code ? code[0] : status ? `HTTP ${status[1]}` : "");
+      } catch (_) {
+        // A socket the browser can no longer say anything of failed nothing.
+      }
+    });
+  };
+  page.on("requestfailed", failed);
+  page.on("response", answered);
+  page.on("websocket", socket);
+  return () => {
+    watching = false;
+    page.off("requestfailed", failed);
+    page.off("response", answered);
+    page.off("websocket", socket);
+    const blocked = (load) => load.error === "net::ERR_BLOCKED_BY_CLIENT";
+    return [...loads.filter((load) => !blocked(load)), ...loads.filter(blocked)].slice(0, FAILED_LOADS_LISTED);
+  };
 }
 
 // The words of the list a field opened as it was typed into, from the reading
@@ -4977,6 +5144,28 @@ function pagePartsInPage(request) {
 // frame the page itself holds counts, and only its site is kept, never its
 // path or query. Empty when the browser or the page cannot say.
 const FAILED_LOADS_LISTED = 4;
+
+// The site of a load's address, as a failed load names it: an http(s) host
+// name, never its path or query; "" for any other address.
+function loadSiteOf(address) {
+  try {
+    const url = new URL(address);
+    return ["http:", "https:"].includes(url.protocol) && /^[a-z0-9.-]{1,253}$/i.test(url.hostname) ? url.hostname : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+// Failed loads in a reading's or a step's words: each by its kind and site
+// ("a script from cdn.example", "a request to api.example": what a page's own
+// code asks for, of any kind), with the browser's reason where it gave one,
+// each said once.
+function loadsListed(loads) {
+  const said = loads.map((load) => `${load.kind === "script" || load.kind === "frame" ? `a ${load.kind} from` : "a request to"} ${
+    load.site}${load.error ? ` (${load.error === "net::ERR_BLOCKED_BY_CLIENT" ? "blocked by the browser" : load.error})` : ""}`);
+  return [...new Set(said)].join(", ");
+}
+
 async function failedLoadsOf(page) {
   const failed = new Map();
   const failedScripts = new Set();
@@ -5011,17 +5200,9 @@ async function failedLoadsOf(page) {
     null,
   );
   const parts = answer && answer.kind === "page-parts" && Array.isArray(answer.parts) ? answer.parts : [];
-  const siteOf = (address) => {
-    try {
-      const url = new URL(address);
-      return ["http:", "https:"].includes(url.protocol) && /^[a-z0-9.-]{1,253}$/i.test(url.hostname) ? url.hostname : "";
-    } catch (_) {
-      return "";
-    }
-  };
   const loads = [];
   const add = (kind, address, error) => {
-    const site = siteOf(address);
+    const site = loadSiteOf(address);
     if (site && !loads.some((load) => load.kind === kind && load.site === site)) {
       loads.push({ kind, site, ...(error ? { error } : {}) });
     }
@@ -5112,9 +5293,7 @@ function notDrawnMessage(state, notLoaded) {
     );
   }
   if (notLoaded.length) {
-    const loads = notLoaded.map((load) => `a ${load.kind} from ${load.site}${
-      load.error ? ` (${load.error === "net::ERR_BLOCKED_BY_CLIENT" ? "blocked by the browser" : load.error})` : ""}`);
-    said.push(`Part of this page did not load: ${loads.join(", ")}.`);
+    said.push(`Part of this page did not load: ${loadsListed(notLoaded)}.`);
   }
   const waited = notDrawnLookMs === null ? 0 : Math.max(1, Math.round(notDrawnLookMs / 1000));
   said.push(notDrawnLookMs === null
@@ -5505,6 +5684,9 @@ async function targetLocator(page, body) {
   if (body.snapshotId !== snapshotFingerprint(page.url(), interactive)) {
     const reading = recordedReading(page, body);
     if (!reading) {
+      // An earlier reading's id, or one this browser never gave: only
+      // runtime-agent, which keeps the ids it gave the turn, tells them apart,
+      // by these words (STALE_SNAPSHOT_WORDS in shared_browser.rs).
       pageChangedUnderStep = true;
       throw new Error(
         "Shared Browser snapshot is stale; take a fresh snapshot before acting",
@@ -7261,11 +7443,22 @@ function requireOnlyKeys(body, allowed) {
   }
 }
 
+// A step's control: one index of a reading, and that reading's snapshotId. An
+// id that is no reading's at all (missing, or not 64 hex characters) is one
+// this browser never gave, and nothing is done on the page. runtime-agent
+// refuses such an id before this script runs, in the same words with the
+// latest reading's id (snapshot_not_given_words in shared_browser.rs), which
+// an error here could not carry: its words are masked.
 function validateTarget(body) {
-  const hasIndex = Number.isInteger(body.index) && body.index >= 0 && body.index < 200;
   const hasSnapshotId =
     typeof body.snapshotId === "string" && SNAPSHOT_ID_PATTERN.test(body.snapshotId);
-  if (!hasIndex || !hasSnapshotId) {
+  if (!hasSnapshotId) {
+    throw new Error(
+      "This snapshotId isn't one this browser gave in this run; use the latest reading's. Nothing was done on the page.",
+    );
+  }
+  const hasIndex = Number.isInteger(body.index) && body.index >= 0 && body.index < 200;
+  if (!hasIndex) {
     throw new Error(
       "Shared Browser action requires one valid index and its fresh snapshotId",
     );
@@ -8130,7 +8323,12 @@ function rememberGivenAddresses(rawUrl, interactive, text) {
 // The addresses a text spells out, read as runtime-agent reads a task's
 // (`given_addresses_in_text`): each http(s) address, and each site name with a
 // path written without a scheme ("visitporto.travel/en/lello"), read as https.
-const ADDRESS_WORD_DELIMITERS = /[\s<>"'`[\]{}“”‘’«»]+/u;
+// A word ends at a space, a quote or a bracket, and at a mark no address holds
+// as it is typed: the punctuation of Chinese, Japanese and Korean sentences
+// (。、「」【】…), its full-width forms (，：；！？（）…), an ellipsis and a dash.
+// "營業時間：https://news.example.org/museum/hours。謝謝" names the hours page.
+const ADDRESS_WORD_DELIMITERS =
+  /[\s<>"'`[\]{}“”‘’«»\u2014\u2026\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/u;
 const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
 function addressesInText(text) {
   const addresses = [];
@@ -8139,7 +8337,7 @@ function addressesInText(text) {
     if (start >= 0) {
       addresses.push(addressEnd(word.slice(start)));
     } else if (!word.includes("://")) {
-      const address = addressEnd(word.replace(/^\(+/u, ""));
+      const address = addressEnd(word.replace(/^[(*]+/u, ""));
       const slash = address.indexOf("/");
       const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
       if (
@@ -8157,10 +8355,11 @@ function addressesInText(text) {
 // An address as a sentence holds it, less the sentence's own marks after it
 // and a closing parenthesis it does not open itself: "(see
 // https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+// The asterisks of emphasis around it go too: "**https://example.org/a**".
 function addressEnd(word) {
-  let address = word.replace(/[.,;:!?]+$/u, "");
+  let address = word.replace(/[.,;:!?*]+$/u, "");
   while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
-    address = address.slice(0, -1).replace(/[.,;:!?]+$/u, "");
+    address = address.slice(0, -1).replace(/[.,;:!?*]+$/u, "");
   }
   return address;
 }
@@ -8679,6 +8878,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       !selected.every(Boolean) ||
       (fields.length && !humanInputFieldsAsObserved(page.url(), interactive, { ...body, indices: fields }))
     ) {
+      // runtime-agent reads these words as targetLocator's stale ones
+      // (STALE_SNAPSHOT_WORDS in shared_browser.rs).
       pageChangedUnderStep = true;
       throw new Error("The page changed; take a fresh snapshot before requesting human input");
     }
@@ -9102,7 +9303,10 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // the field opens (fieldListAfterTyping).
     const optionsBefore = submitting ? null : await optionsShownBefore(page, target);
     const typedOn = submitting ? null : { url: page.url(), documentId: await documentOf(page) };
-    let listed = null;
+    let listed = { set: null, empty: false };
+    // The page's requests that fail from the first key to the end of the
+    // look, which a list that stays empty names (emptyListLine).
+    let failedRequests = null;
     // The field keeps a mark of the step, so a step that sends the page's
     // form names it first (sentFields), whatever its form sends of it. A
     // page busy with a load the typing started is not waited on for it.
@@ -9115,9 +9319,14 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       await target.locator.fill(body.text);
       await markTyped();
     } else {
-      await typeLikeAPerson(page, target, body.text);
-      await markTyped();
-      listed = await fieldListAfterTyping(page, target, optionsBefore);
+      const stopWatching = failedRequestsOf(page);
+      try {
+        await typeLikeAPerson(page, target, body.text);
+        await markTyped();
+        listed = await fieldListAfterTyping(page, target, optionsBefore);
+      } finally {
+        failedRequests = stopWatching();
+      }
     }
     // A page that went on by itself while the step looked for its list (a
     // search that runs as it is typed) sent what it sends: the step then says
@@ -9130,7 +9339,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // what was typed and none of them is chosen (typedFieldsLeftLine). One
     // that was sent, that no suggestions came for or whose page went on by
     // itself keeps none.
-    await markTypedList(target, held, !submitting && listed !== null && !wentOn);
+    await markTypedList(target, held, !submitting && listed.set !== null && !wentOn);
     // Text typed into a site's own search box searched nothing yet: a turn
     // read the list the page still showed as no result. Only where Enter in
     // the box, as it holds the text now, goes without a prompt (the press
@@ -9152,18 +9361,25 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     // into any other field it sends a form.
     const typeKind = submitting ? (step.category === "search" ? "search" : "submit") : "type";
     const reading = await snapshotAfterStep(page, withholding);
+    // A list that opened and stayed empty, and still reads so, says so, with
+    // the page's requests that failed meanwhile, which its result keeps too
+    // (`emptyList`), by kind, site and reason; a withheld page names none.
+    const emptyList = listed.empty && !wentOn && await stillOpenedEmpty(page, target, optionsBefore)
+      ? { notLoaded: reading.secretScreen === true ? [] : failedRequests || [] }
+      : null;
     const typed = typedLine(
       target.description,
       body.text,
       held,
       submitting,
       wentOn ? null : searchNotSent ? SEARCH_NOT_SENT : typingStep.category === "search" ? NOT_SEARCHED : NOT_SENT,
-      await fieldListLine(target, reading, optionsBefore, listed),
+      emptyList ? emptyListLine(emptyList.notLoaded) : await fieldListLine(target, reading, optionsBefore, listed.set),
     );
     return withActivity(
       {
         ...reading,
         done: (await stillAsBefore(page, before, unchanged)) ? `${typed} ${PAGE_UNCHANGED}` : typed,
+        ...(emptyList ? { emptyList } : {}),
       },
       stepActivity(page, typeKind, freeSearch ? "free" : stepApproval()),
     );

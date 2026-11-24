@@ -246,6 +246,81 @@ const PAGE_KEEPS_CHANGING_MESSAGE: &str = concat!(
     "This page keeps changing while Octo reads it, so this step was not done, and another snapshot would not hold still either. That ends this page, not the task. ",
     next_source!()
 );
+/// The most snapshotIds the server keeps of those it gave in a run ([`GivenSnapshots`]): far
+/// more readings than a turn takes.
+const MAX_GIVEN_SNAPSHOTS: usize = 512;
+/// The controller's words for a step whose snapshotId is neither the page's as it reads now nor
+/// the latest reading's (`targetLocator` and `request-human-input` in
+/// `assets/shared-browser-cli.js`), which it counts as the page changing under the step: it can't
+/// tell such an id from an earlier reading's ([`SharedBrowserMcpServer::with_given_snapshots`]).
+const STALE_SNAPSHOT_WORDS: [&str; 2] = [
+    "Shared Browser snapshot is stale; take a fresh snapshot before acting",
+    "The page changed; take a fresh snapshot before requesting human input",
+];
+
+/// What a step answers whose snapshotId this browser didn't give in the run: one that is no
+/// reading's id at all (missing, or not 64 hex characters: [`SnapshotNotGiven`]), or one it never
+/// gave while it gave others ([`GivenSnapshots`]). The step didn't run and nothing was done on the
+/// page, and the answer names the latest reading's id to use. A turn mis-copied a reading's id
+/// twice, was told only that the step "requires one valid index and its fresh snapshotId", and
+/// wrote that the planner did not accept its step (a local test, Nov 23).
+fn snapshot_not_given_words(latest: Option<&str>) -> String {
+    match latest {
+        Some(latest) => format!(
+            "This snapshotId isn't one this browser gave in this run; the latest reading's is {latest}. Nothing was done on the page."
+        ),
+        None => "This snapshotId isn't one this browser gave in this run, and it has given none yet: take a snapshot first. Nothing was done on the page.".to_string(),
+    }
+}
+
+/// A step's snapshotId that is no reading's id at all: missing, or not 64 hex characters
+/// ([`validate_target`]). The server answers it with [`snapshot_not_given_words`].
+#[derive(Debug)]
+struct SnapshotNotGiven;
+
+impl std::fmt::Display for SnapshotNotGiven {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "This snapshotId isn't one this browser gave in this run; use the latest reading's. Nothing was done on the page.",
+        )
+    }
+}
+
+impl std::error::Error for SnapshotNotGiven {}
+
+/// The snapshotIds the server gave the turn in its run, newest last: the id of each reading a
+/// step answered with. A step can only name one of them, as each id is a fingerprint of the run
+/// and the page (`snapshotFingerprint` in `assets/shared-browser-cli.js`), so a step that names
+/// another (mis-copied, made up, or an earlier run's) didn't run, and the page didn't change
+/// under it.
+#[derive(Default)]
+struct GivenSnapshots(std::collections::VecDeque<String>);
+
+impl GivenSnapshots {
+    /// Keeps the snapshotId a step's answer gave, if any.
+    fn keep(&mut self, payload: &JsonValue) {
+        let Some(id) = payload
+            .get("snapshotId")
+            .and_then(JsonValue::as_str)
+            .filter(|id| valid_snapshot_id(id))
+        else {
+            return;
+        };
+        self.0.retain(|kept| kept != id);
+        if self.0.len() >= MAX_GIVEN_SNAPSHOTS {
+            self.0.pop_front();
+        }
+        self.0.push_back(id.to_string());
+    }
+
+    fn latest(&self) -> Option<&str> {
+        self.0.back().map(String::as_str)
+    }
+
+    fn gave(&self, id: &str) -> bool {
+        self.0.iter().any(|kept| kept == id)
+    }
+}
 /// How long a person has to answer the prompts of one Shared Browser tool
 /// call, as `assets/shared-browser-approval.js` reads it. The script's
 /// `DEFAULT_APPROVAL_WAIT_MS` and `MAX_APPROVAL_WAIT_MS`, and the origin's
@@ -1221,6 +1296,13 @@ fn given_fingerprint(text: &str) -> String {
 /// none: it always opens. With them, the sites those texts name, a site's name
 /// alone included ([`given_sites_in_text`]), and those of the pages read.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
+    given_addresses_named_for(payload, true)
+}
+
+/// [`given_addresses_from_payload`], with what the job's request names (`prompt_text`) only
+/// `with_the_request`: a team's agent's request is its lead's plan, or its agents' reports, which
+/// the AI wrote ([`given_addresses_for_a_turn`]).
+fn given_addresses_named_for(payload: &JsonValue, with_the_request: bool) -> Vec<String> {
     fn text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         entry.get(key).and_then(JsonValue::as_str)
     }
@@ -1245,7 +1327,35 @@ pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
             addresses.extend(pages_read_in(content));
         }
     }
-    addresses.extend(named(text(payload, "prompt_text").unwrap_or_default()));
+    if with_the_request {
+        addresses.extend(named(text(payload, "prompt_text").unwrap_or_default()));
+    }
+    newest_given_addresses(addresses)
+}
+
+/// The fingerprints of the addresses and sites `text` names, all of it read, a part at a time
+/// (each address reader reads the first [`MAX_TASK_TEXT_BYTES`] of what it is handed): the
+/// installed skills a setup's first turn carries (`jobs::turn_continuation`'s
+/// `give_what_the_skills_declare`), whose addresses the setup opens "as the skill declares" them.
+pub(crate) fn given_addresses_named_in(text: &str) -> Vec<String> {
+    let mut addresses = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_TASK_TEXT_BYTES);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        // A part ends where a line does, so no address is cut in two.
+        if end < rest.len()
+            && let Some(line_end) = rest[..end].rfind('\n')
+        {
+            end = line_end + 1;
+        }
+        let part = &rest[..end];
+        addresses.extend(given_addresses_in_text(part));
+        addresses.extend(given_sites_in_text(part));
+        rest = &rest[end..];
+    }
     newest_given_addresses(addresses)
 }
 
@@ -1338,6 +1448,15 @@ fn given_sites_in_text(text: &str) -> Vec<String> {
 /// address, each site name with a path written without one, read as `https`, and, with
 /// `bare_sites`, each site's name written alone, read as its root.
 fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
+    addresses_named_in(text, bare_sites)
+        .into_iter()
+        .map(|(_, url)| url)
+        .collect()
+}
+
+/// The addresses `text` names, as [`urls_named_in`] reads them, each with where it is written
+/// in `text` (its byte range, without the sentence's marks around it).
+fn addresses_named_in(text: &str, bare_sites: bool) -> Vec<(std::ops::Range<usize>, reqwest::Url)> {
     let mut end = text.len().min(MAX_TASK_TEXT_BYTES);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -1361,18 +1480,29 @@ fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
                     | '«'
                     | '»'
             )
+            || ends_an_address_as_typed(character)
     };
     let mut urls = Vec::new();
-    for word in text[..end].split(delimiter) {
+    let scanned = &text[..end];
+    for word in scanned.split(delimiter) {
+        // Where the word starts in `text`: `split` hands back slices of it.
+        let at = word.as_ptr() as usize - scanned.as_ptr() as usize;
         let lower = word.to_ascii_lowercase();
         let scheme_at = ["http://", "https://"]
             .iter()
             .filter_map(|scheme| lower.find(scheme))
             .min();
         let address = match scheme_at {
-            Some(start) => reqwest::Url::parse(address_end(&word[start..])).ok(),
+            Some(start) => {
+                let written = address_end(&word[start..]);
+                reqwest::Url::parse(written)
+                    .ok()
+                    .map(|url| (at + start..at + start + written.len(), url))
+            }
             None if !word.contains("://") => {
-                let word = address_end(word.trim_start_matches('('));
+                let opened = word.trim_start_matches(['(', '*']);
+                let start = word.len() - opened.len();
+                let word = address_end(opened);
                 let host = word.split('/').next().unwrap_or_default();
                 let labels: Vec<&str> = host.split('.').collect();
                 let site_name = (bare_sites || word.contains('/'))
@@ -1389,6 +1519,7 @@ fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
                 site_name
                     .then(|| reqwest::Url::parse(&format!("https://{word}")).ok())
                     .flatten()
+                    .map(|url| (at + start..at + start + word.len(), url))
             }
             None => None,
         };
@@ -1397,11 +1528,298 @@ fn urls_named_in(text: &str, bare_sites: bool) -> Vec<reqwest::Url> {
     urls
 }
 
+/// A mark no address holds as it is typed, where a word of text ends as at a space: the
+/// punctuation of Chinese, Japanese and Korean sentences (`。、「」【】…`), its full-width forms
+/// (`，：；！？（）…`), an ellipsis and a dash. The controller script and `instafy web read` end a
+/// word at the same marks (`ADDRESS_WORD_DELIMITERS`). A person's
+/// "營業時間：https://news.example.org/museum/hours。謝謝" named "/museum/hours。謝謝", so the
+/// address they gave was refused as one nobody gave. A path's own letters, of any script, stay.
+fn ends_an_address_as_typed(character: char) -> bool {
+    matches!(
+        character,
+        '\u{2014}'
+            | '\u{2026}'
+            | '\u{3001}'..='\u{3003}'
+            | '\u{3008}'..='\u{3011}'
+            | '\u{3014}'..='\u{301f}'
+            | '\u{ff01}'..='\u{ff0f}'
+            | '\u{ff1a}'..='\u{ff20}'
+            | '\u{ff3b}'..='\u{ff40}'
+            | '\u{ff5b}'..='\u{ff65}'
+    )
+}
+
+/// Whether an address is on a public site by its name: not an IP address, nor a local name
+/// (`localhost`, a single label, `*.local`, `*.internal` …). The controller script refuses no
+/// such address as one nobody gave (`refuseUngivenAddress`): the browser's own network rules
+/// judge it.
+fn on_a_public_site(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !(host.starts_with('[')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || !host.contains('.')
+        || [
+            ".localhost",
+            ".local",
+            ".internal",
+            ".lan",
+            ".home",
+            ".intranet",
+            ".localdomain",
+            ".arpa",
+        ]
+        .iter()
+        .any(|suffix| host.ends_with(suffix)))
+}
+
+/// A card's task with its site's home page in place of each address of it that nothing gave the
+/// turn that wrote it (`given`: the fingerprints of the turn's record, [`given_address_key`]), or
+/// None when it names none. The browser takes every address a card's task names as given
+/// ([`given_addresses_from_payload`]): a reply's card carried a product address no page had
+/// given, which the browser would have opened as the shop's own page. A site's root stays, as it
+/// always opens, and so does an address on no public site by its name ([`on_a_public_site`]). An
+/// address is replaced where it is written, so the rest of the task keeps its words.
+pub(crate) fn with_home_pages_where_not_given(
+    task: &str,
+    given: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let mut written = String::with_capacity(task.len());
+    let mut at = 0;
+    for (span, url) in addresses_named_in(task, false) {
+        let Some(key) = given_address_key(&url) else {
+            continue;
+        };
+        let root = given_site_and_path(&url).is_some_and(|(_, path)| path == "/");
+        if root || !on_a_public_site(&url) || given.contains(&key) {
+            continue;
+        }
+        written.push_str(&task[at..span.start]);
+        written.push_str(&url.origin().ascii_serialization());
+        written.push('/');
+        at = span.end;
+    }
+    if at == 0 {
+        return None;
+    }
+    written.push_str(&task[at..]);
+    Some(written)
+}
+
+/// The variable that names a turn's record of the addresses it was given (`instafy web read`'s
+/// `TURN_GIVEN_ENV`): a folder of the job's own, outside the workspace. The runtime starts it
+/// with [`TURN_GIVEN_SEED`] before the turn starts ([`given_addresses_for_a_turn`]) and adds the
+/// pages each of the AI's own web searches found ([`keep_what_a_search_found`]); `instafy web
+/// read` adds each page it reads (its own address, its links and the addresses its text spells
+/// out) and `instafy web search` its results, each in files of their own, so no writer waits for
+/// another. The reader reads no address past a site's root that the record doesn't hold, and a
+/// card's task names its site's home page in place of one ([`with_home_pages_where_not_given`]).
+/// Kept as [`given.json`](GIVEN_ADDRESSES_FILE) keeps a run's: fingerprints, never an address.
+pub(crate) const TURN_GIVEN_ENV: &str = "INSTAFY_TURN_GIVEN_DIR";
+/// The record's first file, the runtime's: without it there is no record, and the reader refuses
+/// nothing.
+pub(crate) const TURN_GIVEN_SEED: &str = "seed.json";
+/// The most files of a turn's record read, the seed first, and the largest one read.
+const MAX_TURN_GIVEN_FILES: usize = 1_000;
+const MAX_TURN_GIVEN_FILE_BYTES: u64 = 512 * 1024;
+
+/// What a turn of `chat` starts its record of given addresses with: the addresses and sites its
+/// chat's history names and, where the person wrote it (`the_persons_request`), its request
+/// ([`given_addresses_from_payload`]), and what the chat's earlier turns on this runtime were
+/// given, its browser runs' and its other turns' alike
+/// ([`keep_a_turns_given_addresses_for_its_chat`]). A team's agent's request is its lead's plan,
+/// or its agents' reports, which the AI wrote and which can name an address it made up: such a
+/// turn has what the person's messages, the chat's browser turns and its other turns gave, those
+/// agents' own reads and searches among them.
+pub(crate) fn given_addresses_for_a_turn(
+    payload: &JsonValue,
+    chat: Option<Uuid>,
+    the_persons_request: bool,
+) -> Vec<String> {
+    given_addresses_for_a_turn_at(&approval_dir_path(), payload, chat, the_persons_request)
+}
+
+/// [`given_addresses_for_a_turn`], with the chats' records kept under `approval_dir`.
+fn given_addresses_for_a_turn_at(
+    approval_dir: &Path,
+    payload: &JsonValue,
+    chat: Option<Uuid>,
+    the_persons_request: bool,
+) -> Vec<String> {
+    let earlier = chat
+        .map(|chat| given_addresses_of(approval_dir, chat))
+        .unwrap_or_default();
+    newest_given_addresses(
+        earlier
+            .into_iter()
+            .chain(given_addresses_named_for(payload, the_persons_request)),
+    )
+}
+
+/// Keeps what a turn of `chat` was given (its record's fingerprints, oldest first) for the chat's
+/// next turns and browser runs on this runtime: a card's browser run opens a page the card's own
+/// turn read or found by a search, and the chat's next turn reads it again.
+pub(crate) fn keep_a_turns_given_addresses_for_its_chat(chat: Uuid, addresses: Vec<String>) {
+    remember_given_addresses(&approval_dir_path(), chat, addresses);
+}
+
+/// Writes one file of a turn's record (`name`, in the record's folder `dir`): `addresses`, as
+/// fingerprints. The file is published whole, under a temporary name the reader skips first.
+pub(crate) fn write_turn_given(dir: &Path, name: &str, addresses: &[String]) -> Result<()> {
+    publish_turn_given(dir, name, &json!({ "version": 1, "addresses": addresses }))
+}
+
+/// Publishes `record` as the file `name` of a turn's record (`dir`), whole: written under a
+/// temporary name the readers skip, then renamed.
+fn publish_turn_given(dir: &Path, name: &str, record: &JsonValue) -> Result<()> {
+    let payload = serde_json::to_vec(record)?;
+    let temporary = dir.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
+    std::fs::write(&temporary, payload)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    std::fs::rename(&temporary, dir.join(name)).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })?;
+    Ok(())
+}
+
+/// The files of a turn's record (`dir`) that are records, the seed's first, or None when it has
+/// no seed.
+fn turn_given_records(dir: &Path) -> Option<Vec<JsonValue>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".json") && name != TURN_GIVEN_SEED)
+        .collect();
+    names.sort();
+    names.insert(0, TURN_GIVEN_SEED.to_string());
+    names.truncate(MAX_TURN_GIVEN_FILES);
+    let mut records = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        let record = std::fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_TURN_GIVEN_FILE_BYTES)
+            .and_then(|_| std::fs::read(&path).ok())
+            .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
+            .filter(|record| {
+                record.get("version") == Some(&json!(1))
+                    && record.get("addresses").is_some_and(JsonValue::is_array)
+            });
+        match record {
+            Some(record) => records.push(record),
+            None if name == TURN_GIVEN_SEED => return None,
+            None => {}
+        }
+    }
+    Some(records)
+}
+
+/// Every fingerprint a turn's record holds (`dir`), the seed's first, or None when it has no seed.
+pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
+    let records = turn_given_records(dir)?;
+    Some(
+        records
+            .iter()
+            .filter_map(|record| record["addresses"].as_array())
+            .flatten()
+            .filter_map(JsonValue::as_str)
+            .filter(|address| {
+                address.len() == 32
+                    && address
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Whether a turn's record (`dir`) takes any address: one of the turn's searches found pages
+/// that no list names ([`keep_what_a_search_found`]), so any address may be one it gave.
+pub(crate) fn turn_given_takes_any_address(dir: &Path) -> bool {
+    turn_given_records(dir).is_some_and(|records| {
+        records
+            .iter()
+            .any(|record| record.get(TURN_GIVEN_ANY_ADDRESS) == Some(&json!(true)))
+    })
+}
+
+/// The mark of a record written for a search whose pages no list names: with it, `instafy web
+/// read` refuses no address as one nobody gave, and a card keeps its words, for the rest of the
+/// turn.
+const TURN_GIVEN_ANY_ADDRESS: &str = "anyAddress";
+
+/// Keeps the pages one of the AI's own web searches found (`results`, its `url` entries, as the
+/// search bridge and a person's own login's search answer) in the turn's record (`dir`), so the
+/// turn reads them with `instafy web read`. A result gives its own address, never its site. A
+/// search that hands back no list (`None`: a provider's own search tool, whose pages only the
+/// model sees) marks the record as taking any address ([`turn_given_takes_any_address`]): a page
+/// it found would otherwise be refused as one nobody gave.
+pub(crate) fn keep_what_a_search_found(dir: &Path, results: Option<&[JsonValue]>) {
+    let name = format!("search-{}.json", Uuid::new_v4());
+    let Some(results) = results else {
+        let record = json!({ "version": 1, "addresses": [], (TURN_GIVEN_ANY_ADDRESS): true });
+        if let Err(error) = publish_turn_given(dir, &name, &record) {
+            tracing::warn!(
+                ?error,
+                "could not mark the turn's record for a search that lists no pages"
+            );
+        }
+        return;
+    };
+    let mut addresses: Vec<String> = Vec::new();
+    for key in results
+        .iter()
+        .filter_map(|result| result.get("url").and_then(JsonValue::as_str))
+        .filter_map(|url| reqwest::Url::parse(url.trim()).ok())
+        .filter_map(|url| given_address_key(&url))
+    {
+        if !addresses.contains(&key) {
+            addresses.push(key);
+        }
+    }
+    if addresses.is_empty() {
+        return;
+    }
+    if let Err(error) = write_turn_given(dir, &name, &addresses) {
+        tracing::warn!(
+            ?error,
+            "could not keep what a web search found in the turn's record"
+        );
+    }
+}
+
+/// Keeps what one of the AI's own web search calls ended with (`search`) in the turn's record
+/// (`dir`), as [`keep_what_a_search_found`] does: its list's pages, or, for a search, an open or a
+/// find that answered with no list (a provider's own search tool), any address. The end the
+/// runtime gives a call whose request failed before it answered names no command and no list
+/// (`managed_web_search::unanswered_search_end`): it found nothing, so it gives nothing. Taken for
+/// a search that lists none of its pages, one failed open left the reader refusing no address
+/// and the turn's cards their words for the rest of the turn.
+pub(crate) fn keep_what_a_search_ended_with(
+    dir: &Path,
+    search: &codex_protocol::protocol::WebSearchEndEvent,
+) {
+    if search.results.is_none()
+        && matches!(
+            search.action,
+            codex_protocol::models::WebSearchAction::Other
+        )
+    {
+        return;
+    }
+    keep_what_a_search_found(dir, search.results.as_deref());
+}
+
 /// An address as a sentence holds it, less the sentence's own marks after it
 /// and a closing parenthesis it does not open itself: "(see
 /// https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+/// The asterisks of emphasis around it go too: "**https://example.org/a**", as
+/// a skill's own text can declare the address its setup opens.
 fn address_end(word: &str) -> &str {
-    let marks = ['.', ',', ';', ':', '!', '?'];
+    let marks = ['.', ',', ';', ':', '!', '?', '*'];
     let mut address = word.trim_end_matches(marks);
     while address.ends_with(')') && address.matches(')').count() > address.matches('(').count() {
         address = address[..address.len() - 1].trim_end_matches(marks);
@@ -3511,6 +3929,8 @@ struct SharedBrowserMcpServer {
     /// Steps in a row that the page changed under
     /// ([`PAGE_CHANGED_STREAK_LIMIT`]).
     page_changed_streak: Arc<AtomicU32>,
+    /// The snapshotIds this server gave the turn ([`GivenSnapshots`]).
+    given_snapshots: Arc<Mutex<GivenSnapshots>>,
 }
 
 /// Whether a step that answered starts the count of steps the page changed
@@ -3539,7 +3959,69 @@ impl SharedBrowserMcpServer {
             browser_unavailable_streak: Arc::new(AtomicU32::new(0)),
             changed_after_yes: Arc::new(AtomicU32::new(0)),
             page_changed_streak: Arc::new(AtomicU32::new(0)),
+            given_snapshots: Arc::new(Mutex::new(GivenSnapshots::default())),
         }
+    }
+
+    /// The latest snapshotId this server gave the turn, if any.
+    fn latest_snapshot(&self) -> Option<String> {
+        self.given_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest()
+            .map(str::to_string)
+    }
+
+    /// Keeps the snapshotId a step's answer gave ([`GivenSnapshots`]), and answers a step the
+    /// controller refused for its snapshotId ([`STALE_SNAPSHOT_WORDS`]) with
+    /// [`snapshot_not_given_words`] when this server never gave that id while it gave others: the
+    /// controller can't tell such an id from an earlier reading's, so it counted the step as one
+    /// the page changed under, and two of them ended a page that held still as one that "keeps
+    /// changing". The step didn't run, so it counts as no page change; what the controller said
+    /// of the step stays. With none given yet (a run's first step on an earlier run's reading),
+    /// the controller's "take a fresh snapshot" stands, and the step counts as no page change
+    /// either.
+    fn with_given_snapshots(
+        &self,
+        request: &SharedBrowserRequest,
+        outcome: Result<JsonValue>,
+    ) -> Result<JsonValue> {
+        let mut given = self
+            .given_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let error = match outcome {
+            Ok(payload) => {
+                given.keep(&payload);
+                return Ok(payload);
+            }
+            Err(error) => error,
+        };
+        let named = request
+            .body
+            .as_ref()
+            .and_then(|body| body.get("snapshotId"))
+            .and_then(JsonValue::as_str);
+        let Some(failure) = error.downcast_ref::<ControllerFailure>() else {
+            return Err(error);
+        };
+        if !STALE_SNAPSHOT_WORDS.contains(&failure.message.as_str())
+            || named.is_none_or(|id| given.gave(id))
+        {
+            return Err(error);
+        }
+        Err(ControllerFailure {
+            message: match given.latest() {
+                Some(latest) => snapshot_not_given_words(Some(latest)),
+                None => failure.message.clone(),
+            },
+            step: failure.step,
+            approval: failure.approval,
+            refused: failure.refused,
+            changed_after_yes: false,
+            page_changed: false,
+        }
+        .into())
     }
 
     /// Latches `code` unless a code is already latched, and answers with the
@@ -3570,7 +4052,7 @@ impl SharedBrowserMcpServer {
             return Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code));
         }
 
-        let outcome = execute().await;
+        let outcome = self.with_given_snapshots(request, execute().await);
         // Only an unreachable browser continues the streak; any other answer
         // proves the browser and the run's tab were there.
         let unavailable = outcome
@@ -3690,6 +4172,11 @@ impl ServerHandler for SharedBrowserMcpServer {
             // A tool the browser doesn't offer is no step of it.
             Err(error) if !self.tools.iter().any(|offered| offered.name == tool) => {
                 return Err(McpError::invalid_params(error.to_string(), None));
+            }
+            // A snapshotId that is no reading's: the answer names the latest reading's.
+            Err(error) if error.downcast_ref::<SnapshotNotGiven>().is_some() => {
+                let words = snapshot_not_given_words(self.latest_snapshot().as_deref());
+                return Ok(failed_tool_result(&words).into());
             }
             // A step whose arguments the browser refused ran nowhere, and says why as every
             // failed step does ([`failed_tool_result`]): a protocol error reaches a code cell
@@ -4182,18 +4669,23 @@ fn require_only_keys(object: &JsonMap<String, JsonValue>, allowed: &[&str]) -> R
     Ok(())
 }
 
+/// A step's control: one index of a reading, and that reading's snapshotId. An id that is no
+/// reading's at all is one this browser never gave ([`SnapshotNotGiven`]).
 fn validate_target(object: &JsonMap<String, JsonValue>) -> Result<()> {
+    let has_snapshot_id = object
+        .get("snapshotId")
+        .and_then(JsonValue::as_str)
+        .is_some_and(valid_snapshot_id);
+    if !has_snapshot_id {
+        return Err(SnapshotNotGiven.into());
+    }
     let has_index = match object.get("index") {
         Some(value) => value
             .as_u64()
             .is_some_and(|index| index <= MAX_TARGET_INDEX),
         None => false,
     };
-    let has_snapshot_id = object
-        .get("snapshotId")
-        .and_then(JsonValue::as_str)
-        .is_some_and(valid_snapshot_id);
-    if !has_index || !has_snapshot_id {
+    if !has_index {
         bail!("Shared Browser action requires one valid index and its fresh snapshotId");
     }
     Ok(())

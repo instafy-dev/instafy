@@ -912,6 +912,12 @@ const LEGACY_GETTING_AROUND_SHA256: &[&str] = &[
     // fields in the chat was linked with the values to type instead of opened again, and a
     // click's answer that a field still holds what was typed meant a suggestion to click.
     "6a9f1c67e61de65a86dde32096e797d4931099c207c7719df1a25d7bf3a94173", // v3
+    // From before a planner whose list opened with no suggestion was opened once from the
+    // operator's own planner page or linked instead of typed into again, a step that didn't work
+    // was said as the turn's own, the lines given when no stop could be chosen were each page's
+    // own words (a city or tourism page's never the place's), with every line, stop and closure
+    // it names, and a page asked for after a route turn carried that turn's lines.
+    "cb6a748770dc88b2ebc1a25dd1d6e9fcd43a258abcacf75894e9c2dc7b8d5e5e", // v4
 ];
 const WEB_RESEARCH_LINK_ONLY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

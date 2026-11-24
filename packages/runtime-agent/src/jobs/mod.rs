@@ -4517,6 +4517,7 @@ impl TurnClockGuard {
             None => {
                 overrides.push(EnvOverride::remove("INSTAFY_STEP_TIMINGS_FILE"));
                 overrides.push(EnvOverride::remove("INSTAFY_TURN_CONTINUE_FILE"));
+                overrides.push(EnvOverride::remove(crate::shared_browser::TURN_GIVEN_ENV));
             }
         }
         Self {
@@ -8526,6 +8527,9 @@ impl JobProcessor {
             match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
                 SkillsLaneStep::Finished(execution) => return Ok(execution),
                 SkillsLaneStep::Kickoff { prompt, kickoff } => {
+                    // The setup opens the address where a skill says the person signs in, as the
+                    // skill declares it: what the installed skills name is given to this turn.
+                    turn_files.give_what_the_skills_declare(&prompt);
                     prompt_override = Some(prompt);
                     skills_kickoff = Some(kickoff);
                 }
@@ -8713,7 +8717,10 @@ impl JobProcessor {
                         && worker_question_reply.is_none()
                         && pending_worker_input.is_none()
                         && let Some(execution) = routed_browser_execution(
-                            &routed_browser_task(job, prompt_text, routing_summary.as_deref()),
+                            &browser_request::routed_task_naming_home_pages_where_not_given(
+                                routed_browser_task(job, prompt_text, routing_summary.as_deref()),
+                                turn_files.given_addresses().as_ref(),
+                            ),
                             continue_building,
                             agent_routing_preflight_artifact(&preflight),
                         )
@@ -9012,6 +9019,7 @@ impl JobProcessor {
             // when the controller can continue it, to leave a note for its next turn).
             turn_wrap_up: turn_files.wrap_up(),
             turn_continue_note: turn_files.continue_note_path(),
+            turn_given_dir: turn_files.given_dir(),
             // A team's turn ends by the team's deadline (`turn_continuation`).
             run_timeout: turn_files.limit(),
             run_deadline: turn_files.deadline(),
@@ -9575,6 +9583,7 @@ impl JobProcessor {
         suppress_multi_agent_plan_actions_for_worker(job, &mut outcome);
         log_browser_requests_dropped_as_read(job, &output.final_json);
         suppress_browser_requests_where_unsupported(job, &mut outcome);
+        name_home_pages_in_cards_where_not_given(&mut outcome, turn_files);
         hold_cards_for_pages_its_reader_did_not_read(&mut outcome, &[&output.events]);
         let shared_browser_opened_no_page = shared_browser_execution_missing_after_attempt(
             explicit_shared_browser_execution,
@@ -10398,6 +10407,7 @@ impl JobProcessor {
             suppress_multi_agent_plan_actions_for_worker(job, &mut retry_outcome);
             log_browser_requests_dropped_as_read(job, &retry_output.final_json);
             suppress_browser_requests_where_unsupported(job, &mut retry_outcome);
+            name_home_pages_in_cards_where_not_given(&mut retry_outcome, turn_files);
             hold_cards_for_pages_its_reader_did_not_read(
                 &mut retry_outcome,
                 &[&output.events, &retry_output.events],
@@ -10843,6 +10853,7 @@ impl JobProcessor {
                 suppress_multi_agent_plan_actions_for_worker(job, &mut finalization_outcome);
                 log_browser_requests_dropped_as_read(job, &finalization_output.final_json);
                 suppress_browser_requests_where_unsupported(job, &mut finalization_outcome);
+                name_home_pages_in_cards_where_not_given(&mut finalization_outcome, turn_files);
                 hold_cards_for_pages_its_reader_did_not_read(
                     &mut finalization_outcome,
                     &[&output.events, &retry_output.events],
@@ -15102,6 +15113,33 @@ fn post_only_the_card(job: &LeaseJob, outcome: &mut CodexOutcome) {
         && !card_waits_for_the_person(job, &outcome.actions)
     {
         outcome.summary.clear();
+    }
+}
+
+/// Names its site's home page in each card of an answer in place of an address nothing gave the
+/// turn ([`browser_request::BrowserRequest::name_home_pages_where_not_given`]), by the turn's
+/// record of the addresses it was given (`turn_files`): what the person's messages, the request,
+/// the chat's browser turns and earlier turns, the pages its reader read and what its searches
+/// found gave. The browser opens a card's addresses as given, and a reply's card carried a
+/// product address no page had given. A turn without that record keeps its cards as they are.
+fn name_home_pages_in_cards_where_not_given(
+    outcome: &mut CodexOutcome,
+    turn_files: &turn_continuation::TurnFiles,
+) {
+    if !outcome
+        .actions
+        .iter()
+        .any(|action| matches!(action, CodexAction::RequestBrowser(_)))
+    {
+        return;
+    }
+    let Some(given) = turn_files.given_addresses() else {
+        return;
+    };
+    for action in &mut outcome.actions {
+        if let CodexAction::RequestBrowser(request) = action {
+            request.name_home_pages_where_not_given(&given);
+        }
     }
 }
 

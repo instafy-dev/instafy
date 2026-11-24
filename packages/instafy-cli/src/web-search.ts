@@ -17,7 +17,8 @@
 //   to that search first, and to going on without one only if it does not run;
 // - a key goes only, over https, to the host of its own entry's `url`, in the header the entry names. It is never
 //   printed or written: not in the output, not in errors, not in the turn's state. Nothing is cached, and no result
-//   list is written anywhere;
+//   list is written anywhere: the turn's record of the addresses it was given keeps only fingerprints of the results'
+//   addresses (web-shared.ts), so `instafy web read` reads them;
 // - per turn at most 4 searches; 8 results by default and 20 at most; queries of 200 characters or fewer. A query
 //   that looks like a key or a password is refused, and e-mail addresses and long numbers are removed before it is
 //   sent. The same search twice in one turn is not sent again;
@@ -48,6 +49,7 @@ import {
   FIXTURE_VIEWER,
   LinkOnlyListUnavailableError,
   SEARCH_VIEWER,
+  TurnGiven,
   WebFixturesError,
   barsAgents,
   checkAddress,
@@ -1169,6 +1171,12 @@ export async function webSearch(options: WebSearchOptions, deps: WebSearchDeps =
   const report = async (status: SearchStatus, extra: Partial<WebSearchReport> = {}): Promise<WebSearchReport> => {
     const used = await state.turn((s) => s.searches[chainName] ?? 0);
     const results = extra.results ?? [];
+    // A result's address is one the turn was given: `instafy web read` reads it.
+    if (results.length) {
+      const given = TurnGiven.load(env);
+      given?.add(results.map((result) => result.url));
+      given?.save("search");
+    }
     const codeTell = extra.code ? CODE_TELL[extra.code] : undefined;
     return {
       ok: true,
