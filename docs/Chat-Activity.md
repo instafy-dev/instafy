@@ -769,7 +769,11 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   the step then sends one update that names the site ("Opening {host}"). A path on the tab's
   own site names the site of the page the tab is on. A refused address
   never reads "Opening {host}" while its step runs; the step's end names the site as before,
-  so Details still read "Tried opening {host}". The browser on the person's device says
+  so Details still read "Tried opening {host}". Typing with submit, or Enter, reads as browsing
+  when it starts, since only the browser knows whether it sends the site's own search: as the
+  step acts (after the person's yes, when it asked) the controller marks its action in the log
+  `"step": "search"` when its policy judged it one, and the step then sends one update that
+  reads "Searching {host}" on its own site. The browser on the person's device says
   nothing before its answer, so there the step takes the host from the address Octo asked for
   when it starts. Any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
@@ -804,7 +808,7 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   |---|---|---|---|
   | `navigate`, `open_tab` | Opening {host} | opened {host} / opened {n} pages on {host} / opened pages on {host} | content |
   | `snapshot` | Reading {host} | read a page on {host} / read {n} pages on {host} / read pages on {host} | content |
-  | `search` (typing with submit, or Enter, in a search field) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
+  | `search` (typing with submit, or Enter, in a search field; while it runs, from the browser's mark in its action log) | Searching {host} | searched {host} / searched {host} {n} times / searched {host} | content |
   | `type` into the site's own search box, not sent yet (the reading it targets lists the field as a `search` field, the `searchbox` role, or a field in the page's search area) | Searching {host} | typed a search on {host} (Details only) | quiet |
   | `type`, `choose` (and a click that checks a box or a radio button) | Filling in a form on {host} | filled in a form on {host} (Details only) | quiet |
   | `submit`, `click`, `press`, `scroll`, `tabs`, `status` | Browsing {host} | browsed {host} (Details only) | quiet |
@@ -866,12 +870,20 @@ activity line, to the person who started the run only, and the line says `Waitin
 - **The row** (`BrowserApprovalRow.tsx`) names the step in one sentence: `Octo wants to use
   {host}.` (or `to open {page}.` when the site prompt names the page it loads), `to open {page}.`,
   `to click “{label}” on {host}.`, `to type into “{label}” on {host}.`, `to send the form
-  “{label}” on {host}.`, `to press Enter on “{label}” on {host}.` and `to press {key} on {host}.`,
+  “{label}” on {host}.`, `to press Enter on “{label}” on {host}.`, `to press {key} on {host}.`
+  and `to search {host}.`,
   plus `It goes to {site}.` when the step sends a form to another site (a form, or a step whose
   sentence lists what it sends), and `It may go to {site}.` for any other step bound to another
   site: a link, or a choice in a form (Space on a toggle, a click on a box), which the runtime binds
   to the form's address though only the page's own script would send it. A step that stays on the
-  site says nothing of where it goes. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
+  site says nothing of where it goes. `to search {host}.` is a site's own search: typing with
+  submit, or Enter, in a field the browser's policy puts in its search category (a search field
+  whose form sends a GET to the page's own site, or that has no form), whose label the runtime
+  leads with `Search this site` in place of a category. It names no field, and a form with
+  another field still says what it sends. A form that posts, or goes to another site, is never
+  in that category, whatever its words say ("Find…"), and the runtime leads a form step's label
+  of the page's own words that would read so with `Change something`. Only the words change:
+  such a search asks exactly when it did. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
   here, where the person needs them to decide, never in the line. The runtime leads its label
   with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only

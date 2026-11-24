@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitBrowserApprovalLabel } from "../browserApprovalLabel";
+import { siteSearchLabel, splitBrowserApprovalLabel } from "../browserApprovalLabel";
 
 describe("splitBrowserApprovalLabel", () => {
   it("takes the runtime's category off the control's name and says what it adds", () => {
@@ -16,6 +16,27 @@ describe("splitBrowserApprovalLabel", () => {
   it("leaves a name alone that only looks like a category", () => {
     for (const label of ["Pesquisa", "Note: Save", "change something: Save", "Change something:Save", "Octo's tab 1: Pesquisa"]) {
       expect(splitBrowserApprovalLabel(label)).toEqual({ label, note: null });
+    }
+  });
+});
+
+describe("siteSearchLabel", () => {
+  it("reads the runtime's title for a site's own search, and what else its form sends", () => {
+    expect(siteSearchLabel("Search this site")).toBe("");
+    expect(siteSearchLabel("Search this site: Search \u00b7 Sends: Search, Category")).toBe("Search \u00b7 Sends: Search, Category");
+  });
+
+  it("reads no other label as a search, whatever its words", () => {
+    for (const label of [
+      "Search",
+      "Find a store",
+      "Search this site now",
+      "search this site",
+      "Search this site:Search",
+      "Change something: Search this site",
+      "Octo's tab 1: Search this site",
+    ]) {
+      expect(siteSearchLabel(label)).toBeNull();
     }
   });
 });

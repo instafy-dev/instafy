@@ -537,8 +537,18 @@ function refuseUnlessReadingStep(readingStep, step = null) {
   }
 }
 
-async function allowStepOnce(details, options) {
+async function allowStepOnce(stepDetails, options) {
   assertStepOnTime();
+  // Only a site's own search leads its label with SITE_SEARCH_TITLE. A form
+  // step's label of the page's own words that would lead with it (Enter on a
+  // link named "Search this site") is led by "Change something", which Studio
+  // shows as nothing, so no page's words read as a search.
+  const label = String(stepDetails.label ?? "").trim();
+  const details = !stepDetails.categoryTitle && !inAgentTab() &&
+    ["form-submit", "press-enter"].includes(stepDetails.operation) &&
+    (label === SITE_SEARCH_TITLE || label.startsWith(`${SITE_SEARCH_TITLE}:`))
+    ? { ...stepDetails, categoryTitle: actionPolicy.categoryTitle("change") }
+    : stepDetails;
   // Routine browsing takes a routine step without a prompt; every other step
   // waits for the person's answer.
   const prompts = !(options?.routine === true && approvalProtocol.routineBrowsingAllowed());
@@ -605,6 +615,10 @@ function emitAction(event) {
         viewportW: event.viewportW ?? null,
         viewportH: event.viewportH ?? null,
         pageId: activePageId,
+        // A step that sends the page's own search says so as it acts:
+        // runtime-agent reads the mark while the step runs, and its line
+        // reads "Searching <site>" from then on, not "Browsing <site>".
+        ...(event.step === "search" ? { step: "search" } : {}),
         ...(event.type === "human_input" ? { humanInputRequest: event.humanInputRequest } : {}),
       })}\n`,
     );
@@ -2884,6 +2898,27 @@ function routineCovers(classification, description, { consequential = true } = {
 
 function approvalCategoryTitle(classification) {
   return actionPolicy.categoryTitle(classification.category) || "";
+}
+
+// What leads the label of a site's own search that asks, in place of a
+// category: Enter in a search field, or typing into it with submit, that the
+// policy puts in its search category (classifySubmit: a GET of the page's own
+// site, or a field in no form). Studio then asks "Octo wants to search
+// visitlisboa.com." (`SITE_SEARCH_TITLE` in browserApprovalLabel.ts). A search box
+// whose field had no name asked as "send the form “Enter a search term” …
+// Sends: Enter a search term", the field's words twice and no search (a local
+// test, Nov 20). It changes no step's answer: a search that asked still asks.
+// A form that posts, or goes to another site, is never in that category,
+// whatever its words ("Find…"), and keeps its own label.
+const SITE_SEARCH_TITLE = "Search this site";
+
+// A site search's label after its title: nothing when the form holds no other
+// field than the one searched in, since the search is all it sends; else the
+// control and the fields it sends, as any form step says them.
+function siteSearchLabel(description, sent) {
+  return policyTarget(description).formFieldCount > 1
+    ? promptLabel(description, "Submit this form", sent, SITE_SEARCH_TITLE)
+    : "";
 }
 
 // A control's masked names: the text it shows, then its other name when the
@@ -9049,17 +9084,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (submitting) {
       stepKind = step.category === "search" ? "search" : "submit";
     }
+    // A site's own search asks as one (SITE_SEARCH_TITLE).
+    const search = stepKind === "search";
+    const sent = submitting && !readingStep ? await sentFields(target, typeSubmission, body.text) : NO_SENT_FIELDS;
     await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
-      label: submitting
-        ? promptLabel(
-          target.description,
-          "Submit this form",
-          readingStep ? NO_SENT_FIELDS : await sentFields(target, typeSubmission, body.text),
-          approvalCategoryTitle(step),
-        )
-        : promptLabel(target.description, "Type into this field"),
-      categoryTitle: approvalCategoryTitle(step),
+      label: search
+        ? siteSearchLabel(target.description, sent)
+        : submitting
+          ? promptLabel(target.description, "Submit this form", sent, approvalCategoryTitle(step))
+          : promptLabel(target.description, "Type into this field"),
+      categoryTitle: search ? SITE_SEARCH_TITLE : approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
@@ -9084,6 +9119,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       type: "type",
       label: `Type into ${quotedControlLabel(target.description)}`,
       url: page.url(),
+      step: stepKind,
     });
     await target.locator.focus();
     page = await resolveExpectedPage(browser);
@@ -9350,21 +9386,21 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (pressKey === "Enter" && step.category === "search") {
       stepKind = "search";
     }
+    // A site's own search asks as one (SITE_SEARCH_TITLE).
+    const search = stepKind === "search";
+    const sent = activationKey && !readingStep ? await sentFields(target, pressSubmission) : NO_SENT_FIELDS;
     await allowStepOnce({
       operation: activationKey
         ? pressKey === "Enter"
           ? "press-enter"
           : "press-space"
         : "press-key",
-      label: activationKey
-        ? promptLabel(
-          target.description,
-          "Activate this control",
-          readingStep ? NO_SENT_FIELDS : await sentFields(target, pressSubmission),
-          approvalCategoryTitle(step),
-        )
-        : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`,
-      categoryTitle: approvalCategoryTitle(step),
+      label: search
+        ? siteSearchLabel(target.description, sent)
+        : activationKey
+          ? promptLabel(target.description, "Activate this control", sent, approvalCategoryTitle(step))
+          : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`,
+      categoryTitle: search ? SITE_SEARCH_TITLE : approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
@@ -9391,6 +9427,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       type: "type",
       label: `Press ${pressKey}`,
       url: page.url(),
+      step: stepKind,
     });
     await pointAtControl(target, { hover: false });
     // A key pressed in a field may choose one of its suggestions or send it:

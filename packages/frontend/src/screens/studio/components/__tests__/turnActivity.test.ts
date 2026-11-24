@@ -2025,6 +2025,22 @@ describe("answered browser prompts", () => {
     });
     expect(withStep.summary).toBe("Opened carris.pt, searched visitlisboa.com · you allowed a search on visitlisboa.com");
   });
+
+  it("say a site's own search the person answered in this tab was a search before its step says so", () => {
+    const opened = browserStep(BROWSER_OPEN, { host: "carris.pt", pageKey: PAGE_A, step: "navigate" });
+    const activity = summarizeTurnActivity([opened], {
+      jobId: JOB,
+      phase: "completed",
+      approvals: [{
+        approvalId: "approval-1", outcome: "allowed", operation: "form-submit",
+        host: "visitlisboa.com", destinationHost: "visitlisboa.com", search: true,
+      }],
+    });
+    expect(activity.summary).toBe("Opened carris.pt · you allowed a search on visitlisboa.com");
+    expect(activity.details.at(-1)).toEqual({
+      kind: "approval", id: "approval:approval-1", text: "You allowed a search on visitlisboa.com",
+    });
+  });
 });
 
 describe("what the browser did on its own", () => {

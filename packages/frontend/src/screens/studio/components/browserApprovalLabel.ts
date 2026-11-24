@@ -34,3 +34,26 @@ export function splitBrowserApprovalLabel(raw: string): BrowserApprovalLabel {
   }
   return { label, note: null };
 }
+
+/**
+ * The runtime leads a site's own search's label with these words, in place
+ * of a category (`SITE_SEARCH_TITLE` in runtime-agent's
+ * `shared-browser-cli.js`): Enter in a search field, or typing into it with
+ * submit, that the browser's policy puts in its search category, a form that
+ * sends a GET to the page's own site or a field in no form. Never the page's
+ * own words: the runtime leads a page's words that would read so with
+ * "Change something". A form that posts, or goes to another site, is never
+ * in that category, whatever its words say ("Find…").
+ */
+export const SITE_SEARCH_TITLE = "Search this site";
+
+/**
+ * What a site search's label says after its title, the fields its form
+ * sends besides the search ("" for a form with no other field), or null for
+ * a label the runtime did not lead with the title.
+ */
+export function siteSearchLabel(raw: string): string | null {
+  const label = raw.trim();
+  if (label === SITE_SEARCH_TITLE) return "";
+  return label.startsWith(`${SITE_SEARCH_TITLE}: `) ? label.slice(SITE_SEARCH_TITLE.length + 2).trim() : null;
+}
