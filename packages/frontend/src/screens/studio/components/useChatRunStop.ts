@@ -145,6 +145,16 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     if (state.phase !== "requested") return;
     if (effectivePhase(state, targets) === "idle") setState((previous) => ({ ...previous, phase: "idle", attemptedTargets: [] }));
   }, [state, targets]);
+  // Every turn this Stop was sent for reads "Stopped": nothing is left for
+  // it to show, whatever its answer says. One that failed or timed out has
+  // nothing left to retry either, also once another turn starts. A press
+  // between two parts waits for the next one, as before.
+  const stopOver = !state.awaitingNext && state.attemptedTargets.length > 0
+    && state.attemptedTargets.every((target) => isStopped(options.stopped, target));
+  useEffect(() => {
+    if (state.phase !== "error" || !stopOver) return;
+    setState((previous) => ({ ...previous, phase: "idle", attemptedTargets: [], error: null }));
+  }, [state.phase, stopOver]);
 
   const execute = useCallback(async (selection: readonly ChatRunStopTarget[]) => {
     const current = latest.current.options;
@@ -302,11 +312,6 @@ export function useChatRunStop(options: ChatRunStopOptions) {
 
   const availableTargets = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId));
   const phase = effectivePhase(state, targets);
-  // Every turn this Stop was sent for reads "Stopped": nothing is left for
-  // it to show, whatever its answer says. A press between two parts waits
-  // for the next one, as before.
-  const stopOver = !state.awaitingNext && state.attemptedTargets.length > 0
-    && state.attemptedTargets.every((target) => isStopped(options.stopped, target));
   const visible = canStop && Boolean(conversationId)
     && (availableTargets.length > 0 || between
       || (!stopOver && (phase === "stopping" || phase === "error" || phase === "requested")));

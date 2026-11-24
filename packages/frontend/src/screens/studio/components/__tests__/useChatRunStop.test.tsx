@@ -365,13 +365,21 @@ describe("useChatRunStop", () => {
     });
 
     it("offers no Retry for a Stop whose turn reads Stopped, though its answer never came", async () => {
-      cancel.mockReturnValue(new Promise(() => undefined));
+      cancel.mockReturnValueOnce(new Promise(() => undefined));
       await render();
       await act(async () => controller!.requestStop());
       await render({ targets: [], stopped: new Set(["r1"]) });
       await act(async () => vi.advanceTimersByTimeAsync(CHAT_RUN_STOP_TIMEOUT_MS));
-      expect(controller!.phase).toBe("error");
       expect(controller!.visible).toBe(false);
+      expect(controller!.error).toBeNull();
+      // The next turn's Stop is a Stop of that turn, not a Retry of the last.
+      const next: ChatRunStopTarget = { ...octo, jobId: "octo-2", runId: "r2" };
+      await render({ targets: [next], stopped: new Set(["r1"]) });
+      expect(controller!.visible).toBe(true);
+      expect(controller!.phase).toBe("idle");
+      cancel.mockResolvedValueOnce(accepted("octo-2"));
+      await act(async () => controller!.requestStop());
+      expect(cancel).toHaveBeenLastCalledWith("chat", ["octo-2"]);
     });
 
     it("still stays between two parts of a message, whatever else was stopped", async () => {
