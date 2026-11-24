@@ -3436,9 +3436,10 @@ fn a_site_search_that_asks_reads_as_a_search() {
 /// Only a site's own search reads as one, whatever a form's words say: a field whose words read
 /// as a search ("Find a store") in a form that posts, and a search engine's box (a text area,
 /// which is no search field), still ask as a form sent, with the labels they had; so does a form
-/// step that is no search. A page's own words that would lead a form step's label with the
-/// search title (Enter on a link named "Search this site") are led by "Change something", which
-/// Studio shows as nothing, so they never read as a search; a click's label is as it was.
+/// step that is no search, and a site search whose form sends a key-like value, its own or the
+/// typed text. A page's own words that would lead a form step's label with the search title
+/// (Enter on a link named "Search this site") are led by "Change something", which Studio shows
+/// as nothing, so they never read as a search; a click's label is as it was.
 #[test]
 fn a_form_that_is_no_site_search_keeps_its_prompt() {
     let fixture = EmbeddedControllerFixture::new();
@@ -3446,15 +3447,29 @@ fn a_form_that_is_no_site_search_keeps_its_prompt() {
     for (mode, text, label) in [
         (
             "find-posts",
-            "Bookshop",
+            "Bookshop".to_string(),
             "Change something: Find a store \u{b7} Sends: Find a store",
         ),
         (
             "engine-box",
-            "opening hours",
+            "opening hours".to_string(),
             "Change something: Search \u{b7} Sends: Search",
         ),
-        ("post-form-field", "12", "Change something: Betrag"),
+        (
+            "post-form-field",
+            "12".to_string(),
+            "Change something: Betrag",
+        ),
+        (
+            "site-search-key",
+            "Belém Tower".to_string(),
+            "Search places",
+        ),
+        (
+            "site-search",
+            ["ghp", "SEARCHKEY0123456789abcdefghijklmnopqrstu"].join("_"),
+            "Search places",
+        ),
     ] {
         let body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in(mode), "text": text, "submit": true});
         let (output, requests) =

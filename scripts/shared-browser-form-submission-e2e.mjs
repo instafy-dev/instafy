@@ -821,6 +821,14 @@ export async function runSharedBrowserFormSubmissionFixture() {
       requests.length = 0;
       await refused(/approval_denied|denied/i, "POST", "/v1/type", { index: box.index, snapshotId: snapshot.snapshotId, text: "tower", submit: true }, ["deny"]);
       assert.deepEqual(promptsSince(start), [["action", "form-submit", destination]], `${label}: asks`);
+      // A search box with no form, and one whose field has no name, which the
+      // page's own script sends, ask as a search of the site ("Octo wants to
+      // search …"); every other box asks as the form it is.
+      assert.equal(
+        prompts.at(-1).display.label === "Search this site",
+        label === "Search without a form" || label === "Search, unnamed",
+        `${label}: ${prompts.at(-1).display.label}`,
+      );
       await delay(200);
       assert.deepEqual(requests, [], `${label}: nothing was sent`);
     }
@@ -1208,7 +1216,7 @@ export async function runSharedBrowserFormSubmissionFixture() {
         "under routine browsing a GET search of the page's own origin goes without a prompt, sends exactly the form's GET and says approval free, in the run's page and in Octo's own tab",
         "under routine browsing a click on a site's own search button, the one Enter in its box clicks, goes without a prompt by the same test and sends exactly the form's GET; the buttons of every box that asks still ask, and so do a journey planner's GET button, whose form has two fields or no search box, and the button of a search box for a PIN or a one-time code",
         "typing into a site's own search box without submit sends nothing and says nothing was searched yet and to press Enter, with no prompt; typing into a journey planner's field or a search that posts says nothing was sent yet, and into a search of another site that nothing was searched yet, never to press Enter",
-        "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
+        "a key-like typed value, a default button that posts, another site, another subdomain, no form, a sign-out address, a hidden key-like value (also behind a control named elements), a hidden one-time code, a hidden file format and an unnamed field still ask, the box with no form and the unnamed field's as a search of the site, every other as its form; a new window, a field inside a submit button and a link-only destination are refused before any prompt",
         "a page script that turns a free search into a post to its own site is stopped by the step's guard",
         "under routine browsing a journey planner's start and end stations are chosen by label with no prompt and nothing sent, its own button asks once naming the fields it sends, and the route is read; a choose says what it chose and in which list, and in a form that was not sent that nothing was sent yet, naming the form's button with the words about a prompt only where a press of it needs none; the option a list already holds says only that, on the page a sent form came back with too, chooses nothing and asks nothing",
         "beside a carousel that turns by itself between every snapshot and the step after it, which changes the page's snapshot id and nothing its reading lists, both stations are chosen with the snapshot each step returned, a list that changed itself is refused by its name and counted, and the planner's button asks once with a snapshot from before a turn and the route is read",

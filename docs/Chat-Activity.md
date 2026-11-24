@@ -880,10 +880,12 @@ activity line, to the person who started the run only, and the line says `Waitin
   submit, or Enter, in a field the browser's policy puts in its search category (a search field
   whose form sends a GET to the page's own site, or that has no form), whose label the runtime
   leads with `Search this site` in place of a category. It names no field, and a form with
-  another field still says what it sends. A form that posts, or goes to another site, is never
-  in that category, whatever its words say ("Find…"), and the runtime leads a form step's label
-  of the page's own words that would read so with `Change something`. Only the words change:
-  such a search asks exactly when it did. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
+  another field still says what it sends. A search whose form, once read, sends a key-like
+  value or makes an address a navigation would ask for (an export, a sign-out) asks as the form
+  it is. A form that posts, or goes to another site, is never in that category, whatever its
+  words say ("Find…"), and the runtime leads a form step's label of the page's own words that
+  would read so with `Change something`. Only the words change: such a search asks exactly
+  when it did. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
   here, where the person needs them to decide, never in the line. The runtime leads its label
   with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only

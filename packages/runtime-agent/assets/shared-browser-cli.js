@@ -2908,8 +2908,9 @@ function approvalCategoryTitle(classification) {
 // whose field had no name asked as "send the form “Enter a search term” …
 // Sends: Enter a search term", the field's words twice and no search (a local
 // test, Nov 20). It changes no step's answer: a search that asked still asks.
-// A form that posts, or goes to another site, is never in that category,
-// whatever its words ("Find…"), and keeps its own label.
+// A search whose form sends more than a search (searchReadsAsOne), and a form
+// that posts or goes to another site, which is never in that category
+// whatever its words ("Find…"), keep their own labels.
 const SITE_SEARCH_TITLE = "Search this site";
 
 // A site search's label after its title: nothing when the form holds no other
@@ -6605,6 +6606,22 @@ async function freeSiteSearch(page, target, typed) {
   return entries !== null && actionPolicy.isFreeSiteSearch(facts, pageUrl, entries);
 }
 
+// Whether a site search that asks (the policy's search category, outside
+// routine browsing or with entries the page cannot say in full) asks as one
+// (SITE_SEARCH_TITLE). Not when what its form sends, once read, makes it more
+// than a search: a value that looks like a key, or an address a navigation
+// there would ask for (an export, a sign-out), by the free search's own test
+// on its entries; that prompt asks as the form it is. A form whose entries
+// the page cannot say in full (a field with no name, which the page's own
+// script sends) reads nothing more. `typed` is as freeSiteSearch's.
+async function searchReadsAsOne(page, target, typed) {
+  const answer = await target.locator
+    .evaluate(FORM_ENTRIES_IN_PAGE, { kind: "form-entries", keepOwn: typed === null })
+    .catch(() => null);
+  const entries = freeSearchEntries(answer, typed);
+  return entries === null || actionPolicy.isFreeSiteSearch(policyTarget(target.description), page.url(), entries);
+}
+
 // A free site search sends a GET of the page's own origin, so while it runs
 // the tab may post a form nowhere: a page script that turns the search into
 // a post is stopped before it leaves the browser.
@@ -9280,7 +9297,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       stepKind = step.category === "search" ? "search" : "submit";
     }
     // A site's own search asks as one (SITE_SEARCH_TITLE).
-    const search = stepKind === "search";
+    const search = stepKind === "search" && !readingStep && (await searchReadsAsOne(page, target, body.text));
     const sent = submitting && !readingStep ? await sentFields(target, typeSubmission, body.text) : NO_SENT_FIELDS;
     await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
@@ -9597,7 +9614,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       stepKind = "search";
     }
     // A site's own search asks as one (SITE_SEARCH_TITLE).
-    const search = stepKind === "search";
+    const search = stepKind === "search" && !readingStep && (await searchReadsAsOne(page, target, null));
     const sent = activationKey && !readingStep ? await sentFields(target, pressSubmission) : NO_SENT_FIELDS;
     await allowStepOnce({
       operation: activationKey
