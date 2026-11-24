@@ -347,9 +347,10 @@ export type BrowserApprovalOutcome = "allowed" | "denied" | "expired";
 
 /**
  * A browser prompt of this turn's run that was answered (or left to expire)
- * while this tab watched, from the approval lane. Only the operation and the
- * sites the runtime's request names; never the prompt's label, which may
- * carry the page's own words.
+ * while this tab watched, from the approval lane. Only the operation, the
+ * sites the runtime's request names and whether the runtime marked it a
+ * site's own search; never the prompt's label, which may carry the page's
+ * own words.
  */
 export type SessionBrowserApproval = {
   approvalId: string;
@@ -359,6 +360,8 @@ export type SessionBrowserApproval = {
   host: string | null;
   /** Where a navigation goes. */
   destinationHost: string | null;
+  /** The runtime asked it as a site's own search (`isSiteSearchPrompt`): "you allowed a search". */
+  search?: true;
 };
 
 export type TurnActivityPhase = "starting" | "running" | "completed" | "failed" | "cancelled" | "stale";
@@ -956,6 +959,8 @@ function stepAnsweredApproval(activity: StepActivity | null): AnsweredApproval |
 function sessionAnsweredApproval(approval: SessionBrowserApproval): AnsweredApproval {
   const host = isActivityHost(approval.host) ? approval.host : null;
   const step = (words: string): AnsweredApproval => ({ outcome: approval.outcome, noun: { kind: "step", words }, host });
+  // What the step's own activity says once it ends ("search").
+  if (approval.search === true) return step("a search");
   switch (approval.operation) {
     case "approve-origin":
       return { outcome: approval.outcome, noun: { kind: "site" }, host };

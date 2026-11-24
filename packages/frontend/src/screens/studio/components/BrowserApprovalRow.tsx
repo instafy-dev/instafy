@@ -6,7 +6,7 @@ import type {
   RuntimeSharedBrowserApprovalDecision,
   RuntimeSharedBrowserApprovalRequest,
 } from "../../../sdk/instafy";
-import { activityHostOf, browserApprovalSentence } from "./browserApprovalWords";
+import { activityHostOf, browserApprovalSentence, isSiteSearchPrompt } from "./browserApprovalWords";
 import { sharedBrowserApprovalAllowDecision } from "./SharedBrowserApprovalPrompt";
 import type { BrowserApprovalOutcome, SessionBrowserApproval } from "./turnActivity";
 import type { SharedBrowserApprovalState } from "./useSharedBrowserApproval";
@@ -32,7 +32,10 @@ type Phase = "pending" | BrowserApprovalOutcome;
 
 export { browserApprovalSentence };
 
-/** What the turn's line keeps of an answered prompt: the operation and the sites, never its label. */
+/**
+ * What the turn's line keeps of an answered prompt: the operation, the sites
+ * and whether it was a site's own search, never its label.
+ */
 function settlement(request: RuntimeSharedBrowserApprovalRequest, outcome: BrowserApprovalOutcome): SessionBrowserApproval {
   const destinationHost = activityHostOf(request.display.destinationOrigin) ?? activityHostOf(request.destinationOrigin);
   return {
@@ -41,6 +44,7 @@ function settlement(request: RuntimeSharedBrowserApprovalRequest, outcome: Brows
     operation: request.operation,
     host: request.kind === "origin" ? destinationHost : (activityHostOf(request.sourceOrigin) ?? destinationHost),
     destinationHost,
+    ...(isSiteSearchPrompt(request) ? { search: true as const } : {}),
   };
 }
 

@@ -216,6 +216,9 @@ describe("SharedBrowserApprovalPrompt", () => {
     ["choose", "Delete, cancel or sign out: Delete selected \u00b7 In: Bulk actions", "Octo wants to choose “Delete selected” in “Bulk actions” on example.test. It may delete, cancel or sign out of something."],
     ["choose", "Change something: Trindade", "Octo wants to choose “Trindade” on example.test."],
     ["form-submit", "Email", "Octo wants to send the form “Email” on example.test."],
+    // A site's own search, as the runtime marks it.
+    ["form-submit", "Search this site", "Octo wants to search example.test."],
+    ["press-enter", "Search this site", "Octo wants to search example.test."],
     ["press-enter", "Continue", "Octo wants to press Enter on “Continue” on example.test."],
     ["press-space", "Remember me", "Octo wants to press Space on “Remember me” on example.test."],
     ["press-key", "Press Backspace on Search", "Octo wants to press Backspace on Search on example.test."],

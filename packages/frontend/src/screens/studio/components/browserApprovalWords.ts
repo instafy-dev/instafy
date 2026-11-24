@@ -1,5 +1,5 @@
 import { displayActivityHost } from "./activityHost";
-import { splitBrowserApprovalLabel } from "./browserApprovalLabel";
+import { siteSearchLabel, splitBrowserApprovalLabel } from "./browserApprovalLabel";
 import { isActivityHost } from "./turnActivity";
 
 /**
@@ -122,6 +122,18 @@ function controlWords(name: string): ControlWords {
   return { shown: rest, other: "", sends };
 }
 
+/** The steps that send a site's own search: typing with submit, and Enter. */
+const SITE_SEARCH_OPERATIONS = new Set(["form-submit", "press-enter"]);
+
+/**
+ * Whether a prompt is a site's own search, by the runtime's own words
+ * (`siteSearchLabel`): only a step that sends a form reads as one, so a
+ * click or typing whose name only looks like the title never does.
+ */
+export function isSiteSearchPrompt(request: Pick<BrowserApprovalWordsRequest, "operation" | "display">): boolean {
+  return SITE_SEARCH_OPERATIONS.has(request.operation) && siteSearchLabel(request.display.label) !== null;
+}
+
 /**
  * What the agent waits to do, in one sentence: "Octo wants to send the form
  * “Search” on visitlisboa.com." The label is the runtime's already-masked
@@ -131,23 +143,35 @@ function controlWords(name: string): ControlWords {
  * says which fields it sends: "Sends: Customer name, Telephone." A step that
  * sends a form to another site says where it goes ("It goes to
  * pay.example."), and any other step bound to another site where it may go
- * ("It may go to carris.pt."); one that stays on the site says neither. The
- * chat's row and the browser view's sheet both ask in this one sentence.
+ * ("It may go to carris.pt."); one that stays on the site says neither. A
+ * site's own search, as the runtime marks it, says so: "Octo wants to search
+ * visitlisboa.com." The chat's row and the browser view's sheet both ask in
+ * this one sentence.
  */
 export function browserApprovalSentence(agent: string, request: BrowserApprovalWordsRequest): string {
   // The step's category leads the runtime's label ("Delete, cancel or sign
   // out: Delete account"): only the control's name goes in quotes, and the
-  // category, when it adds something, follows as its own sentence.
-  const { label, note } = splitBrowserApprovalLabel(request.display.label);
+  // category, when it adds something, follows as its own sentence. A site's
+  // own search names no field: its label says only what else its form sends.
+  const search = isSiteSearchPrompt(request);
+  const { label, note } = search
+    ? { label: siteSearchLabel(request.display.label) ?? "", note: null }
+    : splitBrowserApprovalLabel(request.display.label);
   const words = controlWords(label);
-  const sentence = stepSentence(agent, request, label, words);
+  const sentence = stepSentence(agent, request, label, words, search);
   // Every field the runtime names, whole: it fits them in its label's bound,
   // and the prompt wraps. A cut here would hide some of what the form sends.
   const sends = words.sends ? ` Sends: ${words.sends.replace(/[.\s]+$/u, "")}.` : "";
   return `${sentence}${sends}${note ? ` ${note}` : ""}`;
 }
 
-function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name: string, words: ControlWords): string {
+function stepSentence(
+  agent: string,
+  request: BrowserApprovalWordsRequest,
+  name: string,
+  words: ControlWords,
+  search: boolean,
+): string {
   const destination = shownHost(request.display.destinationOrigin) ?? shownHost(request.destinationOrigin);
   const site = shownHost(request.sourceOrigin) ?? destination ?? "this site";
   const label = cut(words.shown);
@@ -161,13 +185,15 @@ function stepSentence(agent: string, request: BrowserApprovalWordsRequest, name:
   // link does, but the runtime also binds a choice in a form (Space on a
   // toggle, a click on a box) to the form's address, which only the page's
   // own script would send.
-  const sendsForm = request.operation === "form-submit" || words.sends !== "";
+  const sendsForm = request.operation === "form-submit" || words.sends !== "" || search;
   const elsewhere =
     destination && destination !== site
       ? sendsForm
         ? ` It goes to ${destination}.`
         : ` It may go to ${destination}.`
       : "";
+  // The site it searches, as a person would say it, never the field's name.
+  if (search) return `${agent} wants to search ${site}.${elsewhere}`;
   switch (request.operation) {
     case "approve-origin":
       return page ? `${agent} wants to open ${page}.` : `${agent} wants to use ${destination ?? site}.`;

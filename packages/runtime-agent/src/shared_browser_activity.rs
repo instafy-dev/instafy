@@ -502,6 +502,27 @@ pub(crate) fn types_into_a_search_box(
     }
 }
 
+/// Whether a browser step may send the site's own search: typing with submit, or Enter. Only its
+/// browser knows whether it does (a search that needed no prompt, or whose prompt asked as one),
+/// and its action log says so as the step acts (`shared_browser::LoggedSteps::searched_on`).
+pub(crate) fn may_send_a_search(tool: &str, arguments: Option<&JsonValue>) -> bool {
+    match tool {
+        "type" => {
+            arguments
+                .and_then(|arguments| arguments.get("submit"))
+                .and_then(JsonValue::as_bool)
+                == Some(true)
+        }
+        "press" => {
+            arguments
+                .and_then(|arguments| arguments.get("key"))
+                .and_then(JsonValue::as_str)
+                == Some("Enter")
+        }
+        _ => false,
+    }
+}
+
 /// What is known of the address a `click` or `press` leads to, from the reading its target
 /// (`index`, `snapshotId`) is of.
 #[derive(Debug, PartialEq, Eq)]

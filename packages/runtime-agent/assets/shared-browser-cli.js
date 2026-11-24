@@ -537,8 +537,20 @@ function refuseUnlessReadingStep(readingStep, step = null) {
   }
 }
 
-async function allowStepOnce(details, options) {
+async function allowStepOnce(stepDetails, options) {
   assertStepOnTime();
+  // Only a site's own search leads its label with SITE_SEARCH_TITLE. A form
+  // step's label of the page's own words that would lead with it (Enter on a
+  // link named "Search this site") is led by "Change something", which Studio
+  // shows as nothing, so no page's words read as a search. The label is
+  // judged as the prompt shows it (displayLabel), whose spacing a page could
+  // otherwise use: "Search", U+0085 and "this site" shows as "Search this site".
+  const label = approvalProtocol.displayLabel({ label: stepDetails.label });
+  const details = !stepDetails.categoryTitle && !inAgentTab() &&
+    ["form-submit", "press-enter"].includes(stepDetails.operation) &&
+    (label === SITE_SEARCH_TITLE || label.startsWith(`${SITE_SEARCH_TITLE}:`))
+    ? { ...stepDetails, categoryTitle: actionPolicy.categoryTitle("change") }
+    : stepDetails;
   // Routine browsing takes a routine step without a prompt; every other step
   // waits for the person's answer.
   const prompts = !(options?.routine === true && approvalProtocol.routineBrowsingAllowed());
@@ -605,6 +617,10 @@ function emitAction(event) {
         viewportW: event.viewportW ?? null,
         viewportH: event.viewportH ?? null,
         pageId: activePageId,
+        // A step that sends the page's own search says so as it acts:
+        // runtime-agent reads the mark while the step runs, and its line
+        // reads "Searching <site>" from then on, not "Browsing <site>".
+        ...(event.step === "search" ? { step: "search" } : {}),
         ...(event.type === "human_input" ? { humanInputRequest: event.humanInputRequest } : {}),
       })}\n`,
     );
@@ -2885,6 +2901,16 @@ function routineCovers(classification, description, { consequential = true } = {
 function approvalCategoryTitle(classification) {
   return actionPolicy.categoryTitle(classification.category) || "";
 }
+
+// What leads the label of a site's own search that asks, in place of a
+// category: Enter in a search field, or typing into it with submit, that the
+// policy puts in its search category and whose form makes it a search by its
+// structure (siteSearchLabel). Studio then asks "Octo wants to search
+// visitlisboa.com." (`SITE_SEARCH_TITLE` in browserApprovalLabel.ts). A search box
+// whose field had no name asked as "send the form “Enter a search term” …
+// Sends: Enter a search term", the field's words twice and no search (a local
+// test, Nov 20). It changes no step's answer: a search that asked still asks.
+const SITE_SEARCH_TITLE = "Search this site";
 
 // A control's masked names: the text it shows, then its other name when the
 // two differ ("Agree and close", also called "Agree and close: Agree to our
@@ -6388,8 +6414,11 @@ function stepPostOrigins(readingStep, sourceOrigin, submission, destination) {
 // would run the page's formdata handlers, and through HTMLFormElement's own
 // `elements`, which a control named "elements" shadows on the form. A form
 // the rules cannot read in full (a file chooser, a form-associated custom
-// element, too many entries), or a field that sends nothing of its own (no
-// name), is reported incomplete, and the step asks.
+// element, too many entries) is reported incomplete, and the step asks. A
+// field that sends nothing of its own (no name) is at `own` -1, beside every
+// other entry of its form: the page's own script sends its text, so the step
+// asks too (freeSearchEntries), and its prompt reads those entries
+// (siteSearchLabel).
 function formEntriesInPage(forms, element, request) {
   const MAX_ENTRIES = 64;
   const MAX_CHARS = 4_097;
@@ -6433,7 +6462,7 @@ function formEntriesInPage(forms, element, request) {
     }
     for (const value of values) entries.push([name, bounded(value)]);
   }
-  if (entries.length > MAX_ENTRIES || own < 0) return incomplete;
+  if (entries.length > MAX_ENTRIES) return incomplete;
   return { kind: "form-entries", complete: true, entries, own };
 }
 
@@ -6568,6 +6597,52 @@ async function freeSiteSearch(page, target, typed) {
     .catch(() => null);
   const entries = freeSearchEntries(answer, typed);
   return entries !== null && actionPolicy.isFreeSiteSearch(facts, pageUrl, entries);
+}
+
+// The entries a site search that asks sends, for its prompt's words
+// (siteSearchLabel): those freeSearchEntries reads, or, for a field with no
+// name (`own` -1), every other entry of its form, read in full. Null when the
+// answer is not exactly that shape.
+function searchEntries(answer, typed) {
+  if (!answer || answer.kind !== "form-entries" || answer.complete !== true || answer.own !== -1) {
+    return freeSearchEntries(answer, typed);
+  }
+  if (!Array.isArray(answer.entries) || !answer.entries.every((entry) =>
+    Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" && typeof entry[1] === "string")) {
+    return null;
+  }
+  return answer.entries.map(([name, value]) => [name, value]);
+}
+
+// The label of a site search that asks, which SITE_SEARCH_TITLE leads, or
+// null when it asks as the form it is. A step reads as a search only by its
+// form's structure, never by its words: what its form sends, read in full,
+// passes the free site search's own test (actionPolicy.isFreeSiteSearch), a
+// GET of the page's own origin the browser sends on Enter, with no value that
+// looks like a key and no address a navigation there would ask for (an
+// export, a sign-out). It asks only outside routine browsing, or because its
+// field has no name, so the page's own script sends the text; the rest of its
+// form is read and tested all the same. A field in no form, which the policy
+// takes for a search by its words or its type alone, and whose Enter does
+// whatever the page's script does, asks as before, naming the field; so does
+// a form that cannot be read in full, and a form that posts or goes to
+// another site, never in that category whatever its words ("Find…"). After
+// the title: nothing when the search is all the form sends of the person's;
+// else the control and the fields it sends, as any form step says them (a
+// box ticked beside it). `typed` is as freeSiteSearch's.
+async function siteSearchLabel(page, target, typed, sent) {
+  const answer = await target.locator
+    .evaluate(FORM_ENTRIES_IN_PAGE, { kind: "form-entries", keepOwn: typed === null })
+    .catch(() => null);
+  const entries = searchEntries(answer, typed);
+  const facts = policyTarget(target.description);
+  if (entries === null || !actionPolicy.isFreeSiteSearch(facts, page.url(), entries)) return null;
+  // A field searched in that sends no text of its own (Enter in an empty
+  // box) leaves every field the form sends something else.
+  const ownEmpty = typed !== null ? typed === "" : answer.own >= 0 && entries[answer.own][1] === "";
+  return facts.formFieldCount <= 1 && sent.count <= (ownEmpty ? 0 : 1)
+    ? ""
+    : promptLabel(target.description, "Submit this form", sent, SITE_SEARCH_TITLE);
 }
 
 // A free site search sends a GET of the page's own origin, so while it runs
@@ -9244,17 +9319,17 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (submitting) {
       stepKind = step.category === "search" ? "search" : "submit";
     }
+    const sent = submitting && !readingStep ? await sentFields(target, typeSubmission, body.text) : NO_SENT_FIELDS;
+    // A site's own search asks as one (SITE_SEARCH_TITLE).
+    const searchLabel = stepKind === "search" && !readingStep
+      ? await siteSearchLabel(page, target, body.text, sent)
+      : null;
     await allowStepOnce({
       operation: submitting ? "form-submit" : "type",
-      label: submitting
-        ? promptLabel(
-          target.description,
-          "Submit this form",
-          readingStep ? NO_SENT_FIELDS : await sentFields(target, typeSubmission, body.text),
-          approvalCategoryTitle(step),
-        )
-        : promptLabel(target.description, "Type into this field"),
-      categoryTitle: approvalCategoryTitle(step),
+      label: searchLabel ?? (submitting
+        ? promptLabel(target.description, "Submit this form", sent, approvalCategoryTitle(step))
+        : promptLabel(target.description, "Type into this field")),
+      categoryTitle: searchLabel !== null ? SITE_SEARCH_TITLE : approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
@@ -9279,6 +9354,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       type: "type",
       label: `Type into ${quotedControlLabel(target.description)}`,
       url: page.url(),
+      // Marked a search as its prompt reads, or as one that needs none.
+      step: freeSearch || searchLabel !== null ? "search" : null,
     });
     await target.locator.focus();
     page = await resolveExpectedPage(browser);
@@ -9560,21 +9637,21 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     if (pressKey === "Enter" && step.category === "search") {
       stepKind = "search";
     }
+    const sent = activationKey && !readingStep ? await sentFields(target, pressSubmission) : NO_SENT_FIELDS;
+    // A site's own search asks as one (SITE_SEARCH_TITLE).
+    const searchLabel = stepKind === "search" && !readingStep
+      ? await siteSearchLabel(page, target, null, sent)
+      : null;
     await allowStepOnce({
       operation: activationKey
         ? pressKey === "Enter"
           ? "press-enter"
           : "press-space"
         : "press-key",
-      label: activationKey
-        ? promptLabel(
-          target.description,
-          "Activate this control",
-          readingStep ? NO_SENT_FIELDS : await sentFields(target, pressSubmission),
-          approvalCategoryTitle(step),
-        )
-        : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`,
-      categoryTitle: approvalCategoryTitle(step),
+      label: searchLabel ?? (activationKey
+        ? promptLabel(target.description, "Activate this control", sent, approvalCategoryTitle(step))
+        : `Press ${pressKey} on ${promptLabel(target.description, "this field")}`),
+      categoryTitle: searchLabel !== null ? SITE_SEARCH_TITLE : approvalCategoryTitle(step),
       sourceOrigin,
       ...destination,
       snapshotId: body.snapshotId,
@@ -9601,6 +9678,8 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       type: "type",
       label: `Press ${pressKey}`,
       url: page.url(),
+      // Marked a search as its prompt reads, or as one that needs none.
+      step: freeSearch || searchLabel !== null ? "search" : null,
     });
     await pointAtControl(target, { hover: false });
     // A key pressed in a field may choose one of its suggestions or send it:

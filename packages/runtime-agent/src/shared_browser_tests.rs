@@ -73,16 +73,30 @@ const siteSearch = {
 };
 // The entries the form sends, as the page's form-entries helper reports
 // them: the field's own (its text left out for a type step), then the rest.
-const formEntriesFor = (arg) => ({
-  kind: "form-entries",
-  complete: true,
-  entries: [
-    ["q", arg.keepOwn === false ? null : "Belém Tower"],
-    ["lang", "en"],
-    ...(mode === "site-search-key" ? [["k", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")]] : []),
-  ],
-  own: 0,
-});
+// A field with no name is in none of them ("site-search-unnamed*"): the
+// helper reports the rest of its form, with the field's own at -1. A field
+// in no form has no entries the helper can read ("find-no-form").
+const UNNAMED_REST = {
+  "site-search-unnamed": [["lang", "en"]],
+  "site-search-unnamed-key": [["lang", "en"], ["k", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")]],
+  "site-search-unnamed-table": [["lang", "en"], ["format", "csv"]],
+};
+const formEntriesFor = (arg) => mode === "find-no-form"
+  ? { kind: "form-entries", complete: false, entries: [], own: -1 }
+  : Object.hasOwn(UNNAMED_REST, mode)
+  ? { kind: "form-entries", complete: true, entries: UNNAMED_REST[mode], own: -1 }
+  : {
+    kind: "form-entries",
+    complete: true,
+    entries: [
+      // "-ticked-empty": Enter in the box while it holds no text.
+      ["q", arg.keepOwn === false ? null : mode === "site-search-ticked-empty" ? "" : "Belém Tower"],
+      ["lang", "en"],
+      ...(mode === "site-search-key" ? [["k", ["sk", "live", "SEARCHKEY0123456789abcdef"].join("_")]] : []),
+      ...(mode.startsWith("site-search-ticked") ? [["offers", "on"]] : []),
+    ],
+    own: 0,
+  };
 // A select's options, as the page's select-options helper reports them for
 // the option a step names (`arg.wanted`): the options whose label reads the
 // same, as written or with case, accents and spacing aside, and the list.
@@ -115,6 +129,17 @@ const selectOptionsFor = (arg) => {
 };
 // The fields a form step sends something from, by name, and how many it
 // sends in all, as the page's sent-fields helper reports them.
+const SENT_BY_MODE = {
+  "site-search-unnamed": ["Enter a search term"],
+  "site-search-unnamed-key": ["Enter a search term"],
+  "site-search-unnamed-table": ["Enter a search term"],
+  "site-search-two-fields": ["Search places", "Category"],
+  // A box ticked beside the search box, and the same box beside an empty one.
+  "site-search-ticked": ["Search places", "Email me offers"],
+  "site-search-ticked-empty": ["Email me offers"],
+  "find-posts": ["Find a store"],
+  "engine-box": ["Search"],
+};
 const sentFieldNamesFor = () => mode === "submit-order"
   ? ["Customer name", "Telephone", "E-mail address", "Pizza Size", "Delivery instructions"]
   : mode === "submit-order-many"
@@ -126,7 +151,9 @@ const sentFieldNamesFor = () => mode === "submit-order"
       // A form of 30 short fields: the page names the first 24.
       : mode === "submit-order-long-form"
         ? Array.from({ length: 24 }, (_, index) => `Q${index + 1}`)
-        : [];
+        // A field a step typed into comes first, by its label, whether or
+        // not it has a name.
+        : SENT_BY_MODE[mode] || [];
 const sentFieldsFor = () => {
   const names = sentFieldNamesFor();
   return { names, count: mode === "submit-order-long-form" ? 30 : names.length };
@@ -328,6 +355,60 @@ const special = {
   "site-search": siteSearch,
   "site-search-posts-own": siteSearch,
   "site-search-key": siteSearch,
+  // The same box in a form with a second field the person can fill.
+  "site-search-two-fields": { description: siteSearch.description, policy: { ...siteSearch.policy, formFieldCount: 2 } },
+  // A site's own search box whose field has no name, which only its words
+  // say is a search box: the page's own script runs the search, and the
+  // entries its form sends do not hold the field (formEntriesFor).
+  "site-search-unnamed": {
+    description: control("", {
+      tag: "input", inputType: "text", placeholder: "Enter a search term", labels: "Enter a search term",
+      nameAttribute: "", idAttribute: "", formMethod: "get", formAction: "https://example.test/en/discover",
+      formActionText: "form get https://example.test/en/discover Search",
+    }),
+    policy: {
+      formActionUrl: "https://example.test/en/discover", formSubmission: "implicit", formSubmits: true,
+      formName: "Search", formSubmitLabels: "Search", formFieldCount: 1,
+    },
+  },
+  // A site's own search box with a box ticked beside it, which its form
+  // sends too, and the same box when it holds no text (formEntriesFor).
+  "site-search-ticked": siteSearch,
+  "site-search-ticked-empty": siteSearch,
+  // A field in no form whose words read as a search ("find"), as a sign-up
+  // box's can: the policy takes it for a search box, and Enter there does
+  // whatever the page's script does.
+  "find-no-form": {
+    description: control("", {
+      tag: "input", inputType: "text", placeholder: "Your email to find out first",
+      labels: "Your email to find out first", nameAttribute: "email", idAttribute: "",
+    }),
+  },
+  // A field whose words read as a search, in a form that posts.
+  "find-posts": {
+    description: control("", {
+      tag: "input", inputType: "text", ariaLabel: "Find a store", labels: "Find a store", placeholder: "Find\u2026",
+      nameAttribute: "q", idAttribute: "", formMethod: "post", formAction: "https://example.test/stores",
+      formActionText: "form post https://example.test/stores Find",
+    }),
+    policy: {
+      formActionUrl: "https://example.test/stores", formSubmission: "implicit", formSubmits: true,
+      formName: "Find", formSubmitLabels: "Find", formFieldCount: 1,
+    },
+  },
+  // A search engine's box: a text area in a form that sends a GET to the
+  // engine's own results page.
+  "engine-box": {
+    description: control("", {
+      tag: "textarea", inputType: "", ariaLabel: "Search", labels: "Search", nameAttribute: "q", idAttribute: "",
+      formMethod: "get", formAction: "https://example.test/search",
+      formActionText: "form get https://example.test/search Search",
+    }),
+    policy: {
+      formActionUrl: "https://example.test/search", formSubmission: "implicit", formSubmits: true,
+      formName: "Search", formSubmitLabels: "Search", formFieldCount: 1,
+    },
+  },
   "canary-label": { description: control(`Copy ${CANARY}`) },
   "click-error-canary": { description: control("Show details") },
   "no-policy": { description: control("Show details"), policy: null },
@@ -443,6 +524,10 @@ const special = {
     nameHints: { innerName: "Delete account", position: "top right" },
   },
 };
+// The box whose field has no name beside a hidden key-like value, and beside
+// a hidden file format, which the rest of its form sends (formEntriesFor).
+special["site-search-unnamed-key"] = special["site-search-unnamed"];
+special["site-search-unnamed-table"] = special["site-search-unnamed"];
 special["submit-order-many"] = special["submit-order"];
 special["submit-order-huge"] = special["submit-order"];
 special["submit-order-long-form"] = special["submit-order"];
@@ -3298,6 +3383,350 @@ fn a_search_said_no_to_names_its_step_a_search() {
         ("", None),
     ] {
         assert_eq!(failed_step(stdout.as_bytes()), expected, "{stdout}");
+    }
+}
+
+/// A site's own search that asks reads as a search: its prompt's label is the browser's title
+/// for one (`SITE_SEARCH_TITLE`) in place of a step's category, and Studio asks "Octo wants to
+/// search <site>." A search box whose field had no name, which only its words say is one, asked
+/// under routine browsing as "send the form “Enter a search term” … Sends: Enter a search term"
+/// (a local test, Nov 20): the browser cannot read all its form sends, so it still asks, in
+/// these words. Ask mode asks for every site search in the same words, and a search form with
+/// another field still names what it sends. The step's action says it is a search as it acts,
+/// so the turn's line reads "Searching <site>" while it runs; one the person said no to never
+/// acted.
+#[test]
+fn a_site_search_that_asks_reads_as_a_search() {
+    for (path, extra, operation) in [
+        (
+            "/v1/type",
+            json!({"text": "Belém Tower", "submit": true}),
+            "form-submit",
+        ),
+        ("/v1/press", json!({"key": "Enter"}), "press-enter"),
+    ] {
+        for (decision, acted) in [("deny", false), ("allow_once", true)] {
+            let fixture = EmbeddedControllerFixture::new();
+            fixture.prepare_routine_start("page-target");
+            let mode = "site-search-unnamed";
+            let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in(mode)});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let (output, requests) =
+                fixture.call_deciding(mode, "POST", path, Some(&body.to_string()), &[decision]);
+            assert_eq!(
+                output.status.success(),
+                acted,
+                "{path} {decision}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(requests.len(), 1, "{path} {decision}");
+            assert_eq!(requests[0]["operation"], operation, "{path}");
+            assert_eq!(
+                requests[0]["display"]["label"], "Search this site",
+                "{path}"
+            );
+            assert_eq!(
+                fixture.action_log().contains(r#""step":"search""#),
+                acted,
+                "{path} {decision}: {}",
+                fixture.action_log()
+            );
+        }
+
+        for (mode, label) in [
+            ("site-search", "Search this site"),
+            (
+                "site-search-two-fields",
+                "Search this site: Search places \u{b7} Sends: Search places, Category",
+            ),
+        ] {
+            let fixture = EmbeddedControllerFixture::new();
+            let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let (output, requests) = fixture.run_with_decisions(
+                mode,
+                "page-target",
+                "POST",
+                path,
+                Some(&body.to_string()),
+                &["https://example.test"],
+                &["deny"],
+            );
+            assert!(
+                failure_of(&output).contains("approval_denied"),
+                "{mode} {path}"
+            );
+            assert_eq!(requests.len(), 1, "{mode} {path}");
+            assert_eq!(requests[0]["operation"], operation, "{mode} {path}");
+            assert_eq!(requests[0]["display"]["label"], label, "{mode} {path}");
+        }
+    }
+}
+
+/// Only a site's own search reads as one, whatever a form's words say: a field whose words read
+/// as a search ("Find a store") in a form that posts, and a search engine's box (a text area,
+/// which is no search field), still ask as a form sent, with the labels they had; so does a form
+/// step that is no search, and a site search whose form sends a key-like value, its own or the
+/// typed text. A page's own words that would lead a form step's label with the search title
+/// (Enter on a link named "Search this site") are led by "Change something", which Studio shows
+/// as nothing, so they never read as a search; a click's label is as it was.
+#[test]
+fn a_form_that_is_no_site_search_keeps_its_prompt() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    for (mode, text, label) in [
+        (
+            "find-posts",
+            "Bookshop".to_string(),
+            "Change something: Find a store \u{b7} Sends: Find a store",
+        ),
+        (
+            "engine-box",
+            "opening hours".to_string(),
+            "Change something: Search \u{b7} Sends: Search",
+        ),
+        (
+            "post-form-field",
+            "12".to_string(),
+            "Change something: Betrag",
+        ),
+        (
+            "site-search-key",
+            "Belém Tower".to_string(),
+            "Search places",
+        ),
+        (
+            "site-search",
+            ["ghp", "SEARCHKEY0123456789abcdefghijklmnopqrstu"].join("_"),
+            "Search places",
+        ),
+    ] {
+        let body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in(mode), "text": text, "submit": true});
+        let (output, requests) =
+            fixture.call_deciding(mode, "POST", "/v1/type", Some(&body.to_string()), &["deny"]);
+        assert!(failure_of(&output).contains("approval_denied"), "{mode}");
+        assert_eq!(requests.len(), 1, "{mode} asks");
+        assert_eq!(requests[0]["operation"], "form-submit", "{mode}");
+        assert_eq!(requests[0]["display"]["label"], label, "{mode}");
+    }
+
+    let fixture = EmbeddedControllerFixture::new();
+    for (mode, path, extra, operation, label) in [
+        (
+            "find-posts",
+            "/v1/press",
+            json!({"key": "Enter"}),
+            "press-enter",
+            "Change something: Find a store \u{b7} Sends: Find a store",
+        ),
+        (
+            "link:Search this site",
+            "/v1/press",
+            json!({"key": "Enter"}),
+            "press-enter",
+            "Change something: Search this site",
+        ),
+        (
+            "link:Search this site",
+            "/v1/click",
+            json!({}),
+            "click",
+            "Search this site",
+        ),
+    ] {
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(
+            failure_of(&output).contains("approval_denied"),
+            "{mode} {path}"
+        );
+        assert_eq!(requests.len(), 1, "{mode} {path}");
+        assert_eq!(requests[0]["operation"], operation, "{mode} {path}");
+        assert_eq!(requests[0]["display"]["label"], label, "{mode} {path}");
+    }
+}
+
+/// The page's own words never read as a site search, however they are spaced: the prompt tidies
+/// a label's spacing as the origin accepts it, so a link named "Search", U+0085 and "this site",
+/// which shows as "Search this site", is led by "Change something" too, and Studio asks to press
+/// Enter on it.
+#[test]
+fn page_words_spaced_to_show_as_the_search_title_never_read_as_a_search() {
+    let fixture = EmbeddedControllerFixture::new();
+    for mode in [
+        "link:Search\u{85}this\u{85}site",
+        "link:Search\u{85}this site\u{85}",
+        "link:Search\u{2003}this\u{a0}site",
+    ] {
+        let body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode), "key": "Enter"});
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/press",
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(failure_of(&output).contains("approval_denied"), "{mode:?}");
+        assert_eq!(requests.len(), 1, "{mode:?}");
+        assert_eq!(requests[0]["operation"], "press-enter", "{mode:?}");
+        assert_eq!(
+            requests[0]["display"]["label"], "Change something: Search this site",
+            "{mode:?}"
+        );
+    }
+}
+
+/// A step reads as a site's own search only by its form's structure, never by its words: what its
+/// form sends, read in full, passes the free site search's own test, and it asks only because its
+/// field has no name (the page's own script sends the text) or outside routine browsing. A field
+/// in no form whose words read as a search ("Your email to find out first"), whose Enter does
+/// whatever the page's script does, asks naming the field, as before; so does a box whose field
+/// has no name beside a hidden key-like value or a hidden file format its form sends (an export),
+/// while the same box with nothing more reads as a search. The browser marks an action a search
+/// only when its prompt read as one, or when it needed none, so the turn's line never reads
+/// "Searching" under a prompt that asked as a form.
+#[test]
+fn a_site_search_reads_as_one_only_by_its_forms_structure() {
+    for (path, extra, operation) in [
+        (
+            "/v1/type",
+            json!({"text": "Lisbon", "submit": true}),
+            "form-submit",
+        ),
+        ("/v1/press", json!({"key": "Enter"}), "press-enter"),
+    ] {
+        for (mode, label, searched) in [
+            ("find-no-form", "Your email to find out first", false),
+            (
+                "site-search-unnamed-key",
+                "Enter a search term \u{b7} Sends: Enter a search term",
+                false,
+            ),
+            (
+                "site-search-unnamed-table",
+                "Enter a search term \u{b7} Sends: Enter a search term",
+                false,
+            ),
+            ("site-search-key", "Search places", false),
+            ("site-search-unnamed", "Search this site", true),
+        ] {
+            let fixture = EmbeddedControllerFixture::new();
+            fixture.prepare_routine_start("page-target");
+            let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id_in(mode)});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let (output, requests) =
+                fixture.call_deciding(mode, "POST", path, Some(&body.to_string()), &["allow_once"]);
+            assert!(
+                output.status.success(),
+                "{mode} {path}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(requests.len(), 1, "{mode} {path} asks");
+            assert_eq!(requests[0]["operation"], operation, "{mode} {path}");
+            assert_eq!(requests[0]["display"]["label"], label, "{mode} {path}");
+            assert_eq!(
+                fixture.action_log().contains(r#""step":"search""#),
+                searched,
+                "{mode} {path}: {}",
+                fixture.action_log()
+            );
+        }
+    }
+
+    // A site search that needs no prompt is marked a search as it acts.
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.prepare_routine_start("page-target");
+    let body = json!({
+        "index": 0,
+        "snapshotId": fixture.snapshot_id_in("site-search"),
+        "text": "Belém Tower",
+        "submit": true,
+    });
+    let (output, requests) = fixture.call_deciding(
+        "site-search",
+        "POST",
+        "/v1/type",
+        Some(&body.to_string()),
+        &[],
+    );
+    assert!(requests.is_empty(), "{requests:?}");
+    assert_eq!(payload_of(&output)["activity"]["approval"], "free");
+    assert!(
+        fixture.action_log().contains(r#""step":"search""#),
+        "{}",
+        fixture.action_log()
+    );
+}
+
+/// A site search that asks names everything else its form sends of the person's, as any form step
+/// does: a box ticked beside the search box ("Email me offers"), which the form's field count
+/// leaves out, and that box alone when Enter is pressed in an empty search box. Only a search
+/// that is all its form sends asks in the bare words ("Octo wants to search example.test.").
+#[test]
+fn a_site_search_names_whatever_else_its_form_sends() {
+    for (mode, path, extra, operation, label) in [
+        (
+            "site-search-ticked",
+            "/v1/type",
+            json!({"text": "Belém Tower", "submit": true}),
+            "form-submit",
+            "Search this site: Search places \u{b7} Sends: Search places, Email me offers",
+        ),
+        (
+            "site-search-ticked",
+            "/v1/press",
+            json!({"key": "Enter"}),
+            "press-enter",
+            "Search this site: Search places \u{b7} Sends: Search places, Email me offers",
+        ),
+        (
+            "site-search-ticked-empty",
+            "/v1/press",
+            json!({"key": "Enter"}),
+            "press-enter",
+            "Search this site: Search places \u{b7} Sends: Email me offers",
+        ),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let mut body = json!({"index": 0, "snapshotId": fixture.snapshot_id(mode)});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &["https://example.test"],
+            &["deny"],
+        );
+        assert!(
+            failure_of(&output).contains("approval_denied"),
+            "{mode} {path}"
+        );
+        assert_eq!(requests.len(), 1, "{mode} {path}");
+        assert_eq!(requests[0]["operation"], operation, "{mode} {path}");
+        assert_eq!(requests[0]["display"]["label"], label, "{mode} {path}");
     }
 }
 
@@ -15158,6 +15587,46 @@ async fn a_stopped_turns_next_browser_step_is_refused_before_it_acts() {
     cancel_signal.confirm_shared_browser_shutdown();
     drop(guard);
     assert!(!fixture.authority_path.exists());
+}
+
+/// The browser marks an action that sends the site's own search (`"step": "search"`) as it
+/// types into the field or presses Enter there, after the person's yes when it asked. A read
+/// gives the pages it searched from beside the addresses it went to, and any other action names
+/// neither.
+#[test]
+fn the_action_log_names_the_searches_the_browser_sent_since_a_read() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let path = dir.path().join("actions.jsonl");
+    let log: String = [
+        json!({"seq": 1, "type": "type", "label": "Type into \"Betrag\"", "url": "https://bank.example/booking"}),
+        json!({"seq": 2, "type": "type", "label": "Type into \"Search places\"", "url": "https://www.visitlisboa.com/en/places", "step": "search"}),
+        json!({"seq": 3, "type": "navigate", "url": "https://maker.example/"}),
+        json!({"seq": 4, "type": "type", "label": "Press Enter", "url": "https://maker.example/", "step": "search"}),
+        json!({"seq": 5, "type": "click", "label": "Click \"Search\"", "url": "https://maker.example/", "step": "submit"}),
+        json!({"seq": 6, "type": "type", "label": "Press Enter", "step": "search"}),
+    ]
+    .iter()
+    .map(|action| format!("{action}\n"))
+    .collect();
+    std::fs::write(&path, &log).expect("the log");
+    assert_eq!(
+        steps_logged(&path, 0),
+        (
+            LoggedSteps {
+                went_to: strings(&["https://maker.example/"]),
+                searched_on: strings(&[
+                    "https://www.visitlisboa.com/en/places",
+                    "https://maker.example/"
+                ]),
+            },
+            log.len() as u64
+        )
+    );
+    assert_eq!(
+        steps_logged(&path, log.len() as u64),
+        (LoggedSteps::default(), log.len() as u64),
+        "nothing new"
+    );
 }
 
 /// The browser writes a `navigate` action when it goes to an address, after every check on it

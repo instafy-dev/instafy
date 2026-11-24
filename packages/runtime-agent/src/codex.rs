@@ -2890,10 +2890,10 @@ impl CodexClient {
             .turn_wrap_up
             .clone()
             .map(|wrap_up| (tokio::time::Instant::from_std(turn_started) + wrap_up.after, wrap_up.message));
-        // Where the Shared Browser's action log stood when the open now waiting began.
+        // Where the Shared Browser's action log stood when the step now waiting on it began.
         let mut browser_log_read = 0u64;
         loop {
-            let open_waiting = aggregator.browser_open_waiting();
+            let log_awaited = aggregator.browser_log_awaited();
             let event = if let Some(receiver) = active_turn_input.as_ref() {
                 tokio::select! {
                     command = receiver.recv() => {
@@ -2918,8 +2918,8 @@ impl CodexClient {
                         }
                         continue;
                     }
-                    _ = browser_open_poll_due(open_waiting) => {
-                        name_the_sites_the_browser_went_to(
+                    _ = browser_open_poll_due(log_awaited) => {
+                        name_what_the_browser_logged(
                             &mut aggregator,
                             &mut browser_log_read,
                             &mut events,
@@ -2944,8 +2944,8 @@ impl CodexClient {
                         }
                         continue;
                     }
-                    _ = browser_open_poll_due(open_waiting) => {
-                        name_the_sites_the_browser_went_to(
+                    _ = browser_open_poll_due(log_awaited) => {
+                        name_what_the_browser_logged(
                             &mut aggregator,
                             &mut browser_log_read,
                             &mut events,
@@ -2983,7 +2983,7 @@ impl CodexClient {
             {
                 crate::shared_browser::keep_what_a_search_ended_with(dir, search);
             }
-            if !open_waiting && aggregator.browser_open_waiting() {
+            if !log_awaited && aggregator.browser_log_awaited() {
                 browser_log_read = crate::shared_browser::action_log_len();
             }
             // The process supervisor must retain exact counts even if this child later
@@ -3338,11 +3338,12 @@ async fn turn_wrap_up_due(wrap_up: &Option<(tokio::time::Instant, String)>) {
     }
 }
 
-/// How often a running Shared Browser open looks for its browser going to the address.
+/// How often a running Shared Browser step looks at its browser's action log: an open for its
+/// browser going to the address, a step that may search for its browser sending the search.
 const BROWSER_OPEN_POLL: Duration = Duration::from_millis(200);
 
-/// Resolves a moment later while a Shared Browser open waits for its browser to go to the
-/// address; never while none waits.
+/// Resolves a moment later while a Shared Browser step waits on its browser's action log
+/// (`CodexEventStreamAdapter::browser_log_awaited`); never while none waits.
 async fn browser_open_poll_due(waiting: bool) {
     if waiting {
         tokio::time::sleep(BROWSER_OPEN_POLL).await
@@ -3351,17 +3352,21 @@ async fn browser_open_poll_due(waiting: bool) {
     }
 }
 
-/// The addresses the Shared Browser went to since `read` name their site on the opens still
-/// waiting for it (`CodexEventStreamAdapter::browser_went_to`).
-fn name_the_sites_the_browser_went_to(
+/// What the Shared Browser logged since `read` updates the steps still waiting on it: the
+/// addresses it went to name their site on the opens (`CodexEventStreamAdapter::browser_went_to`),
+/// and a search it sent makes a step that may search read as one
+/// (`CodexEventStreamAdapter::browser_searched`).
+fn name_what_the_browser_logged(
     aggregator: &mut CodexEventStreamAdapter,
     read: &mut u64,
     out: &mut Vec<JsonValue>,
     on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
 ) -> Result<()> {
-    let (addresses, next) = crate::shared_browser::action_log_navigations(*read);
+    let (logged, next) = crate::shared_browser::action_log_steps(*read);
     *read = next;
-    for value in aggregator.browser_went_to(&addresses) {
+    let mut updates = aggregator.browser_went_to(&logged.went_to);
+    updates.extend(aggregator.browser_searched(&logged.searched_on));
+    for value in updates {
         if let Some(handler) = on_event.as_mut() {
             handler(&value)?;
         }
@@ -5568,6 +5573,10 @@ pub(crate) struct CodexEventStreamAdapter {
     /// The Shared Browser's opens still running that its browser has not been seen to go to:
     /// each step's id, server, tool and arguments (`browser_went_to`). Never projected.
     browser_opens_waiting: Vec<(String, String, String, Option<JsonValue>)>,
+    /// The Shared Browser's steps still running that may send the site's own search (typing
+    /// with submit, Enter) and that its browser has not been seen to send one: each step's id,
+    /// server, tool and the site it named as it began (`browser_searched`). Never projected.
+    browser_searches_waiting: Vec<(String, String, String, String)>,
     /// The pages the run's browser steps opened (`CodexRunOutput::browser_pages`); never
     /// projected.
     browser_pages: Vec<String>,
@@ -5619,6 +5628,7 @@ impl CodexEventStreamAdapter {
             job_id: None,
             last_browser_host: None,
             browser_opens_waiting: Vec::new(),
+            browser_searches_waiting: Vec::new(),
             browser_pages: Vec::new(),
             browser_secret_screen: false,
             browser_not_given: Vec::new(),
@@ -5755,7 +5765,44 @@ impl CodexEventStreamAdapter {
         !self.browser_opens_waiting.is_empty()
     }
 
-    /// The Shared Browser went to these addresses (`shared_browser::action_log_navigations`):
+    /// Whether a running Shared Browser step waits on its browser's action log: an open
+    /// (`browser_went_to`), or a step that may send the site's own search (`browser_searched`).
+    pub(crate) fn browser_log_awaited(&self) -> bool {
+        self.browser_open_waiting() || !self.browser_searches_waiting.is_empty()
+    }
+
+    /// The Shared Browser sent the site's own search from these pages
+    /// (`shared_browser::LoggedSteps::searched_on`): a running step that may send one (typing
+    /// with submit, Enter), on the site of one of them, reads as the search it is from here on
+    /// ("Searching visitlisboa.com", not "Browsing visitlisboa.com"), as an update of its step,
+    /// and its end names it either way. A search its browser asked about read "Browsing" while
+    /// it ran, after the person's yes (a local test, Nov 20).
+    pub(crate) fn browser_searched(&mut self, pages: &[String]) -> Vec<JsonValue> {
+        use crate::shared_browser_activity::address_host;
+        let hosts: Vec<String> = pages.iter().filter_map(|page| address_host(page)).collect();
+        let mut updates = Vec::new();
+        self.browser_searches_waiting
+            .retain(|(id, server, tool, host)| {
+                if !hosts.contains(host) {
+                    return true;
+                }
+                updates.push(json!({
+                    "type": "item.updated",
+                    "item": {
+                        "id": id,
+                        "type": "mcp_tool_call",
+                        "server": server,
+                        "tool": tool,
+                        "status": "in_progress",
+                        "browserStep": {"step": "search", "host": host},
+                    },
+                }));
+                false
+            });
+        updates
+    }
+
+    /// The Shared Browser went to these addresses (`shared_browser::LoggedSteps::went_to`):
     /// a running open that asked for the site of one of them names it from here on, as an
     /// update of its step. Until then its step names no site, and one the browser refuses
     /// never names it while it runs.
@@ -6077,6 +6124,25 @@ impl CodexEventStreamAdapter {
                             tool_call.invocation.arguments.as_ref(),
                             &mut step,
                         );
+                        // A step that may send the site's own search reads as one once its
+                        // browser says it sent it (`browser_searched`).
+                        if let Some(host) = step.get("host").and_then(JsonValue::as_str)
+                            && tool_call
+                                .invocation
+                                .server
+                                .eq_ignore_ascii_case(SHARED_BROWSER_MCP_SERVER_NAME)
+                            && crate::shared_browser_activity::may_send_a_search(
+                                &tool_call.invocation.tool,
+                                tool_call.invocation.arguments.as_ref(),
+                            )
+                        {
+                            self.browser_searches_waiting.push((
+                                tool_call.call_id.clone(),
+                                tool_call.invocation.server.clone(),
+                                tool_call.invocation.tool.clone(),
+                                host.to_string(),
+                            ));
+                        }
                         item["browserStep"] = step;
                     }
                     if waits {
@@ -6141,6 +6207,8 @@ impl CodexEventStreamAdapter {
                 // and nothing else of it (shared_browser_activity).
                 if is_browser_step_server(&tool_call.invocation.server) {
                     self.browser_opens_waiting
+                        .retain(|(id, ..)| *id != tool_call.call_id);
+                    self.browser_searches_waiting
                         .retain(|(id, ..)| *id != tool_call.call_id);
                     let terminal_code = terminal_consent
                         .as_ref()
@@ -13938,6 +14006,130 @@ required = true
             json!({"step": "navigate", "host": "maker.example"})
         );
         assert!(!adapter.browser_open_waiting());
+    }
+
+    /// Typing with submit, or Enter, may send the site's own search, which only its browser
+    /// knows: its action log says so as the step acts. Until then the step reads as browsing,
+    /// and from then on as the search it is ("Searching visitlisboa.com"), once, on its own
+    /// site. A search its browser asked about read "Browsing" while it ran, after the person's
+    /// yes (a local test, Nov 20). Typing alone, another key, a click and the browser on the
+    /// person's device wait for nothing.
+    #[test]
+    fn a_step_that_may_search_reads_as_one_once_its_browser_sent_it() {
+        use crate::jobs::activity_labels::browser_step_activity;
+        let mut adapter = CodexEventStreamAdapter::default();
+        adapter.last_browser_host = Some("visitlisboa.com".to_string());
+        let invocation = |server: &str, tool: &str, arguments: JsonValue| McpInvocation {
+            server: server.to_string(),
+            tool: tool.to_string(),
+            arguments: Some(arguments),
+        };
+        let begin = |call: &str, invocation: McpInvocation| Event {
+            id: "evt_mcp_begin".to_string(),
+            msg: EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+                call_id: call.to_string(),
+                invocation,
+                connector_id: None,
+                mcp_app_resource_uri: None,
+                mcp_app_ui: None,
+                link_id: None,
+                app_name: None,
+                action_name: None,
+                plugin_id: None,
+                read_only_hint: None,
+                turn_id: "turn-1".to_string(),
+            }),
+        };
+        let words = |event: &JsonValue| {
+            browser_step_activity(&event["item"]["browserStep"])
+                .expect("the step's activity")
+                .to_string()
+        };
+        const SHARED: &str = "instafy_shared_browser";
+        // The browser writes the address masked; the site is the same.
+        const PAGE: &str = "https://www.visitlisboa.com/en/places?q=***";
+
+        for (call, tool, arguments) in [
+            (
+                "call_type",
+                "type",
+                json!({"index": 3, "snapshotId": "a", "text": "Belém Tower", "submit": true}),
+            ),
+            (
+                "call_enter",
+                "press",
+                json!({"index": 3, "snapshotId": "a", "key": "Enter"}),
+            ),
+        ] {
+            let started = adapter.collect(&begin(call, invocation(SHARED, tool, arguments)));
+            assert_eq!(
+                started[0]["item"]["browserStep"]["host"], "visitlisboa.com",
+                "{call}"
+            );
+            assert!(
+                words(&started[0]).contains("Browsing {host}"),
+                "{}",
+                words(&started[0])
+            );
+            assert!(adapter.browser_log_awaited(), "{call}");
+            assert!(adapter.browser_searched(&[]).is_empty(), "{call}");
+            assert!(
+                adapter
+                    .browser_searched(&["https://elsewhere.example/".to_string()])
+                    .is_empty(),
+                "{call}"
+            );
+            let searched = adapter.browser_searched(&[PAGE.to_string()]);
+            assert_eq!(searched.len(), 1, "{searched:?}");
+            assert_eq!(searched[0]["type"], "item.updated");
+            assert_eq!(
+                searched[0]["item"],
+                json!({
+                    "id": call,
+                    "type": "mcp_tool_call",
+                    "server": SHARED,
+                    "tool": tool,
+                    "status": "in_progress",
+                    "browserStep": {"step": "search", "host": "visitlisboa.com"},
+                })
+            );
+            assert!(
+                words(&searched[0]).contains("Searching {host}"),
+                "{}",
+                words(&searched[0])
+            );
+            assert!(!adapter.browser_log_awaited(), "{call}");
+            assert!(
+                adapter.browser_searched(&[PAGE.to_string()]).is_empty(),
+                "{call} once"
+            );
+        }
+
+        for (server, tool, arguments) in [
+            (
+                SHARED,
+                "type",
+                json!({"index": 3, "snapshotId": "a", "text": "Belém Tower"}),
+            ),
+            (
+                SHARED,
+                "press",
+                json!({"index": 3, "snapshotId": "a", "key": "Tab"}),
+            ),
+            (SHARED, "click", json!({"index": 4, "snapshotId": "a"})),
+            (
+                "instafy_personal_browser",
+                "type",
+                json!({"index": 3, "text": "Belém Tower", "submit": true}),
+            ),
+        ] {
+            adapter.collect(&begin("call_other", invocation(server, tool, arguments)));
+            assert!(!adapter.browser_log_awaited(), "{server} {tool}");
+            assert!(
+                adapter.browser_searched(&[PAGE.to_string()]).is_empty(),
+                "{server} {tool}"
+            );
+        }
     }
 
     #[test]

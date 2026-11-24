@@ -5316,38 +5316,65 @@ pub fn action_log_len() -> u64 {
         .unwrap_or(0)
 }
 
-/// The addresses the browser recorded going to in the action log from `offset` on, and where
-/// the next read starts. The browser writes a `navigate` action once every check on the
-/// address has passed and before the page loads (shared-browser-cli.js `emitAction`), with the
+/// What the browser recorded in its action log (shared-browser-cli.js `emitAction`), with each
 /// address masked as it writes it.
-pub fn action_log_navigations(offset: u64) -> (Vec<String>, u64) {
-    navigations_logged(Path::new(&actions_file()), offset)
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LoggedSteps {
+    /// The addresses it went to: a `navigate` action, written once every check on the address
+    /// has passed and before the page loads.
+    pub went_to: Vec<String>,
+    /// The pages it sent the site's own search from: an action it marks `"step": "search"`,
+    /// written as it types into, or presses Enter in, the page's own search box, when the step
+    /// went without a prompt or its prompt asked as a search, after the person's yes then.
+    pub searched_on: Vec<String>,
+}
+
+/// What the browser recorded in the action log from `offset` on, and where the next read
+/// starts.
+pub fn action_log_steps(offset: u64) -> (LoggedSteps, u64) {
+    steps_logged(Path::new(&actions_file()), offset)
 }
 
 /// Only whole lines are read: one still being written is read next time. A log shorter than
 /// `offset` was started over, and is read from its start.
-fn navigations_logged(path: &Path, offset: u64) -> (Vec<String>, u64) {
+fn steps_logged(path: &Path, offset: u64) -> (LoggedSteps, u64) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
-        return (Vec::new(), 0);
+        return (LoggedSteps::default(), 0);
     };
     let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
     let start = if offset > len { 0 } else { offset };
     let mut added = Vec::new();
     if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut added).is_err() {
-        return (Vec::new(), start);
+        return (LoggedSteps::default(), start);
     }
     let whole = added
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |end| end + 1);
-    let addresses = added[..whole]
+    let mut steps = LoggedSteps::default();
+    for action in added[..whole]
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<JsonValue>(line).ok())
-        .filter(|action| action.get("type").and_then(JsonValue::as_str) == Some("navigate"))
-        .filter_map(|action| action.get("url")?.as_str().map(str::to_string))
-        .collect();
-    (addresses, start + whole as u64)
+    {
+        let Some(url) = action.get("url").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        if action.get("type").and_then(JsonValue::as_str) == Some("navigate") {
+            steps.went_to.push(url.to_string());
+        }
+        if action.get("step").and_then(JsonValue::as_str) == Some("search") {
+            steps.searched_on.push(url.to_string());
+        }
+    }
+    (steps, start + whole as u64)
+}
+
+/// The addresses alone (`steps_logged`).
+#[cfg(test)]
+fn navigations_logged(path: &Path, offset: u64) -> (Vec<String>, u64) {
+    let (steps, next) = steps_logged(path, offset);
+    (steps.went_to, next)
 }
 
 pub fn execution_evidence_missing(before: Option<u64>, after: u64) -> bool {

@@ -165,6 +165,25 @@ describe("BrowserApprovalRow", () => {
       "Octo wants to send the form “Search” on visitlisboa.com. It goes to search.example.org.", "Allow"],
     [{ operation: "form-submit", display: { label: "", destinationOrigin: null } },
       "Octo wants to send a form on visitlisboa.com.", "Allow"],
+    // A site's own search, as the runtime marks it (its title in place of a
+    // category): the site it searches, never the field's name. A local test
+    // read "Octo wants to send the form “Enter a search term” on … Sends:
+    // Enter a search term." for a search box whose field had no name.
+    [{ operation: "form-submit", display: { label: "Search this site", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to search visitlisboa.com.", "Allow"],
+    [{ operation: "press-enter", display: { label: "Search this site", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to search visitlisboa.com.", "Allow"],
+    // A search form with other fields still says what it sends.
+    [{ operation: "form-submit", display: { label: "Search this site: Search \u00b7 Sends: Search, Category", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to search visitlisboa.com. Sends: Search, Category.", "Allow"],
+    // A form that posts, or goes to another site, is no site search whatever
+    // its words: it still sends the form.
+    [{ operation: "form-submit", display: { label: "Change something: Find a store \u00b7 Sends: Find a store", destinationOrigin: "https://www.visitlisboa.com" } },
+      "Octo wants to send the form “Find a store” on visitlisboa.com. Sends: Find a store.", "Allow"],
+    // Only a step that sends a form reads the title: a click on a control
+    // named so is quoted as before.
+    [{ operation: "click", display: { label: "Search this site", destinationOrigin: null } },
+      "Octo wants to click “Search this site” on visitlisboa.com.", "Allow"],
     [{ operation: "press-enter", display: { label: "Places", destinationOrigin: null } },
       "Octo wants to press Enter on “Places” on visitlisboa.com.", "Allow"],
     [{ operation: "press-key", display: { label: "Press Tab on Places", destinationOrigin: null } },
@@ -331,6 +350,16 @@ describe("BrowserApprovalRow", () => {
     expect(settled).toEqual([{
       approvalId: value.approvalId, outcome, operation: "form-submit",
       host: "visitlisboa.com", destinationHost: "visitlisboa.com",
+    }]);
+  });
+
+  it("keeps that a site's own search was one once answered, never its label", async () => {
+    const value = request({ display: { label: "Search this site", destinationOrigin: "https://www.visitlisboa.com" } });
+    await render(withPending(value));
+    await render(approval({ lastDecision: { approvalId: value.approvalId, decision: "allow_once" } }));
+    expect(settled).toEqual([{
+      approvalId: value.approvalId, outcome: "allowed", operation: "form-submit",
+      host: "visitlisboa.com", destinationHost: "visitlisboa.com", search: true,
     }]);
   });
 
