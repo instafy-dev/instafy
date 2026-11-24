@@ -2261,9 +2261,17 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
                     (helper, claude)
                 };
                 for (job, part) in [(first, &parts[0]), (second, &parts[1])] {
+                    // A Claude Code agent's words start after the mention
+                    // they open with, which Claude Code would read as another
+                    // agent to hand the work to; another AI's keep it.
+                    let words = if job.engine.is_some() {
+                        part.trim_start_matches(&format!("@{CLAUDE} ")).to_string()
+                    } else {
+                        part.clone()
+                    };
                     assert_eq!(
                         job.payload["prompt_text"].as_str().map(str::trim),
-                        Some(part.as_str()),
+                        Some(words.as_str()),
                         "{what}: {}",
                         job.payload
                     );

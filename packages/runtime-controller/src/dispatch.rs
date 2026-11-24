@@ -559,6 +559,46 @@ fn apply_agent_prompt_segment(
     {
         request.prompt_text = segment.to_string();
     }
+    if target.claude_code {
+        request.prompt_text = claude_code_words(&request.prompt_text).to_string();
+    }
+}
+
+/// The words a Claude Code agent's turn gets: its text after the mentions it
+/// opens with, and the commas or colons after them, as in "@claude, fix the
+/// build" (docs/Local-Engine-Turns.md 11.22). Claude Code reads a leading
+/// `@name` as another agent to hand the work to, and looks for one among its
+/// person's own sessions before it starts. The text stays whole when nothing
+/// would remain, when what remains would start with `/`, which Claude Code
+/// would run as its own command, and when a mention runs into other text,
+/// such as "@claude's".
+fn claude_code_words(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    if !rest.starts_with('@') {
+        return text;
+    }
+    loop {
+        rest = rest.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':');
+        if !rest.starts_with('@') {
+            break;
+        }
+        let Some((_handle, end)) = parse_agent_mention_at(rest, 0) else {
+            return text;
+        };
+        let after = rest.get(end..).unwrap_or_default();
+        if !(after.is_empty()
+            || after.starts_with(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':'))
+        {
+            return text;
+        }
+        rest = after;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() || rest.starts_with('/') {
+        text
+    } else {
+        rest
+    }
 }
 
 fn has_explicit_agent_mentions(metadata: &JsonValue) -> bool {
@@ -2123,11 +2163,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
             may_take_turns,
         );
         for handle in &agent_handles {
-            let prompt_text = prompt_segments
-                .get(handle)
-                .map(|segment| segment.trim())
-                .filter(|segment| !segment.is_empty())
-                .unwrap_or(request.prompt_text.as_str());
+            // The words a turn on Claude Code would get, as
+            // `apply_agent_prompt_segment` gives them.
+            let prompt_text = claude_code_words(
+                prompt_segments
+                    .get(handle)
+                    .map(|segment| segment.trim())
+                    .filter(|segment| !segment.is_empty())
+                    .unwrap_or(request.prompt_text.as_str()),
+            );
             let refused = crate::claude_code_lane::refuses_turn(
                 &state.config,
                 context,
@@ -2186,12 +2230,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
             || metadata_uses_shared_browser(&request.metadata);
         for target in agent_targets.iter().filter(|target| target.claude_code) {
             // The words its job will get: its own part of a message to several
-            // agents, as `apply_agent_prompt_segment` gives it, or the whole.
-            let prompt_text = prompt_segments
-                .get(&target.handle)
-                .map(|segment| segment.trim())
-                .filter(|segment| !segment.is_empty())
-                .unwrap_or(request.prompt_text.as_str());
+            // agents, or the whole, after the mentions it opens with, as
+            // `apply_agent_prompt_segment` gives them.
+            let prompt_text = claude_code_words(
+                prompt_segments
+                    .get(&target.handle)
+                    .map(|segment| segment.trim())
+                    .filter(|segment| !segment.is_empty())
+                    .unwrap_or(request.prompt_text.as_str()),
+            );
             crate::claude_code_lane::check_target(
                 &state.config,
                 context,
@@ -8308,6 +8355,38 @@ mod tests {
             build_prompt_segments_by_handle("Please ask @octo to inspect this later.", &handles);
 
         assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn a_claude_code_turn_gets_its_words_after_the_mentions_they_open_with() {
+        for (text, words) in [
+            (
+                "@alpha create notes.txt containing only alpha,",
+                "create notes.txt containing only alpha,",
+            ),
+            ("  @alpha, fix the build", "fix the build"),
+            ("@alpha: fix the build", "fix the build"),
+            ("@alpha @beta, review the docs", "review the docs"),
+            ("@alpha,@beta fix it", "fix it"),
+            // Nothing to cut: no leading mention.
+            (
+                "Fix the build, then ask @alpha",
+                "Fix the build, then ask @alpha",
+            ),
+            // Kept whole: nothing would remain, a command would remain, or a
+            // mention runs into other text.
+            ("@alpha", "@alpha"),
+            ("@alpha, @beta", "@alpha, @beta"),
+            ("@alpha /review", "@alpha /review"),
+            ("@alpha's notes need a fix", "@alpha's notes need a fix"),
+            ("@alpha.fix the build", "@alpha.fix the build"),
+            (
+                "me@example.com is my address",
+                "me@example.com is my address",
+            ),
+        ] {
+            assert_eq!(claude_code_words(text), words, "{text:?}");
+        }
     }
 
     #[test]
