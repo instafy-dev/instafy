@@ -880,6 +880,11 @@ const LEGACY_COMPARING_SHA256: &[&str] = &[
     // reviewer's page could be read for was "not checked", and "I didn't find" was only for a
     // value looked for.
     "68e895d6befa87ac4f44e96f3822478037d3b4a11d39eb364e63f89ce4167906", // v3
+    // From before a reviewer's home page with no review of the model was no look (its own search
+    // box or reviews section was), two reviewers were tried in the same pass before a review was
+    // missing, one a notice covered was "not checked", a spec toggle was opened before a spec was
+    // missing, a page's part of a value filled its cell, and a sibling's page was no item's source.
+    "5fa35c1d6eecce3ce207cfecdb2a9c611c39b790fba8cdb48ffe402ef79907cc", // v4
 ];
 /// How Octo finds and gives a route between places, for every reader and browser. A topic of the
 /// browser, research and page skills, under them in the skills tree.
