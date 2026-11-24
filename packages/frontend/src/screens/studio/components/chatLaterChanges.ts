@@ -54,22 +54,6 @@ export function readChangeUndone(
   return { messageId, runId: runId || null, paths };
 }
 
-/**
- * The files of the chat's changes a person undid with Undo, from the lines
- * those Undos left. Never a change the chat's next turn put back because a
- * Stop left it unsaved: that line names the turn's job (`putBackByJobId`).
- */
-export function filesUndoneByPerson(messages: ReadonlyArray<Pick<ChatMessage, "metadata">>): ReadonlySet<string> {
-  const files = new Set<string>();
-  for (const message of messages) {
-    const line = readChangeUndone(message);
-    const putBackBy = line ? (message.metadata as Record<string, unknown>).putBackByJobId : null;
-    if (!line || (typeof putBackBy === "string" && putBackBy.trim())) continue;
-    for (const path of line.paths) files.add(path);
-  }
-  return files;
-}
-
 /** The `kind` of the artifact a reply carries when its save took a stopped turn's unsaved change (runtime-agent `stopped_change.rs`). */
 export const SAVED_LATER_ARTIFACT_KIND = "stopped-turn/saved-later";
 

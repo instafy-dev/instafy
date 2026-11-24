@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../types";
-import { conversationLaterChanges, filesUndoneByPerson, readChangeUndone, readSavedLater } from "../chatLaterChanges";
+import { conversationLaterChanges, readChangeUndone, readSavedLater } from "../chatLaterChanges";
 
 function filesMessage(id: string, timestamp: number, jobId: string, paths: string[]): ChatMessage {
   return {
@@ -64,21 +64,6 @@ describe("conversationLaterChanges", () => {
     const forged = undoLine("forged", ["sites/a/app.js"], { source: undefined });
     expect(readChangeUndone(forged)).toBeNull();
     expect(conversationLaterChanges([stopped, forged]).undone?.("stopped")).toBeNull();
-  });
-
-  // The chat's next turn puts back a change a Stop left unsaved with the same
-  // line, naming that turn's job: Octo's own take-back, never a person's Undo.
-  it("tells a person's Undo from the next turn's take-back", () => {
-    const line = (paths: string[], by: Record<string, unknown>): ChatMessage => ({
-      id: `line-${paths.join()}`, role: "assistant", content: "", timestamp: 3_000,
-      metadata: { source: "controller", kind: "change_undone", undoneMessageId: "stopped", undonePaths: paths, ...by },
-    });
-    expect([...filesUndoneByPerson([
-      line(["./sites/a/app.js"], { actorUserId: "user-1" }),
-      line(["sites/a/style.css"], { putBackByJobId: "next-turn-job" }),
-      line(["sites/b/app.js"], { actorUserId: "user-1", source: undefined }),
-      stopped,
-    ])]).toEqual(["sites/a/app.js"]);
   });
 
   it("counts a turn's own later rows as its own, inside a job thread too", () => {
