@@ -904,9 +904,9 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   `instafy web search` adds its results. An address ends where a sentence's own marks begin, those of Chinese,
   Japanese and Korean too (`。`, `、`, `（`), and the asterisks of emphasis around it don't count. Any other address is `skipped` with `code: "not_given"`: nothing is
   fetched for it, not even robots.txt, no stop is remembered, and the `tell` names the site's home page to read
-  instead, never the plain link. Not reading it says nothing about the page: the `tell` asks the turn to keep the
-  address's link where the person, a file they attached, or a page or search result in the chat gave it, and never to
-  link, cite or card an address it put together itself. A search address (one with a query) on a site nobody gave names no home page. A stop
+  instead rather than telling the turn to give the person the plain link. As not reading it says nothing about the
+  page, the `tell` asks the turn to keep the address's link where the person, a file they attached, or a page or
+  search result in the chat gave it, and never to link, cite or card an address it put together itself. A search address (one with a query) on a site nobody gave names no home page. A stop
   the turn or the workspace already holds for the address or its site answers first, with its own words. A site's
   home page, a link-only site (its own refusal answers) and an address on no public site by its name (the
   private-network rule answers) are never refused so. Without that folder and its

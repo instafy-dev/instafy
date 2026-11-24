@@ -1285,8 +1285,10 @@ mod tests {
         )
         .unwrap();
         let mut answered = execution(Vec::new());
-        answered.summary =
-            format!("Here it is: {product} (129 EUR). A bigger one may be at {made_up}.");
+        // A reply links its pages as Markdown does.
+        answered.summary = format!(
+            "Here it is: [X-123 air fryer]({product}) (129 EUR). A bigger one may be at [X-999]({made_up})."
+        );
         let reply = answered.summary.clone();
         let done = attach_turn_records(Ok(answered), &first).unwrap();
         let carried: Vec<&JsonValue> = done

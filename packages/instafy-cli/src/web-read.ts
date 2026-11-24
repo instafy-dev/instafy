@@ -172,9 +172,9 @@ const STOP_TELL = "This address only (and where it redirected): don't read it an
 const PAGE_STOP_TELL = `${STOP_TELL} The site's other pages, such as each product's own page, and other sources can still be read.`;
 const OTHER_SOURCES_TELL = "Other sources can still be read.";
 /**
- * What an address nobody gave the turn leaves of its link (notGivenRefusal). Told never to link, cite or card such an
- * address, a turn dropped the link to a page the chat had read before its runtime started again, or one a file the
- * person attached named. Not reading it proves nothing about the page; only an address the turn put together itself is
+ * What a refusal as not given (notGivenRefusal) says of the address's link. Told never to link, cite or card such an
+ * address, a turn dropped the link to a page the chat had read before its runtime started again, or to one a file the
+ * person attached named. Not reading a page proves nothing about it: only an address the turn put together itself is
  * never passed on.
  */
 const NOT_GIVEN_LINK_TELL =
