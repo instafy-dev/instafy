@@ -675,16 +675,17 @@ const controlsFor = (targetId) => {
     ];
   }
   // A cookie banner: its refusal, its accept and its settings, then a link of
-  // the page. "-no-reject" has no refusal, "-apart" a refusal in another part
-  // of the page, "-sign-in" a sign-in form below it, "-secret" a page that
-  // shows a secret, "-privacy" a dialog about a privacy policy with no word of
-  // cookies, "-payment-frame" a checkout whose card fields sit in a frame, and
-  // "-stays" a banner whose refusal took no press.
+  // the page. "-no-reject" has no refusal, "-settings" none either but
+  // settings the page holds hidden with one, "-apart" a refusal in another
+  // part of the page, "-sign-in" a sign-in form below it, "-secret" a page
+  // that shows a secret, "-privacy" a dialog about a privacy policy with no
+  // word of cookies, "-payment-frame" a checkout whose card fields sit in a
+  // frame, and "-stays" a banner whose refusal took no press.
   if (mode.startsWith("cookie-banner")) {
     const banner = (text) => plain({ tag: "button", inputType: "button", text, area: "dialog",
       policy: { consentContext: true, areas: "dialog" } });
     return [
-      ...(mode === "cookie-banner-no-reject" ? [] : [banner("Reject all")]),
+      ...(mode === "cookie-banner-no-reject" || mode === "cookie-banner-settings" ? [] : [banner("Reject all")]),
       banner("Accept all"),
       banner("Customize"),
       plain({ tag: "a", inputType: "", text: "Opening hours", href: "https://example.test/hours",
@@ -979,6 +980,10 @@ const makePage = (targetId, opened = null) => {
           // that speaks of cookies: "-privacy" is a dialog about a privacy
           // policy, with no word of cookies.
           ? mode.startsWith("cookie-banner") && mode !== "cookie-banner-apart" && mode !== "cookie-banner-privacy"
+        : arg && arg.kind === "notice-settings"
+          // The hidden buttons of the places around a banner named after a
+          // notice: only "-settings" holds a refusal there.
+          ? (mode === "cookie-banner-settings" ? [{ names: ["Reject all"], personal: false }] : [])
         : arg && arg.kind === "control-gone"
           // Whether the banner's refusal is gone after the press:
           // "-stays" is a banner whose button took no press.
@@ -991,6 +996,11 @@ const makePage = (targetId, opened = null) => {
               mode === "carousel-offer-next"
             ? "Red mug Add to cart" : "Blue mug Add to cart" }
           : controlsFor(targetId)[ordinal],
+    // The container that keeps a notice's settings, which only "-settings"
+    // holds; no other page answers with a handle.
+    evaluateHandle: async (_fn, arg) => arg && arg.kind === "notice-settings" && mode === "cookie-banner-settings"
+      ? { asElement() { return this; }, dispose: async () => {} }
+      : null,
     // A trial click (a plain link's look before its click) clicks nothing.
     click: async (options) => {
       if (options && options.trial === true) return;
@@ -13969,9 +13979,11 @@ fn a_cookie_notices_accept_is_never_listed_so_no_step_can_press_it() {
 /// A local test (Nov 5): a banner's "Reject" or "Reject all" was in five turns' readings and no turn pressed
 /// it; the line that told a turn to rested on the model following text. Instafy's browser now
 /// presses a banner's own refusal itself once the page settles, before Octo reads it: only beside
-/// an accept of the same banner, never the accept or the settings, and never on a page with a
-/// sign-in field or one that may show a secret. It asks nobody, the step's activity says so
-/// (`declined: "cookies"`, which Details lists), and the reading Octo gets is the page after it.
+/// an accept of the same banner, never the accept, its settings only to show a refusal they hold
+/// when the banner has none and the page holds them hidden with one (local tests, Nov 22), and
+/// never on a page with a sign-in field or one that may show a secret. It asks nobody, the step's
+/// activity says so (`declined: "cookies"`, which Details lists), and the reading Octo gets is the
+/// page after it.
 #[test]
 fn the_browser_declines_a_cookie_banner_itself() {
     let fixture = EmbeddedControllerFixture::new();
@@ -14014,10 +14026,31 @@ fn the_browser_declines_a_cookie_banner_itself() {
         "0\n"
     );
 
-    // No refusal on the banner, a refusal apart from the accept, a page with a sign-in field,
-    // a page that may show a secret, a dialog about a privacy policy that never speaks of
-    // cookies (its "Decline" may close an account), and a checkout whose card fields sit in a
-    // payment provider's frame: nothing is pressed, and the activity says nothing.
+    // A banner whose own buttons hold no refusal is refused in its own settings when the page
+    // holds them hidden with one: its settings button beside its accept is pressed to show
+    // them, as opening the cookie settings, and nothing else when they show no refusal (here
+    // they show the same banner); the activity says nothing.
+    let fixture = EmbeddedControllerFixture::new();
+    let reading = payload_of(&fixture.run("cookie-banner-settings", "GET", "/v1/snapshot", None));
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "1\n",
+        "only the banner's settings were pressed"
+    );
+    assert!(
+        fixture
+            .action_log()
+            .contains("\"type\":\"click\",\"label\":\"Open cookie settings\""),
+        "{}",
+        fixture.action_log()
+    );
+    assert!(reading["activity"].get("declined").is_none(), "{reading}");
+
+    // A banner with no refusal whose settings the page doesn't hold with one, a refusal apart
+    // from the accept, a page with a sign-in field, a page that may show a secret, a dialog
+    // about a privacy policy that never speaks of cookies (its "Decline" may close an
+    // account), and a checkout whose card fields sit in a payment provider's frame: nothing is
+    // pressed, so no settings are left open over the page, and the activity says nothing.
     for mode in [
         "cookie-banner-no-reject",
         "cookie-banner-apart",

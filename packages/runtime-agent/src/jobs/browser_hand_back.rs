@@ -6481,13 +6481,14 @@ mod tests {
         assert_eq!(section.matches(rule).count(), 1, "{section}");
         assert!(finding_lines_pass_prompt(true).contains(rule));
         // Its meaning for a comparison, in the skill a comparison's browser turn carries: once
-        // a reviewer's own page was read, as a value is not found only once a page's text was
-        // searched for it (`NOT_FOUND_SEARCH`): a reviewer's site that stopped the turn returned
-        // no text to search.
+        // a reviewer's search results or reviews section was read, as a value is not found only
+        // once a page's text was searched for it (`NOT_FOUND_SEARCH`): a reviewer's site that
+        // stopped the turn returned no text to search, and a home page with no review of the
+        // model is no look.
         let comparing =
             include_str!("../../assets/instafy/.agents/skills/instafy-comparing/SKILL.md");
         assert!(comparing.contains(
-            "Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
+            "Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line."
         ));
         assert!(NOT_FOUND_SEARCH.contains(
             "counts as not found only once you searched the whole text a step returned for it"
