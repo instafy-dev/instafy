@@ -1161,7 +1161,7 @@ mod tests {
         fs::create_dir_all(&skill).unwrap();
         fs::write(
             skill.join("SKILL.md"),
-            "---\nname: invoices\n---\n\n## Getting started\n\nINVOICES_API_KEY: the API key, found under Settings, then API keys. Sign in at https://app.provider.example/settings/api-keys.\n",
+            "---\nname: invoices\n---\n\n## Getting started\n\nINVOICES_API_KEY: the API key, found under Settings, then API keys. Sign in at **https://app.provider.example/settings/api-keys**.\n",
         )
         .unwrap();
         let prompt = super::super::skills::build_skill_start_prompt(

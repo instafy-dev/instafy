@@ -540,7 +540,7 @@ export function addressesInText(text: string): string[] {
     if (start >= 0) {
       addresses.push(addressEnd(word.slice(start)));
     } else if (!word.includes("://")) {
-      const address = addressEnd(word.replace(/^\(+/u, ""));
+      const address = addressEnd(word.replace(/^[(*]+/u, ""));
       const slash = address.indexOf("/");
       const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
       if (labels.length >= 2 && labels.every((label) => SITE_NAME_LABEL.test(label)) && /^[A-Za-z]{2,}$/u.test(labels.at(-1)!)) {
@@ -551,11 +551,14 @@ export function addressesInText(text: string): string[] {
   return addresses;
 }
 
-/** An address as a sentence holds it, less the sentence's own marks after it and a closing parenthesis it doesn't open. */
+/**
+ * An address as a sentence holds it, less the sentence's own marks after it, a closing parenthesis it doesn't open and
+ * the asterisks of emphasis around it ("**https://example.org/a**").
+ */
 function addressEnd(word: string): string {
-  let address = word.replace(/[.,;:!?]+$/u, "");
+  let address = word.replace(/[.,;:!?*]+$/u, "");
   while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
-    address = address.slice(0, -1).replace(/[.,;:!?]+$/u, "");
+    address = address.slice(0, -1).replace(/[.,;:!?*]+$/u, "");
   }
   return address;
 }

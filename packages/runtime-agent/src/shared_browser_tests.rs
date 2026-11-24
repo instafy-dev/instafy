@@ -4823,6 +4823,17 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
             key("example.org/b"),
         ]
     );
+    // Emphasis's asterisks around an address go, as a skill's own text may write the address its
+    // setup opens.
+    assert_eq!(
+        given_addresses_in_text(
+            "Sign in at **https://app.provider.example/settings/api-keys**, or *visitporto.travel/en/lello*."
+        ),
+        vec![
+            key("app.provider.example/settings/api-keys"),
+            key("visitporto.travel/en/lello"),
+        ]
+    );
     // A card in the person's language keeps the address they gave, with the sentence's own mark
     // after it, and names the home page in place of one nobody gave.
     let given: std::collections::HashSet<String> =

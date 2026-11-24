@@ -7916,7 +7916,7 @@ function addressesInText(text) {
     if (start >= 0) {
       addresses.push(addressEnd(word.slice(start)));
     } else if (!word.includes("://")) {
-      const address = addressEnd(word.replace(/^\(+/u, ""));
+      const address = addressEnd(word.replace(/^[(*]+/u, ""));
       const slash = address.indexOf("/");
       const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
       if (
@@ -7934,10 +7934,11 @@ function addressesInText(text) {
 // An address as a sentence holds it, less the sentence's own marks after it
 // and a closing parenthesis it does not open itself: "(see
 // https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+// The asterisks of emphasis around it go too: "**https://example.org/a**".
 function addressEnd(word) {
-  let address = word.replace(/[.,;:!?]+$/u, "");
+  let address = word.replace(/[.,;:!?*]+$/u, "");
   while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
-    address = address.slice(0, -1).replace(/[.,;:!?]+$/u, "");
+    address = address.slice(0, -1).replace(/[.,;:!?*]+$/u, "");
   }
   return address;
 }

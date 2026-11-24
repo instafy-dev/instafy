@@ -898,7 +898,7 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   with what the installed skills a skill setup's first turn carries name; the AI's own web searches add what they
   found; each page this command reads adds its own address, its links and the addresses its text spells out, and
   `instafy web search` adds its results. An address ends where a sentence's own marks begin, those of Chinese,
-  Japanese and Korean too (`。`, `、`, `（`). Any other address is `skipped` with `code: "not_given"`: nothing is
+  Japanese and Korean too (`。`, `、`, `（`), and the asterisks of emphasis around it don't count. Any other address is `skipped` with `code: "not_given"`: nothing is
   fetched for it, not even robots.txt, no stop is remembered, and the `tell` names the site's home page to read
   instead, never the plain link. A search address (one with a query) on a site nobody gave names no home page. A stop
   the turn or the workspace already holds for the address or its site answers first, with its own words. A site's

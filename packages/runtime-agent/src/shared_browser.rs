@@ -1425,7 +1425,7 @@ fn addresses_named_in(text: &str, bare_sites: bool) -> Vec<(std::ops::Range<usiz
                     .map(|url| (at + start..at + start + written.len(), url))
             }
             None if !word.contains("://") => {
-                let opened = word.trim_start_matches('(');
+                let opened = word.trim_start_matches(['(', '*']);
                 let start = word.len() - opened.len();
                 let word = address_end(opened);
                 let host = word.split('/').next().unwrap_or_default();
@@ -1741,8 +1741,10 @@ pub(crate) fn keep_what_a_search_ended_with(
 /// An address as a sentence holds it, less the sentence's own marks after it
 /// and a closing parenthesis it does not open itself: "(see
 /// https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+/// The asterisks of emphasis around it go too: "**https://example.org/a**", as
+/// a skill's own text can declare the address its setup opens.
 fn address_end(word: &str) -> &str {
-    let marks = ['.', ',', ';', ':', '!', '?'];
+    let marks = ['.', ',', ';', ':', '!', '?', '*'];
     let mut address = word.trim_end_matches(marks);
     while address.ends_with(')') && address.matches(')').count() > address.matches('(').count() {
         address = address[..address.len() - 1].trim_end_matches(marks);

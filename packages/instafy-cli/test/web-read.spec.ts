@@ -1315,6 +1315,11 @@ describe("an address nobody gave", () => {
       "https://example.org/a",
       "https://example.org/b",
     ]);
+    // Emphasis's asterisks around an address go, as a skill's own text may write the address its setup opens.
+    expect(addressesInText("Sign in at **https://app.provider.example/settings/api-keys**, or *visitporto.travel/en/lello*.")).toEqual([
+      "https://app.provider.example/settings/api-keys",
+      "https://visitporto.travel/en/lello",
+    ]);
   });
 
   it("reads the addresses a message in Chinese or Japanese gave, its sentence's own marks around them", async () => {
