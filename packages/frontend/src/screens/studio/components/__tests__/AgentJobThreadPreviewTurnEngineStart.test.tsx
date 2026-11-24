@@ -34,23 +34,28 @@ const live = vi.hoisted(() => ({
   runStatus: "in_progress" as RunRecord["status"],
   conversationMessages: [] as ChatMessage[],
   viewerId: "user-sam",
+  otherRuns: {} as Record<string, RunRecord>,
 }));
 
 function inProgressRun(): RunRecord {
+  return runOf(JOB_ID, live.runStatus, live.runMetadata);
+}
+
+function runOf(id: string, status: RunRecord["status"], metadata: Record<string, unknown> | null): RunRecord {
   const now = new Date().toISOString();
   return {
-    id: JOB_ID,
+    id,
     projectId: "project-1",
     sessionId: null,
     conversationId: CONTROLLER_ID,
     promptId: null,
     runType: "prompt",
-    status: live.runStatus,
+    status,
     progress: 0,
     progressStage: null,
     previewUrl: null,
     lastMessage: null,
-    metadata: live.runMetadata,
+    metadata,
     createdAt: now,
     updatedAt: now,
   };
@@ -72,7 +77,7 @@ vi.mock("../../../../conversations/ConversationsProvider", async (importOriginal
 }));
 
 vi.mock("../../../../runtime/useRuntime", () => ({
-  useRuntime: () => ({ runs: { [JOB_ID]: inProgressRun() } }),
+  useRuntime: () => ({ runs: { ...live.otherRuns, [JOB_ID]: inProgressRun() } }),
 }));
 
 function MessageContent({ content }: { content: string }) {
@@ -176,6 +181,7 @@ describe("a turn row before its first step", () => {
     live.runStatus = "in_progress";
     live.conversationMessages = [];
     live.viewerId = SAM;
+    live.otherRuns = {};
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -235,6 +241,36 @@ describe("a turn row before its first step", () => {
     // A mode a client could record on a prompt never counts.
     await render({ aiAccessMode: "claude-code" }, firstNote());
     expect(activityLine()).toBe("Thinking…");
+  });
+
+  // docs/Local-Engine-Turns.md 11.22: a message that names several agents
+  // runs their turns one after another, and a later one waits for the agent
+  // named before it, whatever AI either uses.
+  const EARLIER_RUN = "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+  const TAKES_TURNS = { takesTurns: { version: 1, afterRunId: EARLIER_RUN, afterAgent: "helper" } };
+
+  it("waits for the agent named before it in its message, whatever its AI", async () => {
+    live.runStatus = "queued";
+    live.otherRuns = { [EARLIER_RUN]: runOf(EARLIER_RUN, "in_progress", null) };
+    live.runMetadata = { jobId: JOB_ID, ...STAMP, initiatingUserId: SAM, ...TAKES_TURNS };
+    await render({ ...STAMP, runId: JOB_ID }, firstNote());
+    expect(activityLine()).toBe("Waiting for @helper to finish…");
+
+    await act(async () => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    live.runMetadata = { jobId: JOB_ID, aiAccessMode: "managed", ...TAKES_TURNS };
+    await render({}, firstNote());
+    expect(activityLine()).toBe("Waiting for @helper to finish…");
+  });
+
+  it("reads its own wait once the turn before it has ended", async () => {
+    live.runStatus = "queued";
+    live.otherRuns = { [EARLIER_RUN]: runOf(EARLIER_RUN, "success", null) };
+    live.runMetadata = { jobId: JOB_ID, ...STAMP, initiatingUserId: SAM, ...TAKES_TURNS };
+    await render({ ...STAMP, runId: JOB_ID }, firstNote());
+    expect(activityLine()).toBe("Waiting for your computer…");
   });
 
   it("follows the steps from the first one on", async () => {

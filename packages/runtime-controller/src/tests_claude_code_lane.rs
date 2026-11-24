@@ -808,6 +808,21 @@ impl Lane {
         Ok(())
     }
 
+    /// `run`'s job, and the job whose turn it waits for
+    /// (crate::message_turns, docs/Local-Engine-Turns.md 11.22).
+    async fn turn_of(&self, run: Uuid) -> anyhow::Result<(Uuid, Option<Uuid>)> {
+        let row = self
+            .pool()
+            .get()
+            .await?
+            .query_one(
+                "select id, after_job_id from agent_jobs where run_id = $1",
+                &[&run],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1)))
+    }
+
     /// An ordinary job queued in a chat of its own, as a parent for a row the
     /// engine CHECK refuses.
     async fn queued_job(&self) -> anyhow::Result<Uuid> {
@@ -2113,12 +2128,12 @@ async fn a_turn_claude_code_cannot_take_is_refused_before_anything_is_written() 
 /// it, which its runtime runs read-only (docs/Local-Engine-Turns.md 11.4,
 /// 11.12). A turn whose planned write scope would own part of the space, or
 /// coordinate its writes with other agents writing at once, is refused with
-/// the reason `write_scope` before anything is written: a send with write
-/// intent to it and another agent, owned paths given for it beside another
-/// agent or alone, and an explicit scope that is no scope. A read-only scope,
-/// given or planned for a send to several agents without write intent, is a
-/// turn, and so is the whole space beside an agent that only reads; the
-/// payload names the scope.
+/// the reason `write_scope` before anything is written: owned paths given for
+/// it beside another agent or alone, and an explicit scope that is no scope.
+/// A read-only scope, given or planned for a send to several agents without
+/// write intent, is a turn; so is the whole space beside an agent that only
+/// reads, and the whole space in its turn when a person's message with write
+/// intent names it and another agent (11.22). The payload names the scope.
 #[tokio::test]
 async fn a_claude_code_turn_held_to_part_of_the_space_is_refused_before_anything_is_written(
 ) -> anyhow::Result<()> {
@@ -2140,7 +2155,6 @@ async fn a_claude_code_turn_held_to_part_of_the_space_is_refused_before_anything
                 }))
             };
             for body in [
-                both(json!({})),
                 both_with_scopes(json!({ "claude": ["src/"], "helper": ["docs/"] })),
                 lane_send(lane_metadata(
                     json!({ "writeScope": { "ownedPaths": ["src/"] } }),
@@ -2171,6 +2185,11 @@ async fn a_claude_code_turn_held_to_part_of_the_space_is_refused_before_anything
                     both_with_scopes(json!({ "helper": "read_only" })),
                     "unscoped",
                 ),
+                (
+                    "in its turn beside another agent that writes",
+                    both(json!({})),
+                    "unscoped",
+                ),
             ] {
                 let (status, response) = lane.send(&owner, chat, &body).await?;
                 anyhow::ensure!(status == StatusCode::OK, "{what}: {status} {response}");
@@ -2185,6 +2204,186 @@ async fn a_claude_code_turn_held_to_part_of_the_space_is_refused_before_anything
                     job.payload
                 );
             }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A person's message that names several agents and may change files, with
+/// no write scope for any of them, gives each agent's turn the whole space,
+/// whatever its AI, and runs the turns one after another in the order it
+/// names them (docs/Local-Engine-Turns.md 11.22, D53). Each agent gets its
+/// own part of the message; the later job waits for the earlier one, and its
+/// run names the run and the agent it waits for. No computer takes the later
+/// turn until the earlier one has ended, a computer's idle poll holds
+/// meanwhile, and whichever is named first, a Claude Code turn or another
+/// AI's, goes first.
+#[tokio::test]
+async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> anyhow::Result<()> {
+    with_lane(
+        "lane-in-turns",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            for order in [[CLAUDE, "helper"], ["helper", CLAUDE]] {
+                let what = format!("@{} first", order[0]);
+                let parts = [
+                    format!("@{} write notes.txt,", order[0]),
+                    format!("@{} write todo.txt", order[1]),
+                ];
+                let (status, response) = lane
+                    .send(
+                        &lane.owner(),
+                        lane.chat().await?,
+                        &json!({
+                            "promptText": parts.join(" "),
+                            "intent": "feature",
+                            "runtimeId": lane.desktop.to_string(),
+                            "metadata": metadata_for(&order, json!({})),
+                        }),
+                    )
+                    .await?;
+                anyhow::ensure!(status == StatusCode::OK, "{what}: {status} {response}");
+                let (lane_jobs, other_jobs) = lane.jobs_of(&response).await?;
+                assert_eq!(
+                    (lane_jobs.len(), other_jobs.len()),
+                    (1, 1),
+                    "{what}: {response}"
+                );
+                let (claude, helper) = (&lane_jobs[0], &other_jobs[0]);
+                assert_lane_job(claude, space.owner, lane.owner_claude, &what);
+                assert_eq!(helper.credential_id, Some(lane.owner_credential), "{what}");
+                assert_eq!(helper.target_runtime_id, Some(lane.desktop), "{what}");
+                let (first, second) = if order[0] == CLAUDE {
+                    (claude, helper)
+                } else {
+                    (helper, claude)
+                };
+                for (job, part) in [(first, &parts[0]), (second, &parts[1])] {
+                    assert_eq!(
+                        job.payload["prompt_text"].as_str().map(str::trim),
+                        Some(part.as_str()),
+                        "{what}: {}",
+                        job.payload
+                    );
+                    let scope = &job.payload["metadata"]["writeScope"];
+                    assert_eq!(scope["mode"], json!("unscoped"), "{what}: {}", job.payload);
+                    assert_eq!(scope["inTurns"], json!(true), "{what}: {}", job.payload);
+                }
+                let first_run = first.run_id.expect("run");
+                let second_run = second.run_id.expect("run");
+                let (first_job, first_waits_for) = lane.turn_of(first_run).await?;
+                let (second_job, second_waits_for) = lane.turn_of(second_run).await?;
+                assert_eq!(first_waits_for, None, "{what}");
+                assert_eq!(second_waits_for, Some(first_job), "{what}");
+                let run_metadata = "select metadata from runs where id = $1";
+                let first_stamp = lane.metadata_of(run_metadata, first_run).await?;
+                assert!(
+                    first_stamp.get("takesTurns").is_none(),
+                    "{what}: {first_stamp}"
+                );
+                let second_stamp = lane.metadata_of(run_metadata, second_run).await?;
+                assert_eq!(
+                    second_stamp["takesTurns"],
+                    json!({ "version": 1, "afterRunId": first_run, "afterAgent": order[0] }),
+                    "{what}: {second_stamp}"
+                );
+
+                // No computer takes the later turn while the first waits,
+                // nor while it runs.
+                if order[0] == "helper" {
+                    lane.leases_nothing(lane.second_desktop, &format!("{what}: @claude waits"))
+                        .await?;
+                }
+                lane.lease_one(lane.desktop, first_job).await?;
+                lane.idles(lane.desktop, &format!("{what}: the later turn waits"))
+                    .await?;
+                lane.leases_nothing(lane.second_desktop, &format!("{what}: still waits"))
+                    .await?;
+                // Once it has ended, the later turn goes.
+                lane.end_job(first_job).await?;
+                lane.lease_one(lane.desktop, second_job).await?;
+                lane.end_jobs().await?;
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Two Claude Code agents a message names take turns too, on whichever
+/// computers and logins (docs/Local-Engine-Turns.md 11.22): the later one's
+/// turn waits for the earlier one's, though a computer of the person's is
+/// ready on its own login and runs nothing (D46 and D47 alone would let them
+/// run at once), and goes once the earlier one has ended.
+#[tokio::test]
+async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> anyhow::Result<()>
+{
+    with_lane(
+        "lane-in-turns-two-logins",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let second_login = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&second_login, &space.owner],
+            )
+            .await?;
+            let worker = lane.claude_code_agent(space.owner, "worker").await?;
+            sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&worker, &second_login],
+            )
+            .await?;
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(Some(space.owner), lane_ready_on(&[second_login])),
+            )
+            .await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    lane.chat().await?,
+                    &json!({
+                        "promptText": "@claude fix the build, @worker update the docs",
+                        "intent": "feature",
+                        "metadata": metadata_for(&[CLAUDE, "worker"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (lane_jobs, others) = lane.jobs_of(&response).await?;
+            assert!(others.is_empty(), "{response}");
+            assert_eq!(lane_jobs.len(), 2, "{response}");
+            let run_of_login = |login: Uuid| {
+                lane_jobs
+                    .iter()
+                    .find(|job| job.claude_code_login_ids == Some(vec![login]))
+                    .and_then(|job| job.run_id)
+                    .expect("a job on the login")
+            };
+            let (claude_job, claude_waits_for) = lane
+                .turn_of(run_of_login(first_login_of(space.owner)))
+                .await?;
+            let (worker_job, worker_waits_for) = lane.turn_of(run_of_login(second_login)).await?;
+            assert_eq!(claude_waits_for, None);
+            assert_eq!(worker_waits_for, Some(claude_job));
+
+            lane.leases_nothing(lane.second_desktop, "@worker waits for @claude")
+                .await?;
+            lane.lease_one(lane.desktop, claude_job).await?;
+            lane.leases_nothing(lane.second_desktop, "@claude's turn runs")
+                .await?;
+            lane.end_job(claude_job).await?;
+            let leased = lane.lease_one(lane.second_desktop, worker_job).await?;
+            assert_eq!(
+                leased["claude_code_login_id"],
+                json!(second_login.to_string())
+            );
             Ok(())
         },
     )

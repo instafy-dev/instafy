@@ -1313,6 +1313,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // (crate::claude_code_lane): no caller's copy survives, the service
     // role's included.
     crate::claude_code_lane::strip_client_marks(&mut request.metadata);
+    // Only dispatch makes a run wait for another agent's turn
+    // (crate::message_turns).
+    crate::message_turns::strip_client_marks(&mut request.metadata);
     // Browser control is bound to the runtime that owns the visible page.
     // Capture the caller's explicit runtime before project/conversation
     // preferences are considered so these requests can never drift to an
@@ -2073,6 +2076,20 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &agent_handles,
         ));
     }
+    // A person's own message that names its agents, which no team plan,
+    // evaluation or agent's job made: when it names several and may change
+    // files, with no write scope for any of them, each agent's turn gets the
+    // whole space and the turns run one after another, in the order it names
+    // them (crate::message_turns, docs/Local-Engine-Turns.md 11.22).
+    let may_take_turns = context.user_id.is_some()
+        && !context.is_service_role
+        && has_explicit_agent_mentions(&request.metadata)
+        && !skill_mode_ambient_evaluation
+        && request.delegating_job_id.is_none()
+        && request.plan_seed.is_none()
+        && request.intent != "multi_agent_plan"
+        && request.metadata.get("multiAgentPlan").is_none()
+        && request.metadata.get("multi_agent_plan").is_none();
     // How each target's turn may use its agent's Claude Code logins
     // (crate::sign_in_room::LoginUse, docs/Local-Engine-Turns.md 11.20): one
     // the lane's gates would refuse this turn on (L1-L3, or a write scope it
@@ -2103,6 +2120,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
             &request.prompt_text,
             &agent_handles,
             &prompt_segments,
+            may_take_turns,
         );
         for handle in &agent_handles {
             let prompt_text = prompt_segments
@@ -2277,11 +2295,18 @@ pub(crate) async fn process_dispatch_prompt_timed(
         &request.prompt_text,
         &agent_handles_for_scope,
         &prompt_segments,
+        may_take_turns,
     );
+    // Whether the agents take turns: each turn after the first waits for the
+    // one before it (crate::message_turns).
+    let takes_turns = write_scope_plan
+        .values()
+        .any(AgentWriteScopeAssignment::takes_turns);
     // A Claude Code agent's turn can be held to the whole space or to none of
-    // it: it runs read-only under a read-only scope (11.12). One that would
-    // own part of the space, or must coordinate its writes with other agents
-    // writing at once, is refused before anything is written
+    // it: it runs read-only under a read-only scope (11.12), and takes its
+    // turn with the whole space when a message's agents take turns (11.22).
+    // One that would own part of the space, or must coordinate its writes with
+    // other agents writing at once, is refused before anything is written
     // (crate::claude_code_lane).
     for (_, target) in agent_runs.iter().filter(|(_, target)| target.claude_code) {
         if write_scope_plan
@@ -2312,10 +2337,22 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     insert_prompt_record(&transaction, &project, context, &request, &prompt_id).await?;
 
+    // The run of the agent named before each, while the agents take turns.
+    let mut earlier_turn_run: Option<(Uuid, &str)> = None;
     for (run_id, target) in agent_runs.iter() {
         let mut run_request = request.clone();
         apply_agent_prompt_segment(&mut run_request, &prompt_segments, target);
         inject_agent_target_metadata(&mut run_request.metadata, target);
+        if takes_turns {
+            if let Some((earlier_run_id, earlier_handle)) = earlier_turn_run {
+                crate::message_turns::stamp_run(
+                    ensure_object(&mut run_request.metadata),
+                    &earlier_run_id,
+                    earlier_handle,
+                );
+            }
+            earlier_turn_run = Some((*run_id, target.handle.as_str()));
+        }
         if target.claude_code {
             crate::claude_code_lane::stamp(
                 ensure_object(&mut run_request.metadata),
@@ -3029,6 +3066,8 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
     let mut research_dispatch_parent = None;
+    // The job of the agent named before each, while the agents take turns.
+    let mut earlier_turn_job: Option<Uuid> = None;
     for (run_id, target) in agent_runs.iter() {
         if is_skipped(run_id) {
             continue;
@@ -3214,6 +3253,20 @@ pub(crate) async fn process_dispatch_prompt_timed(
         )
         .await?;
         if let Some(job_uuid) = job_id {
+            // Each agent's turn after the first waits, queued, until the turn
+            // of the agent named before it has ended (crate::message_turns).
+            if takes_turns {
+                if let Some(earlier_job_id) = earlier_turn_job {
+                    crate::message_turns::wait_for(
+                        &transaction,
+                        &project.id,
+                        &job_uuid,
+                        &earlier_job_id,
+                    )
+                    .await?;
+                }
+                earlier_turn_job = Some(job_uuid);
+            }
             research_dispatch_parent.get_or_insert(job_uuid);
             // The run is the frontend's authoritative live-activity record,
             // while the job is the controller's exact steer CAS target. Keep

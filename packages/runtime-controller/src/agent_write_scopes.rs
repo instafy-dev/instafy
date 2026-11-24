@@ -35,6 +35,9 @@ pub(crate) struct AgentWriteScopeAssignment {
     rationale: String,
     source: String,
     conflict: Option<AgentWriteScopeConflict>,
+    /// The whole space, for one of the agents a person's message names,
+    /// whose turns run one after another (crate::message_turns, D53).
+    in_turns: bool,
 }
 
 impl AgentWriteScopeAssignment {
@@ -46,6 +49,7 @@ impl AgentWriteScopeAssignment {
             rationale: rationale.into(),
             source: "dispatch".to_string(),
             conflict: None,
+            in_turns: false,
         }
     }
 
@@ -57,6 +61,7 @@ impl AgentWriteScopeAssignment {
             rationale: rationale.into(),
             source: source.into(),
             conflict: None,
+            in_turns: false,
         }
     }
 
@@ -68,7 +73,23 @@ impl AgentWriteScopeAssignment {
             rationale: rationale.into(),
             source: "dispatch".to_string(),
             conflict: None,
+            in_turns: false,
         }
+    }
+
+    fn unscoped_in_turns() -> Self {
+        Self {
+            in_turns: true,
+            ..Self::unscoped(
+                "the agents a message names take turns, each changing the space after the one before it",
+            )
+        }
+    }
+
+    /// Whether this turn is one of a message's agents that take turns: it
+    /// waits for the turn of the agent named before it (crate::message_turns).
+    pub(crate) fn takes_turns(&self) -> bool {
+        self.in_turns
     }
 
     fn invalid_explicit_scope() -> Self {
@@ -146,6 +167,9 @@ impl AgentWriteScopeAssignment {
             JsonValue::String(self.rationale.clone()),
         );
         map.insert("source".to_string(), JsonValue::String(self.source.clone()));
+        if self.in_turns {
+            map.insert("inTurns".to_string(), JsonValue::Bool(true));
+        }
         if self.mode == AgentWriteScopeMode::CoordinationRequired {
             map.insert("coordinationRequired".to_string(), JsonValue::Bool(true));
         }
@@ -162,11 +186,19 @@ impl AgentWriteScopeAssignment {
     }
 }
 
+/// Each target's write scope. `may_take_turns` says the send is a person's
+/// own message that names its agents, which no team plan, evaluation or
+/// agent's job made: when it names several, may change files, and gives none
+/// of them a write scope of its own, each gets the whole space and their
+/// turns run one after another (crate::message_turns, D53). Otherwise writers
+/// that would run at once need disjoint owned paths, and get
+/// `coordination_required` without them.
 pub(crate) fn build_agent_write_scope_plan(
     metadata: &JsonValue,
     _prompt_text: &str,
     target_handles: &[String],
     _prompt_segments: &HashMap<String, String>,
+    may_take_turns: bool,
 ) -> HashMap<String, AgentWriteScopeAssignment> {
     let write_intent = metadata
         .as_object()
@@ -174,23 +206,46 @@ pub(crate) fn build_agent_write_scope_plan(
         .and_then(parse_runtime_bool)
         .unwrap_or(false);
     let multi_agent = target_handles.len() > 1;
+    let explicit_scopes: Vec<(&String, Option<AgentWriteScopeAssignment>)> = target_handles
+        .iter()
+        .map(|handle| {
+            (
+                handle,
+                extract_explicit_agent_write_scope(metadata, handle, target_handles.len()),
+            )
+        })
+        .collect();
+    if may_take_turns
+        && multi_agent
+        && write_intent
+        && explicit_scopes.iter().all(|(_, scope)| scope.is_none())
+    {
+        return target_handles
+            .iter()
+            .map(|handle| {
+                (
+                    handle.clone(),
+                    AgentWriteScopeAssignment::unscoped_in_turns(),
+                )
+            })
+            .collect();
+    }
     let mut assignments = HashMap::new();
 
-    for handle in target_handles {
-        let assignment =
-            match extract_explicit_agent_write_scope(metadata, handle, target_handles.len()) {
-                Some(assignment) => assignment,
-                None if !write_intent && !multi_agent => continue,
-                None if !write_intent => AgentWriteScopeAssignment::read_only(
-                    "request metadata does not declare workspace writes",
-                ),
-                None if multi_agent => AgentWriteScopeAssignment::unscoped(
-                    "write-heavy multi-agent work needs explicit disjoint ownership",
-                ),
-                None => AgentWriteScopeAssignment::unscoped(
-                    "single-agent write job has no sibling write scope to coordinate with",
-                ),
-            };
+    for (handle, explicit_scope) in explicit_scopes {
+        let assignment = match explicit_scope {
+            Some(assignment) => assignment,
+            None if !write_intent && !multi_agent => continue,
+            None if !write_intent => AgentWriteScopeAssignment::read_only(
+                "request metadata does not declare workspace writes",
+            ),
+            None if multi_agent => AgentWriteScopeAssignment::unscoped(
+                "write-heavy multi-agent work needs explicit disjoint ownership",
+            ),
+            None => AgentWriteScopeAssignment::unscoped(
+                "single-agent write job has no sibling write scope to coordinate with",
+            ),
+        };
         assignments.insert(handle.clone(), assignment);
     }
 
@@ -716,6 +771,7 @@ mod tests {
             "@ben edit src/auth/Login.tsx. @octo update docs/Auth.md.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["ben"].mode, AgentWriteScopeMode::CoordinationRequired);
@@ -729,6 +785,97 @@ mod tests {
         );
         assert!(plan["ben"].owned_paths.is_empty());
         assert!(plan["octo"].owned_paths.is_empty());
+    }
+
+    #[test]
+    fn a_persons_message_to_several_agents_that_writes_gives_each_the_whole_space_in_turns() {
+        let metadata = json!({
+            "writeIntent": true,
+            "agentSelection": {
+                "active": ["ben", "octo"],
+                "mentions": ["ben", "octo"]
+            }
+        });
+        let handles = vec!["ben".to_string(), "octo".to_string()];
+
+        let plan = build_agent_write_scope_plan(
+            &metadata,
+            "@ben edit src/auth/Login.tsx. @octo update docs/Auth.md.",
+            &handles,
+            &HashMap::new(),
+            true,
+        );
+
+        for handle in &handles {
+            let scope = &plan[handle];
+            assert_eq!(scope.mode, AgentWriteScopeMode::Unscoped);
+            assert!(scope.takes_turns());
+            assert!(scope.is_unscoped_or_read_only());
+            assert!(!scope.is_coordination_required());
+            assert!(scope.conflict.is_none());
+            let claim = scope.to_json();
+            assert_eq!(claim["mode"], json!("unscoped"));
+            assert_eq!(claim["inTurns"], json!(true));
+            assert!(claim.get("coordinationRequired").is_none());
+        }
+    }
+
+    #[test]
+    fn turns_need_several_agents_a_write_and_no_scope_of_their_own() {
+        let several = vec!["ben".to_string(), "octo".to_string()];
+        // One agent writes the whole space on its own, as before.
+        let one = build_agent_write_scope_plan(
+            &json!({"writeIntent": true}),
+            "",
+            &["ben".to_string()],
+            &HashMap::new(),
+            true,
+        );
+        assert_eq!(one["ben"].mode, AgentWriteScopeMode::Unscoped);
+        assert!(!one["ben"].takes_turns());
+        // Without a write, several agents read, at once.
+        let reading = build_agent_write_scope_plan(
+            &json!({"writeIntent": false}),
+            "",
+            &several,
+            &HashMap::new(),
+            true,
+        );
+        for handle in &several {
+            assert_eq!(reading[handle].mode, AgentWriteScopeMode::ReadOnly);
+            assert!(!reading[handle].takes_turns());
+        }
+        // An agent the message gives a scope of its own keeps the scope rules.
+        let scoped = build_agent_write_scope_plan(
+            &json!({
+                "writeIntent": true,
+                "agentSelection": {"writeScopes": {"ben": ["src/App.tsx"]}}
+            }),
+            "",
+            &several,
+            &HashMap::new(),
+            true,
+        );
+        for handle in &several {
+            assert_eq!(scoped[handle].mode, AgentWriteScopeMode::CoordinationRequired);
+            assert!(!scoped[handle].takes_turns());
+        }
+        // A send that may not take turns (a team plan, an evaluation, an
+        // agent's job) keeps needing disjoint owned paths.
+        let not_a_persons_message = build_agent_write_scope_plan(
+            &json!({"writeIntent": true}),
+            "",
+            &several,
+            &HashMap::new(),
+            false,
+        );
+        for handle in &several {
+            assert_eq!(
+                not_a_persons_message[handle].mode,
+                AgentWriteScopeMode::CoordinationRequired
+            );
+            assert!(!not_a_persons_message[handle].takes_turns());
+        }
     }
 
     #[test]
@@ -752,6 +899,7 @@ mod tests {
             "@ben edit src/auth/Login.tsx. @octo update docs/Auth.md.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["ben"].mode, AgentWriteScopeMode::Owned);
@@ -781,6 +929,7 @@ mod tests {
             "@ben edit src/App.tsx. @octo also update src/App.tsx.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["ben"].mode, AgentWriteScopeMode::CoordinationRequired);
@@ -814,6 +963,7 @@ mod tests {
             "@ben work on app. @octo work on source.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["ben"].mode, AgentWriteScopeMode::CoordinationRequired);
@@ -837,6 +987,7 @@ mod tests {
             "@ben inspect src/App.tsx. @octo explain docs/Auth.md.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["ben"].mode, AgentWriteScopeMode::ReadOnly);
@@ -860,6 +1011,7 @@ mod tests {
             "Create a tiny workspace file.",
             &handles,
             &segments,
+            false,
         );
 
         assert!(plan.is_empty());
@@ -893,6 +1045,7 @@ mod tests {
             "Read-only prepared source review.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(plan["alpha"].mode, AgentWriteScopeMode::ReadOnly);
@@ -931,6 +1084,7 @@ mod tests {
             "Write a file, but the absolute ownership path is unsafe.",
             &handles,
             &segments,
+            false,
         );
 
         assert_eq!(
@@ -946,6 +1100,7 @@ mod tests {
             "The prose must not supply or repair an explicit path scope.",
             &["alpha".to_string()],
             &HashMap::new(),
+            false,
         )
         .remove("alpha")
         .expect("scope assignment")

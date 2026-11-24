@@ -1067,7 +1067,7 @@ Rules:
 | `empty` | "There's nothing to send." |
 | `too_long` | "Claude Code takes messages of at most 100,000 characters." |
 | `execution_mode` | "Claude Code can't take a turn that waits for your approval." |
-| `write_scope`, a message to several agents that write at once | "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own." |
+| `write_scope`, a send whose agents would each write part of the space at once (owned paths), which a person's message naming several agents no longer is (11.22) | "Claude Code can't be held to part of the space's files while other agents write, so it can't take this turn. Send it the message on its own." |
 | any other reason, or any other `claude_code_*` code (D-G) | "Claude Code couldn't take this message." |
 
 ### 5.6 What version 2 removed
@@ -1663,7 +1663,7 @@ Some turns ask for what Claude Code cannot give. Dispatch refuses them with 422 
 - `command`: text that starts with `/` once leading whitespace is removed, which Claude Code would read as its own command (3.9).
 - `empty` and `too_long`: no text, or more than `CLAUDE_CODE_LANE_MAX_PROMPT_CHARS` (2.2, G5).
 - `execution_mode`: a mode other than `apply` and `plan_only`, such as `approval_required`, which no runtime implements for the lane.
-- `write_scope`: a write scope of part of the space's files, or one that must coordinate with other agents writing at once (`owned`, `coordination_required`), as a message to several agents that write can get. Claude Code can be held to the whole space or to none of it: a `read_only` scope, which a message to several agents without a write gets, runs the turn read-only (11.12).
+- `write_scope`: a write scope of part of the space's files, or one that must coordinate with other agents writing at once (`owned`, `coordination_required`), as a message that gives its agents owned paths, or a send to several agents that no person's message made, can get. Claude Code can be held to the whole space or to none of it: a `read_only` scope, which a message to several agents without a write gets, runs the turn read-only (11.12), and a person's message that names several agents and writes gives each the whole space, in turns (11.22).
 
 A terminal command (`terminal_command`) is not an AI turn, and it runs as it does today. Instafy's own tools, such as web search through Instafy, previews, cards, questions to the person and Instafy's skills, are not offered to Claude Code. Its own tools and the person's own settings apply (3.3).
 
@@ -1833,6 +1833,7 @@ Phase 8 (section 9) still turns it on, with its gates as they stand. Its live su
 - **D50. The turn that reached a limit** fails as before, and nothing runs it again by itself. A goal goes on, on the next AI with room, rather than stop. Running such a turn again on a backup, when it stopped before it acted, is a follow-up (11.20).
 - **D51. Which sign-in ran a turn** shows only to its owner, by the name they gave it (11.19, 11.20).
 - **D52. The capability, version 2.** `claudeCode` reports the program once and each login apart, and a runtime that reports version 1 takes no Claude Code turn (11.19).
+- **D53. A message to several agents, in turns.** A person's message that names several of their agents and may change files, with no write scope for any of them, gives each agent's turn the whole space, whatever AI it uses, and runs the turns one after another, in the order the message names them (11.22). Running them at once stays D47's follow-up.
 
 ### 11.19 Several Claude Code logins
 
@@ -1939,6 +1940,24 @@ Each lands on its own and dark, with its tests and the sections of this document
 1. **Design:** 11.19, 11.20 and D45-D52.
 2. **Claude Code logins (11.19):** the table and its routes, the agent's login, the job's two columns and the running index's migrations, dispatch, the lease, attestation and status, the session loader, runtime-contracts' capability lists, runtime-agent's grant, probe, holds and turn, Desktop's record, methods and dialog, and Studio's row, editor, waiting line and speaker line.
 3. **Backup AIs (11.20):** the agent's list, the two `limit_resets_at` columns, the two artifacts, dispatch's choice, the lease's room, completion's records, the goal's next step, and Studio's Backups list, failure wording and sign-in line.
+
+### 11.22 A message to several agents
+
+A person's message can name several of their agents and give each its own part, "@a do x, @b do y": dispatch splits a message that starts with a mention at each agent's mention, and each job gets its part (11.10). Until D53, such a message with write intent, which Studio and the CLI send by default, gave every agent `coordination_required` unless it named disjoint owned paths for each, which no client sends. Codex, own-key and Instafy AI agents then finished without changing a file, and a Claude Code agent among them refused the whole send (`write_scope`, 11.4). So the message worked for no AI.
+
+**In turns (D53).** When a person's own message names two or more agents, may change files (`writeIntent`), and gives none of them a write scope of its own, each agent's turn gets the whole space (`unscoped`, with `inTurns: true` in its write scope), and the turns run one after another, in the order the message names them:
+- Dispatch records on each agent's job after the first the job of the agent named before it, `agent_jobs.after_job_id`, in the transaction that queues them, and stamps the job's run with `takesTurns: {version: 1, afterRunId, afterAgent}` (RC/message_turns.rs). A client's own `takesTurns` is removed.
+- The lease and the idle poll pass over a queued job while the job it waits for is queued or leased. Once that job has ended, however it ended (completed, failed, stopped, canceled), the later turn may run, on whatever runtime and AI its agent uses. Stopping one turn lets the next go, and stopping the chat stops them all.
+- Each turn starts where the one before it left the space: its runtime moves the checkout to main before the turn, after the earlier turn's save.
+- Studio reads the stamp. While the earlier turn's run has not ended, the waiting turn's row reads "Waiting for @a to finish…", and its queued run never goes stale, however long the earlier turn takes.
+
+Only a person's own message takes turns: not a team plan, whose workers keep their own scopes, an evaluation, the service role or an agent's job. A message that gives any of its agents a write scope keeps the owned-path rules, and one without write intent still runs every agent at once, read-only.
+
+**Why one after another.** Two writers at once would mix their saves. A save is its folder's git-status delta, sent without the blob ids the origin could check, so on two runtimes the later save overwrites the earlier one's files, and on one computer two lane turns cannot share the folder (D47). In turns each agent sees the space as the one before it left it, and nothing is overwritten. The cost is time, since the turns never overlap. Running them at once, each in a folder of its own that is merged back afterwards, is the follow-up D47 names.
+
+**Claude Code.** A Claude Code agent's turn in turns has the whole space, which Claude Code can be held to (11.4), so `write_scope` no longer refuses the message. Its turn waits for the earlier turn and then, as any lane turn does, for one of its person's computers (11.7). D46 and D47 still hold: taking turns only adds a wait. The lane's payload, prompt and runtime checks are unchanged, since the runtime runs an `unscoped` turn as it always has (11.12).
+
+**This change.** It lands on its own, with its tests: the bare `after_job_id` column (its own migration, which holds `ACCESS EXCLUSIVE` on `agent_jobs` alone), the write-scope plan, dispatch's records, the lease's and the idle poll's clause, and Studio's line and liveness.
 
 ---
 

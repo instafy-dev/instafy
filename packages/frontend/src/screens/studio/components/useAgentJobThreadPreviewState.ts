@@ -45,6 +45,7 @@ import {
   turnEngineStartingLine,
 } from "../../../conversations/runFailurePresentation";
 import { isInProgressRunStale, isQueuedRunStale } from "../../../conversations/runLiveness";
+import { earlierTurnWaitingLine } from "../../../conversations/messageTurns";
 import { readTurnReplyDraft } from "../../../conversations/replyDrafts";
 import { useRunFailureRetry } from "./RunFailureNotice";
 
@@ -735,6 +736,12 @@ export function useAgentJobThreadPreviewState({
     const run = jobId
       ? Object.values(runs ?? {}).find((candidate) => runMatchesThreadJobId(candidate, jobId)) ?? null
       : null;
+    // One of the agents a message names waits for the one named before it
+    // (docs/Local-Engine-Turns.md 11.22), whatever AI it uses.
+    const waitsForEarlierTurn = earlierTurnWaitingLine(run, runs);
+    if (waitsForEarlierTurn) {
+      return waitsForEarlierTurn;
+    }
     const firstMessage = runMessages[0] ?? threadMessages[0] ?? null;
     const prompt = firstMessage
       ? resolveRunFailureRetrySource({
