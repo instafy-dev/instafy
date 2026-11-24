@@ -1064,11 +1064,11 @@ function drawsValue(cell, records, memory) {
 }
 
 /** The check's last line, which the reply's first line follows: how many of a comparison's values the page shows, in
- *  all and per column, in the page's order ("The page shows 1 of 9 values: Location 1 of 3, Price 0 of 3, Reviews 0 of
- *  3."), as the compare starter draws them (drawsValue). A reply opened "The comparison page covers location, reviewer
- *  comments and date-specific prices for all three hotels" over a page that showed one of those nine values, after a
- *  check that counted only the hotels it named (a local test, Nov 23). On a page from what Octo knows it says none is
- *  checked. null for a page that is no comparison, or has no rows. */
+ *  all and per column, by each column's label in the page's order ("The page shows 1 of 9 values: Location 1 of 3, What
+ *  reviewers say 0 of 3, Price 0 of 3."), as the compare starter draws them (drawsValue). A reply opened "The
+ *  comparison page covers location, reviewer comments and date-specific prices for all three hotels" over a page that
+ *  showed one of those nine values, after a check that counted only the hotels it named (a local test, Nov 23). On a
+ *  page from what Octo knows it says none is checked. null for a page that is no comparison, or has no rows. */
 export function shownLine(dir) {
   const root = path.resolve(dir);
   let data;
