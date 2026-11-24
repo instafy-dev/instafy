@@ -4068,6 +4068,7 @@ async fn a_card_naming_a_made_up_path_opens_its_home_page_and_what_its_turn_was_
         &fixture.approval_dir,
         &json!({ "prompt_text": asked, "conversation_history": [{ "role": "user", "content": asked }] }),
         Some(chat),
+        true,
     );
     write_turn_given(record.path(), TURN_GIVEN_SEED, &seed).unwrap();
     // What the AI's own search found, as the run's search ends, and a page the reader read.
@@ -4802,6 +4803,43 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
             key("visitporto.travel/en/lello"),
             key("example.org/b_(c)"),
         ]
+    );
+    // A Chinese, Japanese or Korean sentence's own marks end an address as a space does, and so
+    // do an ellipsis and a dash; letters of any script in a path stay (`instafy web read`'s
+    // `addressesInText`, the same cases). The person's "…營業時間：https://…/museum/hours。謝謝"
+    // named "/museum/hours。謝謝", and the address they gave was refused as one nobody gave.
+    let message = "請幫我看這個頁面的營業時間：https://news.example.org/museum/hours。謝謝 公式サイト（https://news.example.org/access）をご覧ください、またはhttps://news.example.org/map，";
+    assert_eq!(
+        given_addresses_in_text(&format!(
+            "{message} ja.wikipedia.org/wiki/東京、「https://example.org/c」 https://example.org/a…and https://example.org/b—then"
+        )),
+        vec![
+            key("news.example.org/museum/hours"),
+            key("news.example.org/access"),
+            key("news.example.org/map"),
+            key("ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC"),
+            key("example.org/c"),
+            key("example.org/a"),
+            key("example.org/b"),
+        ]
+    );
+    // A card in the person's language keeps the address they gave, with the sentence's own mark
+    // after it, and names the home page in place of one nobody gave.
+    let given: std::collections::HashSet<String> =
+        given_addresses_from_payload(&json!({ "prompt_text": message }))
+            .into_iter()
+            .collect();
+    assert_eq!(
+        with_home_pages_where_not_given(
+            "打開https://news.example.org/museum/hours。查看營業時間（https://news.example.org/access）",
+            &given
+        ),
+        None
+    );
+    assert_eq!(
+        with_home_pages_where_not_given("打開https://news.example.org/museum/tickets。", &given)
+            .as_deref(),
+        Some("打開https://news.example.org/。")
     );
 }
 

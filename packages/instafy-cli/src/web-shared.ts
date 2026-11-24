@@ -518,7 +518,14 @@ export function givenSiteKey(raw: string | URL): string | null {
   return address ? sha256(address.site).slice(0, 32) : null;
 }
 
-const ADDRESS_WORD_DELIMITERS = /[\s<>"'`[\]{}“”‘’«»]+/u;
+/**
+ * Where a word of text ends: a space, a quote or a bracket, and a mark no address holds as it is typed, the punctuation
+ * of Chinese, Japanese and Korean sentences (。、「」【】…) and its full-width forms (，：；！？（）…), an ellipsis and a
+ * dash, as the Shared Browser and runtime-agent read them (`addresses_named_in`). A message's "營業時間：
+ * https://news.example.org/museum/hours。謝謝" named "/museum/hours。謝謝", and its own address was refused.
+ */
+const ADDRESS_WORD_DELIMITERS =
+  /[\s<>"'`[\]{}“”‘’«»\u2014\u2026\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/u;
 const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
 
 /**

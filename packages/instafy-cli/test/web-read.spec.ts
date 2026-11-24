@@ -1299,6 +1299,39 @@ describe("an address nobody gave", () => {
           "https://example.org/b_(c)). See src/main.rs, 1.5/2, e.g./this, name@example.com/x and ftp://example.com/file.",
       ),
     ).toEqual(["https://en.wikipedia.org/wiki/Mercury_(planet)", "https://example.org/a", "https://visitporto.travel/en/lello", "https://example.org/b_(c)"]);
+    // A Chinese, Japanese or Korean sentence's own marks end an address as a space does, and so do an ellipsis and a
+    // dash; letters of any script in a path stay (runtime-agent's `a_tasks_addresses_are_kept_by_their_site_and_path`).
+    expect(
+      addressesInText(
+        "請幫我看這個頁面的營業時間：https://news.example.org/museum/hours。謝謝 公式サイト（https://news.example.org/access）をご覧ください、" +
+          "またはhttps://news.example.org/map， ja.wikipedia.org/wiki/東京、「https://example.org/c」 https://example.org/a…and https://example.org/b—then",
+      ),
+    ).toEqual([
+      "https://news.example.org/museum/hours",
+      "https://news.example.org/access",
+      "https://news.example.org/map",
+      "https://ja.wikipedia.org/wiki/東京",
+      "https://example.org/c",
+      "https://example.org/a",
+      "https://example.org/b",
+    ]);
+  });
+
+  it("reads the addresses a message in Chinese or Japanese gave, its sentence's own marks around them", async () => {
+    const message =
+      "請幫我看這個頁面的營業時間：https://news.example.org/museum/hours。謝謝 公式サイト（https://news.example.org/access）をご覧ください、" +
+      "またはhttps://news.example.org/map，";
+    // The runtime reads the person's message so for the turn's record (runtime-agent `given_addresses_from_payload`).
+    const dir = givenFolder(addressesInText(message));
+    for (const at of ["museum/hours", "access", "map"]) routes[`news.example.org/${at}`] = { body: ARTICLE };
+    const pages = (
+      await read(["http://news.example.org/museum/hours", "http://news.example.org/access", "http://news.example.org/map"], {}, inTurn(dir))
+    ).pages;
+    expect(pages.map((p) => [p.status, p.code ?? null])).toEqual([
+      ["read", null],
+      ["read", null],
+      ["read", null],
+    ]);
   });
 
   it("does not read a product address no page gave, and names the shop's home page instead of the plain link", async () => {
@@ -1394,6 +1427,39 @@ describe("an address nobody gave", () => {
     expect(dialed.every((address) => address === PUBLIC_A)).toBe(true);
     expect(stopped).toMatchObject({ status: "stopped", code: "forbidden" });
     expect(stopped!.tell).toContain("Give the person the plain link.");
+  });
+
+  it("answers with a stop the turn or the workspace already holds before it refuses an address nobody gave", async () => {
+    // A bot check stopped the turn on this site: a path nobody gave there keeps that stop's words, not the home page,
+    // where the turn would only meet the same stop.
+    const dir = givenFolder(["http://news.example.org/a", "http://shop.example.net/account"]);
+    routes["news.example.org/a"] = { body: page('<div class="g-recaptcha" data-sitekey="x"></div>', "Just a moment...") };
+    routes["news.example.org/b"] = { body: ARTICLE };
+    const bot = await one("http://news.example.org/a", {}, inTurn(dir));
+    expect(bot).toMatchObject({ status: "stopped", code: "captcha" });
+    expect(await one("http://news.example.org/b", {}, inTurn(dir))).toMatchObject({
+      status: "stopped",
+      code: "captcha",
+      previouslyStopped: true,
+      tell: bot.tell,
+    });
+    // A sign-in a turn met keeps its words in the next turn too, whose record doesn't hold the address.
+    routes["shop.example.net/account"] = { status: 401 };
+    const signIn = await one("http://shop.example.net/account", {}, inTurn(dir));
+    expect(signIn).toMatchObject({ status: "stopped", code: "login" });
+    const next = path.join(tmp, `case-${caseNo}`, "given-next");
+    fs.mkdirSync(next, { recursive: true });
+    fs.writeFileSync(path.join(next, TURN_GIVEN_SEED), JSON.stringify({ version: 1, addresses: [] }));
+    const nextTurn = { env: { INSTAFY_TURN_STARTED_AT: "2026-10-26T11:00:00Z", INSTAFY_PROJECT_ID: "project-1", INSTAFY_TURN_GIVEN_DIR: next } };
+    expect(await one("http://shop.example.net/account", {}, nextTurn)).toMatchObject({
+      status: "stopped",
+      code: "login",
+      previouslyStopped: true,
+      tell: signIn.tell,
+    });
+    // Any other path there is still one nobody gave.
+    expect(await one("http://shop.example.net/orders", {}, nextTurn)).toMatchObject({ status: "skipped", code: "not_given" });
+    expect(hits.filter((hit) => hit.endsWith("/b") || hit.endsWith("/orders"))).toEqual([]);
   });
 
   it("refuses nothing where the turn has no record: no folder, no seed, or a seed it can't read", async () => {

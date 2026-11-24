@@ -1925,12 +1925,17 @@ Octo's keeps the same record for `instafy web read` (`INSTAFY_TURN_GIVEN_DIR`,
 the pages its reader read (their own addresses, links and spelled-out
 addresses) and what its web searches found, and when the turn ends
 runtime-agent carries it, in memory, into the chat's next turns and browser
-runs. When the turn posts a `request_browser` card, each address of the card's
+runs. A team agent's request, its lead's plan or its agents' reports, gives it
+nothing, as the AI wrote it; a skill setup's first turn is given what its
+installed skills name, so its card opens the sign-in address a skill declares.
+When the turn posts a `request_browser` card, each address of the card's
 task past a site's root that the record doesn't hold is replaced by that
 site's home page, so the card's browser run opens the home page and finds the
-page from there; a card the routing step posts is the person's own message and
-keeps its words. A reply's card carried a product address no page had given,
-which the browser would have opened as the shop's own page. A turn without the
+page from there; a card the routing step posts keeps the person's own words,
+and only its line of what the message carries on, which the routing step
+wrote, is held to the record so. A reply's card carried a product address no
+page had given, which the browser would have opened as the shop's own page,
+and a reply that links such an address can reach that line. A turn without the
 record, such as a Claude Code turn, keeps its cards as they are, and so does a
 turn one of whose searches listed none of the pages it found (a provider's own
 search tool): any address may then be one it gave.

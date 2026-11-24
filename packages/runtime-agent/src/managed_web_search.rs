@@ -1069,6 +1069,60 @@ mod tests {
         );
     }
 
+    /// The end the runtime gives a call whose request failed found no page, so it gives the
+    /// turn's record of the addresses it was given nothing (`shared_browser::
+    /// keep_what_a_search_ended_with`): a failed open names no list, as a provider's own search
+    /// does, and taken for one it left the reader refusing no address, and the turn's cards their
+    /// words, for the rest of the turn. A provider's own search that answered with no list still
+    /// leaves the record taking any address.
+    #[test]
+    fn a_failed_calls_end_gives_the_turns_record_nothing() {
+        let record = tempfile::tempdir().unwrap();
+        crate::shared_browser::write_turn_given(
+            record.path(),
+            crate::shared_browser::TURN_GIVEN_SEED,
+            &[],
+        )
+        .unwrap();
+        let started = || ExtensionTurnItem {
+            item: serde_json::from_value(
+                json!({"kind": "clock.sleep", "id": "search", "durationMs": 0}),
+            )
+            .unwrap(),
+            legacy_events: Vec::new(),
+        };
+        for searches in [false, true] {
+            let ended = unanswered_search_end(started(), "call".to_string(), searches);
+            let [EventMsg::WebSearchEnd(end)] = ended.legacy_events.as_slice() else {
+                panic!("{:?}", ended.legacy_events);
+            };
+            crate::shared_browser::keep_what_a_search_ended_with(record.path(), end);
+        }
+        assert!(!crate::shared_browser::turn_given_takes_any_address(
+            record.path()
+        ));
+        assert_eq!(
+            std::fs::read_dir(record.path()).unwrap().count(),
+            1,
+            "the seed alone"
+        );
+        crate::shared_browser::keep_what_a_search_ended_with(
+            record.path(),
+            &WebSearchEndEvent {
+                call_id: "call".to_string(),
+                query: "museum hours".to_string(),
+                action: codex_protocol::models::WebSearchAction::Search {
+                    query: Some("museum hours".to_string()),
+                    queries: None,
+                },
+                results: None,
+            },
+        );
+        assert!(crate::shared_browser::turn_given_takes_any_address(
+            record.path()
+        ));
+    }
+
     /// A search answered by no bridge (no entry of its own) keeps what it held, and reports
     /// nothing to charge; one answered by a bridge from before `search_usage` counts the queries
     /// it names, with no tokens.

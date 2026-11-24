@@ -7902,7 +7902,12 @@ function rememberGivenAddresses(rawUrl, interactive, text) {
 // The addresses a text spells out, read as runtime-agent reads a task's
 // (`given_addresses_in_text`): each http(s) address, and each site name with a
 // path written without a scheme ("visitporto.travel/en/lello"), read as https.
-const ADDRESS_WORD_DELIMITERS = /[\s<>"'`[\]{}“”‘’«»]+/u;
+// A word ends at a space, a quote or a bracket, and at a mark no address holds
+// as it is typed: the punctuation of Chinese, Japanese and Korean sentences
+// (。、「」【】…), its full-width forms (，：；！？（）…), an ellipsis and a dash.
+// "營業時間：https://news.example.org/museum/hours。謝謝" names the hours page.
+const ADDRESS_WORD_DELIMITERS =
+  /[\s<>"'`[\]{}“”‘’«»\u2014\u2026\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/u;
 const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
 function addressesInText(text) {
   const addresses = [];

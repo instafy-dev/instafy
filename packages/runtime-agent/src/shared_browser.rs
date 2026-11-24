@@ -1221,6 +1221,13 @@ fn given_fingerprint(text: &str) -> String {
 /// none: it always opens. With them, the sites those texts name, a site's name
 /// alone included ([`given_sites_in_text`]), and those of the pages read.
 pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
+    given_addresses_named_for(payload, true)
+}
+
+/// [`given_addresses_from_payload`], with what the job's request names (`prompt_text`) only
+/// `with_the_request`: a team's agent's request is its lead's plan, or its agents' reports, which
+/// the AI wrote ([`given_addresses_for_a_turn`]).
+fn given_addresses_named_for(payload: &JsonValue, with_the_request: bool) -> Vec<String> {
     fn text<'a>(entry: &'a JsonValue, key: &str) -> Option<&'a str> {
         entry.get(key).and_then(JsonValue::as_str)
     }
@@ -1245,7 +1252,35 @@ pub fn given_addresses_from_payload(payload: &JsonValue) -> Vec<String> {
             addresses.extend(pages_read_in(content));
         }
     }
-    addresses.extend(named(text(payload, "prompt_text").unwrap_or_default()));
+    if with_the_request {
+        addresses.extend(named(text(payload, "prompt_text").unwrap_or_default()));
+    }
+    newest_given_addresses(addresses)
+}
+
+/// The fingerprints of the addresses and sites `text` names, all of it read, a part at a time
+/// (each address reader reads the first [`MAX_TASK_TEXT_BYTES`] of what it is handed): the
+/// installed skills a setup's first turn carries (`jobs::turn_continuation`'s
+/// `give_what_the_skills_declare`), whose addresses the setup opens "as the skill declares" them.
+pub(crate) fn given_addresses_named_in(text: &str) -> Vec<String> {
+    let mut addresses = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_TASK_TEXT_BYTES);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        // A part ends where a line does, so no address is cut in two.
+        if end < rest.len()
+            && let Some(line_end) = rest[..end].rfind('\n')
+        {
+            end = line_end + 1;
+        }
+        let part = &rest[..end];
+        addresses.extend(given_addresses_in_text(part));
+        addresses.extend(given_sites_in_text(part));
+        rest = &rest[end..];
+    }
     newest_given_addresses(addresses)
 }
 
@@ -1370,6 +1405,7 @@ fn addresses_named_in(text: &str, bare_sites: bool) -> Vec<(std::ops::Range<usiz
                     | '«'
                     | '»'
             )
+            || ends_an_address_as_typed(character)
     };
     let mut urls = Vec::new();
     let scanned = &text[..end];
@@ -1415,6 +1451,27 @@ fn addresses_named_in(text: &str, bare_sites: bool) -> Vec<(std::ops::Range<usiz
         urls.extend(address);
     }
     urls
+}
+
+/// A mark no address holds as it is typed, where a word of text ends as at a space: the
+/// punctuation of Chinese, Japanese and Korean sentences (`。、「」【】…`), its full-width forms
+/// (`，：；！？（）…`), an ellipsis and a dash. The controller script and `instafy web read` end a
+/// word at the same marks (`ADDRESS_WORD_DELIMITERS`). A person's
+/// "營業時間：https://news.example.org/museum/hours。謝謝" named "/museum/hours。謝謝", so the
+/// address they gave was refused as one nobody gave. A path's own letters, of any script, stay.
+fn ends_an_address_as_typed(character: char) -> bool {
+    matches!(
+        character,
+        '\u{2014}'
+            | '\u{2026}'
+            | '\u{3001}'..='\u{3003}'
+            | '\u{3008}'..='\u{3011}'
+            | '\u{3014}'..='\u{301f}'
+            | '\u{ff01}'..='\u{ff0f}'
+            | '\u{ff1a}'..='\u{ff20}'
+            | '\u{ff3b}'..='\u{ff40}'
+            | '\u{ff5b}'..='\u{ff65}'
+    )
 }
 
 /// Whether an address is on a public site by its name: not an IP address, nor a local name
@@ -1494,11 +1551,19 @@ const MAX_TURN_GIVEN_FILES: usize = 1_000;
 const MAX_TURN_GIVEN_FILE_BYTES: u64 = 512 * 1024;
 
 /// What a turn of `chat` starts its record of given addresses with: the addresses and sites its
-/// request and its chat's history name ([`given_addresses_from_payload`]), and what the chat's
-/// earlier turns on this runtime were given, its browser runs' and its other turns' alike
-/// ([`keep_a_turns_given_addresses_for_its_chat`]).
-pub(crate) fn given_addresses_for_a_turn(payload: &JsonValue, chat: Option<Uuid>) -> Vec<String> {
-    given_addresses_for_a_turn_at(&approval_dir_path(), payload, chat)
+/// chat's history names and, where the person wrote it (`the_persons_request`), its request
+/// ([`given_addresses_from_payload`]), and what the chat's earlier turns on this runtime were
+/// given, its browser runs' and its other turns' alike
+/// ([`keep_a_turns_given_addresses_for_its_chat`]). A team's agent's request is its lead's plan,
+/// or its agents' reports, which the AI wrote and which can name an address it made up: such a
+/// turn has what the person's messages, the chat's browser turns and its other turns gave, those
+/// agents' own reads and searches among them.
+pub(crate) fn given_addresses_for_a_turn(
+    payload: &JsonValue,
+    chat: Option<Uuid>,
+    the_persons_request: bool,
+) -> Vec<String> {
+    given_addresses_for_a_turn_at(&approval_dir_path(), payload, chat, the_persons_request)
 }
 
 /// [`given_addresses_for_a_turn`], with the chats' records kept under `approval_dir`.
@@ -1506,6 +1571,7 @@ fn given_addresses_for_a_turn_at(
     approval_dir: &Path,
     payload: &JsonValue,
     chat: Option<Uuid>,
+    the_persons_request: bool,
 ) -> Vec<String> {
     let earlier = chat
         .map(|chat| given_addresses_of(approval_dir, chat))
@@ -1513,7 +1579,7 @@ fn given_addresses_for_a_turn_at(
     newest_given_addresses(
         earlier
             .into_iter()
-            .chain(given_addresses_from_payload(payload)),
+            .chain(given_addresses_named_for(payload, the_persons_request)),
     )
 }
 
@@ -1648,6 +1714,28 @@ pub(crate) fn keep_what_a_search_found(dir: &Path, results: Option<&[JsonValue]>
             "could not keep what a web search found in the turn's record"
         );
     }
+}
+
+/// Keeps what one of the AI's own web search calls ended with (`search`) in the turn's record
+/// (`dir`), as [`keep_what_a_search_found`] does: its list's pages, or, for a search, an open or a
+/// find that answered with no list (a provider's own search tool), any address. The end the
+/// runtime gives a call whose request failed before it answered names no command and no list
+/// (`managed_web_search::unanswered_search_end`): it found nothing, so it gives nothing. Taken for
+/// a search that lists none of its pages, one failed open left the reader refusing no address
+/// and the turn's cards their words for the rest of the turn.
+pub(crate) fn keep_what_a_search_ended_with(
+    dir: &Path,
+    search: &codex_protocol::protocol::WebSearchEndEvent,
+) {
+    if search.results.is_none()
+        && matches!(
+            search.action,
+            codex_protocol::models::WebSearchAction::Other
+        )
+    {
+        return;
+    }
+    keep_what_a_search_found(dir, search.results.as_deref());
 }
 
 /// An address as a sentence holds it, less the sentence's own marks after it

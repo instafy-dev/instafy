@@ -805,10 +805,6 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   const requested = stripHash(requestedUrl);
   const page = basePage(requested, new Date(ctx.now()).toISOString(), ctx.viewer);
 
-  // An address nobody gave is not read, whatever the cache or an earlier stop holds of it: not even robots.txt is asked.
-  const notGiven = notGivenRefusal(requestedUrl, ctx);
-  if (notGiven) return { ...page, status: "skipped", code: "not_given", ...notGiven };
-
   // Every address the chain reached, so a stop is remembered for each of them (under hashed keys).
   const hopUrls: URL[] = [];
   const policyHash = sha256(JSON.stringify(ctx.guard.list));
@@ -875,6 +871,12 @@ async function readOne(rawUrl: string, options: Required<Omit<WebReadOptions, "u
   if (remembered) {
     return { ...page, status: "stopped", code: remembered.code, message: remembered.message, tell: stopTell(remembered), previouslyStopped: true };
   }
+
+  // An address nobody gave is not read, whatever the cache holds of it: not even robots.txt is asked. A stop the turn
+  // or the workspace already holds for it, or for its whole site, answers first, as it did: sent to the home page of a
+  // site that stopped the turn (a CAPTCHA, a rate limit), the turn would only meet that stop again.
+  const notGiven = notGivenRefusal(requestedUrl, ctx);
+  if (notGiven) return { ...page, status: "skipped", code: "not_given", ...notGiven };
 
   if (!options.fresh) {
     const cached = ctx.cache.get<CachedPage>("pages", requested, LIMITS.pageTtlMs, ctx.now());

@@ -8525,6 +8525,9 @@ impl JobProcessor {
             match settle_skills_lane_outcome(outcome, lane_checkpoint).await {
                 SkillsLaneStep::Finished(execution) => return Ok(execution),
                 SkillsLaneStep::Kickoff { prompt, kickoff } => {
+                    // The setup opens the address where a skill says the person signs in, as the
+                    // skill declares it: what the installed skills name is given to this turn.
+                    turn_files.give_what_the_skills_declare(&prompt);
                     prompt_override = Some(prompt);
                     skills_kickoff = Some(kickoff);
                 }
@@ -8712,7 +8715,10 @@ impl JobProcessor {
                         && worker_question_reply.is_none()
                         && pending_worker_input.is_none()
                         && let Some(execution) = routed_browser_execution(
-                            &routed_browser_task(job, prompt_text, routing_summary.as_deref()),
+                            &browser_request::routed_task_naming_home_pages_where_not_given(
+                                routed_browser_task(job, prompt_text, routing_summary.as_deref()),
+                                turn_files.given_addresses().as_ref(),
+                            ),
                             continue_building,
                             agent_routing_preflight_artifact(&preflight),
                         )

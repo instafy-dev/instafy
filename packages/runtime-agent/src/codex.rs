@@ -2970,7 +2970,7 @@ impl CodexClient {
             if let (EventMsg::WebSearchEnd(search), Some(dir)) =
                 (&event.msg, options.turn_given_dir.as_deref())
             {
-                crate::shared_browser::keep_what_a_search_found(dir, search.results.as_deref());
+                crate::shared_browser::keep_what_a_search_ended_with(dir, search);
             }
             if !open_waiting && aggregator.browser_open_waiting() {
                 browser_log_read = crate::shared_browser::action_log_len();

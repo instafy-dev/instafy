@@ -311,17 +311,15 @@ impl BrowserRequest {
     /// read and what its searches found gave). The browser opens the addresses a card's task names
     /// as given (`shared_browser::given_addresses_from_payload`), so a path a turn made up opened
     /// as the site's own page, and its home page, which always opens, is the way on there. A card
-    /// the routing step posts is the person's own message, whose addresses they gave.
+    /// the routing step posts is the person's own message, whose addresses they gave; only the
+    /// line the routing step adds of what it carries on ([`routed_task`]) is the AI's, and an
+    /// address on it comes from what the person could read of the chat, a reply that named an
+    /// address no page gave among it.
     pub(super) fn name_home_pages_where_not_given(
         &mut self,
         given: &std::collections::HashSet<String>,
     ) {
-        if self.routed {
-            return;
-        }
-        if let Some(task) =
-            crate::shared_browser::with_home_pages_where_not_given(&self.task, given)
-        {
+        if let Some(task) = task_naming_home_pages_where_not_given(&self.task, self.routed, given) {
             self.task = task;
         }
     }
@@ -433,6 +431,38 @@ pub(super) fn routed_task(words: &str, summary: Option<&str>, seen: &[&str]) -> 
 /// ([`routed_task`]).
 pub(super) fn routed_task_words(task: &str) -> &str {
     task.split_once(CARRIES_ON).map_or(task, |(words, _)| words)
+}
+
+/// A card's `task` with its site's home page in place of each address nothing gave the turn
+/// (`given`, [`BrowserRequest::name_home_pages_where_not_given`]), or None where nothing changes:
+/// all of a card the turn wrote, and of a `routed` card only the routing step's line of what the
+/// message carries on, after the person's own words.
+fn task_naming_home_pages_where_not_given(
+    task: &str,
+    routed: bool,
+    given: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let (words, written) = match task.split_once(CARRIES_ON) {
+        Some((words, line)) if routed => (format!("{words}{CARRIES_ON}"), line),
+        None if routed => return None,
+        _ => (String::new(), task),
+    };
+    crate::shared_browser::with_home_pages_where_not_given(written, given)
+        .map(|written| format!("{words}{written}"))
+}
+
+/// A routed card's task ([`routed_task`]) with its site's home page in place of each address on
+/// the routing step's line of what the message carries on that nothing gave the turn (`given`,
+/// the fingerprints of its record; None for a turn without one, whose task stays as it is). The
+/// line names only hosts the person could read in the chat, but a reply there can have named a
+/// path no page gave, and the browser opens every address a card's task names.
+pub(super) fn routed_task_naming_home_pages_where_not_given(
+    task: String,
+    given: Option<&std::collections::HashSet<String>>,
+) -> String {
+    given
+        .and_then(|given| task_naming_home_pages_where_not_given(&task, true, given))
+        .unwrap_or(task)
 }
 
 /// Every host `text` names, lowercased and without a leading `www.` (in an address, as a bare
@@ -1435,6 +1465,40 @@ mod tests {
         assert_eq!(
             routed.task,
             "Open https://www.shop.example/products/mine-9 for me."
+        );
+        // The routing step's line of what the message carries on is the AI's: a path on it that
+        // nothing gave the turn names its site's home page, as a reply had linked it, and the
+        // person's own words keep theirs.
+        let words = "Open https://www.shop.example/products/mine-9 for me.";
+        let seen = [
+            "The cheapest is https://www.shop.example/products/made-up-123.html, reviewed at https://reviews.example/laptops/one.",
+            words,
+        ];
+        let task = routed_task(
+            words,
+            Some(
+                "The person wants the air fryer at https://www.shop.example/products/made-up-123.html and the review at https://reviews.example/laptops/one.",
+            ),
+            &seen,
+        );
+        assert!(task.contains("made-up-123"), "{task}");
+        let held = routed_task_naming_home_pages_where_not_given(task.clone(), Some(&given));
+        assert_eq!(
+            held,
+            task.replace(
+                "https://www.shop.example/products/made-up-123.html",
+                "https://www.shop.example/"
+            )
+        );
+        assert!(held.starts_with(words), "{held}");
+        assert_eq!(routed_task_words(&held), words);
+        let mut routed = BrowserRequest::routed(&task, false).unwrap();
+        routed.name_home_pages_where_not_given(&given);
+        assert_eq!(routed.task, held);
+        // A turn without a record keeps it as it is.
+        assert_eq!(
+            routed_task_naming_home_pages_where_not_given(task.clone(), None),
+            task
         );
     }
 

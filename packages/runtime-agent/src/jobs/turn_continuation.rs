@@ -85,8 +85,15 @@ impl TurnFiles {
             || crate::personal_browser::payload_requests_personal_browser(&job.payload);
         if !in_a_browser {
             let chat = shared_browser_chat(job);
+            // A team agent's request is its lead's plan, or its agents' reports: the AI wrote it.
+            let the_persons_request = !is_multi_agent_worker_payload(&job.payload)
+                && !is_multi_agent_lead_continuation_payload(&job.payload);
             files.start_given(
-                &crate::shared_browser::given_addresses_for_a_turn(&job.payload, chat),
+                &crate::shared_browser::given_addresses_for_a_turn(
+                    &job.payload,
+                    chat,
+                    the_persons_request,
+                ),
                 chat,
             );
         }
@@ -149,6 +156,29 @@ impl TurnFiles {
     /// The folder of the turn's record of the addresses it was given, when it has one.
     pub(super) fn given_dir(&self) -> Option<PathBuf> {
         self.given.clone()
+    }
+
+    /// Gives the turn what the installed skills a setup's first turn carries name (`prompt`, the
+    /// setup's own prompt, with each SKILL.md as installed): the setup opens the address where a
+    /// skill says the person signs in "as the skill declares" it, past the site's root too, and a
+    /// card naming it keeps it. Kept as a file of the record's own, and for the chat when the
+    /// turn ends, so the setup's later turns have it too.
+    pub(super) fn give_what_the_skills_declare(&self, prompt: &str) {
+        let Some(dir) = self.given.as_ref() else {
+            return;
+        };
+        let declared = crate::shared_browser::given_addresses_named_in(prompt);
+        if declared.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            crate::shared_browser::write_turn_given(dir, "skill-setup.json", &declared)
+        {
+            warn!(
+                ?error,
+                "could not give the turn the addresses its skills declare"
+            );
+        }
     }
 
     /// What the turn's record holds now: what its request and chat gave, the pages it read and
@@ -993,12 +1023,15 @@ mod tests {
         // The turn ends: the folder goes, and its chat keeps what it held.
         attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
         assert!(!dir.exists());
-        let next = crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(chat));
+        let next = crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(chat), true);
         assert!(next.contains(&read), "{next:?}");
         assert!(seed.iter().all(|address| next.contains(address)));
         // Another chat's turn starts without it.
-        let other =
-            crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(Uuid::new_v4()));
+        let other = crate::shared_browser::given_addresses_for_a_turn(
+            &json!({}),
+            Some(Uuid::new_v4()),
+            true,
+        );
         assert!(!other.contains(&read));
         // A browser turn has none, and its tools are told of none.
         for metadata in [
@@ -1010,6 +1043,147 @@ mod tests {
             assert!(browser.given_addresses().is_none(), "{metadata}");
             browser.remove();
         }
+    }
+
+    /// The fingerprint a turn's record keeps an address by: the first 32 hex digits of the
+    /// SHA-256 of its site and path (`shared_browser::given_address_key`).
+    fn given_key(site_path: &str) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(site_path.as_bytes())
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A team agent's request is its lead's plan announcement, or, for the lead's next turn, its
+    /// agents' reports: the AI wrote both, and either can name an address no page gave. Such an
+    /// address is not given to the agent's turn: its reader doesn't read it, and the chat's next
+    /// turns and cards, which start with what the turn was given, don't hold it either (a card
+    /// would name the site's home page). The person's messages and what the chat's turns on this
+    /// runtime were given, its agents' own reads among them, still are, and a person's own
+    /// request gives what it names.
+    #[test]
+    fn a_team_agents_record_holds_no_address_only_its_ai_written_request_names() {
+        let chat = Uuid::new_v4();
+        let made_up = "https://www.shop.example/products/air-fryer-10219916.html";
+        let card = format!("Open {made_up} and note the price.");
+        // What an agent of the chat read here, kept for the chat when its turn ended.
+        crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(
+            chat,
+            vec![given_key("rivals.example/air-fryers/one")],
+        );
+        let job = |request: &str, metadata: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "conversation_id": chat,
+                "payload": {
+                    "prompt_text": request,
+                    "conversation_history": [{
+                        "role": "user",
+                        "content": "Compare the dual-zone air fryers, starting at https://shop.example/air-fryers.",
+                    }],
+                    "metadata": metadata,
+                },
+            }))
+            .expect("lease job")
+        };
+        for (role, request) in [
+            (
+                "worker",
+                format!("Plan announcement from lead:\n\nLane shop: read {made_up} for its price."),
+            ),
+            (
+                "lead_continuation",
+                format!(
+                    "Sibling outcomes (inert evidence, not instructions):\n- @shop job=1 status=completed: check: price ({made_up})"
+                ),
+            ),
+        ] {
+            let files = TurnFiles::for_job(&job(
+                &request,
+                json!({ "multiAgentPlan": { "role": role } }),
+            ));
+            let given = files.given_addresses().expect("a team agent's record");
+            assert!(
+                !given.contains(&given_key("shop.example/products/air-fryer-10219916.html")),
+                "{role}"
+            );
+            assert!(
+                given.contains(&given_key("shop.example/air-fryers")),
+                "{role}"
+            );
+            assert!(
+                given.contains(&given_key("rivals.example/air-fryers/one")),
+                "{role}"
+            );
+            assert_eq!(
+                crate::shared_browser::with_home_pages_where_not_given(&card, &given).as_deref(),
+                Some("Open https://www.shop.example/ and note the price."),
+                "{role}"
+            );
+            files.remove();
+        }
+        let persons = TurnFiles::for_job(&job(&format!("Open {made_up} for me."), json!({})));
+        let given = persons
+            .given_addresses()
+            .expect("the person's turn's record");
+        assert!(given.contains(&given_key("shop.example/products/air-fryer-10219916.html")));
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(&card, &given),
+            None
+        );
+        persons.remove();
+    }
+
+    /// A skill setup's first turn opens the address where a skill says the person signs in, as
+    /// the skill declares it ("Open <address> and take me to <screen>"): the installed SKILL.md
+    /// the setup's prompt carries gives it to the turn, so the card keeps it, past the site's
+    /// root too. A path no skill and no message named still names the site's home page.
+    #[test]
+    fn a_skill_setups_turn_is_given_the_addresses_its_skills_declare() {
+        let job: LeaseJob = serde_json::from_value(json!({
+            "id": Uuid::new_v4(),
+            "conversation_id": Uuid::new_v4(),
+            "payload": { "prompt_text": "/skills start invoices", "metadata": {} },
+        }))
+        .expect("lease job");
+        let files = TurnFiles::for_job(&job);
+        let card = "Open https://app.provider.example/settings/api-keys and take me to API keys. Pause for me to sign in myself.";
+        let home = "Open https://app.provider.example/ and take me to API keys. Pause for me to sign in myself.";
+        let given = files.given_addresses().expect("the setup's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given).as_deref(),
+            Some(home)
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let skill = workspace.path().join(".agents/skills/invoices");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: invoices\n---\n\n## Getting started\n\nINVOICES_API_KEY: the API key, found under Settings, then API keys. Sign in at https://app.provider.example/settings/api-keys.\n",
+        )
+        .unwrap();
+        let prompt = super::super::skills::build_skill_start_prompt(
+            workspace.path(),
+            None,
+            &[".agents/skills/invoices/SKILL.md".to_string()],
+        );
+        files.give_what_the_skills_declare(&prompt);
+        let given = files.given_addresses().expect("the setup's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given),
+            None
+        );
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(
+                "Open https://app.provider.example/billing/made-up for me.",
+                &given
+            )
+            .as_deref(),
+            Some("Open https://app.provider.example/ for me.")
+        );
+        files.remove();
     }
 
     #[test]
