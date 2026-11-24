@@ -98,6 +98,10 @@ process.stdout.write(JSON.stringify({ status: "live", port: 24087 }, null, 2) + 
 }
 
 const lastLine = (text) => text.trimEnd().split("\n").at(-1);
+/** A check's last two lines: on a comparison, its step (or the card's answer) and then the line for the reply. */
+const lastTwo = (text) => text.trimEnd().split("\n").slice(-2);
+/** The line a check of the compare starter's own data.json ends with, for the reply: what the page shows. */
+const STARTER_SHOWS = "The page shows 10 of 12 values: Price 2 of 3, Weight 3 of 3, Rating 3 of 3, Warranty 2 of 3.";
 
 // A turn ran init, whose next step said "post its card", and then `bind check … && preview open --title '<another
 // title>'`: the check had posted the card already, the second open was refused, and the reply said the page "wasn't
@@ -137,7 +141,7 @@ test("until a preview shows the site, a check that passes posts its card itself,
     assert.equal(passed.status, 0, passed.stdout + passed.stderr);
     const titled = "(cd sites/laptops && instafy preview open --title 'Compare three options' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)";
     assert.ok(passed.stdout.includes(`\nPosted its card: ran ${titled}, which answered:\n{\n  "status": "live",`), passed.stdout);
-    assert.equal(lastLine(passed.stdout), "}");
+    assert.deepEqual(lastTwo(passed.stdout), ["}", STARTER_SHOWS]);
     assert.doesNotMatch(passed.stdout, /^next:/m);
     assert.deepEqual(s.cards(), [{ cwd: fs.realpathSync(path.join(s.project, "sites", "laptops")), args: cardArgs("Compare three options") }]);
     // the card's command wrote the page in the space's record of its pages: no check posts it again, and while this
@@ -146,32 +150,37 @@ test("until a preview shows the site, a check that passes posts its card itself,
     assert.equal(json.ok, true);
     assert.equal(json.card, undefined);
     assert.equal(json.next, `post its card: (cd sites/laptops && ${OPEN})`);
-    assert.equal(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.equal(json.for_the_reply, STARTER_SHOWS);
+    assert.equal(Object.keys(json).at(-1), "for_the_reply");
+    assert.deepEqual(lastTwo(s.run(["check", "sites/laptops", ...expect]).stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS]);
     assert.equal(s.cards().length, 1);
 
-    // a check that fails says what to fix, and still ends with the card's command
+    // a check that fails says what to fix, and still names the card's command, before the line for the reply
     const failed = s.run(["check", "sites/laptops", "--expect", "Option D"]);
     assert.equal(failed.status, 1);
     assert.match(failed.stdout, /^MISSING: .*Option D\./m);
-    assert.equal(lastLine(failed.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.deepEqual(lastTwo(failed.stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS]);
     assert.equal(JSON.parse(s.run(["check", "sites/laptops", "--expect", "Option D", "--json"]).stdout).next, `post its card: (cd sites/laptops && ${OPEN})`);
     // so does a check with nothing to check
     const nothing = s.run(["check", "sites/laptops"]);
     assert.equal(nothing.status, 2);
-    assert.equal(lastLine(nothing.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.deepEqual(lastTwo(nothing.stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS]);
+    assert.equal(JSON.parse(s.run(["check", "sites/laptops", "--json"]).stdout).for_the_reply, STARTER_SHOWS);
 
     // `instafy preview open --start`, run in the site's folder, records the preview with that folder: the card is up
     s.open("sites/laptops");
     const shown = s.run(["check", "sites/laptops", ...expect]);
     assert.equal(shown.status, 0, shown.stdout + shown.stderr);
-    assert.match(lastLine(shown.stdout), /^Read \d+ file\(s\)/);
+    const [read, shows] = lastTwo(shown.stdout);
+    assert.match(read, /^Read \d+ file\(s\)/);
+    assert.equal(shows, STARTER_SHOWS);
     assert.doesNotMatch(shown.stdout, /preview open/);
     const shownJson = JSON.parse(s.run(["check", "sites/laptops", ...expect, "--json"]).stdout);
     assert.deepEqual([shownJson.ok, shownJson.next], [true, undefined]);
 
     // a preview of another folder is not this site's card
     s.open("sites/other");
-    assert.equal(lastLine(s.run(["check", "sites/laptops", ...expect]).stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.deepEqual(lastTwo(s.run(["check", "sites/laptops", ...expect]).stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS]);
     assert.equal(s.cards().length, 1);
   } finally {
     s.done();
@@ -193,7 +202,7 @@ test("a passing check posts no card for a page the space's record holds: another
     const expect = ["--expect", "Option A, Option B, Option C"];
     const held = s.run(["check", "sites/laptops", ...expect]);
     assert.equal(held.status, 0, held.stdout + held.stderr);
-    assert.equal(lastLine(held.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`);
+    assert.deepEqual(lastTwo(held.stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS]);
     assert.doesNotMatch(held.stdout, /^Posted its card/m);
     const json = JSON.parse(s.run(["check", "sites/laptops", ...expect, "--json"]).stdout);
     assert.equal(json.next, `post its card: (cd sites/laptops && ${OPEN})`);
@@ -214,7 +223,7 @@ test("a passing check posts no card for a page the space's record holds: another
     assert.equal(s.run(["init", "sites/laptops", "--starter", "compare"], { cwd: folder, environment: b }).status, 0);
     fs.writeFileSync(path.join(folder, ".instafy", "pages", "pages.json"), JSON.stringify({ version: 1, pages: [{ folder: "sites/laptops", title: "A page", server: ["instafy", "bind"], openedAt: "2026-11-08T08:15:00.000Z" }] }));
     const own = s.run(["check", "sites/laptops", ...expect], { cwd: folder, environment: b });
-    assert.equal(lastLine(own.stdout), `next: post its card: (cd sites/laptops && ${OPEN})`, own.stdout);
+    assert.deepEqual(lastTwo(own.stdout), [`next: post its card: (cd sites/laptops && ${OPEN})`, STARTER_SHOWS], own.stdout);
     assert.equal(s.cards().length, 1);
   } finally {
     s.done();
@@ -478,7 +487,7 @@ test("typed \"checked <date>\" words hold the card: the check names no card comm
     assert.equal(JSON.parse(s.run(["card", "sites/tablets", "--json"]).stdout).posted, true);
     assert.deepEqual(s.cards().map((card) => card.cwd), [visit, hand].map((dir) => fs.realpathSync(dir)));
 
-    // any other finding still ends with the card's command: an item the page doesn't show, a source line that links
+    // any other finding still names the card's command: an item the page doesn't show, a source line that links
     // nothing, both at once
     const hours = path.join(s.project, "sites", "hours");
     s.run(["init", "sites/hours", "--starter", "blank"]);
@@ -500,7 +509,9 @@ test("typed \"checked <date>\" words hold the card: the check names no card comm
     assert.equal(values.status, 1, values.stdout + values.stderr);
     assert.match(values.stdout, /^VALUES: 1 value\(s\) to fix in data\.json:$/m);
     assert.doesNotMatch(values.stdout, /TYPED/);
-    assert.equal(lastLine(values.stdout), `next: post its card: (cd sites/options && ${OPEN})`);
+    // the price with no page reads "Unknown", so the page shows one price fewer
+    assert.deepEqual(lastTwo(values.stdout), [`next: post its card: (cd sites/options && ${OPEN})`,
+      "The page shows 9 of 12 values: Price 1 of 3, Weight 3 of 3, Rating 3 of 3, Warranty 2 of 3."]);
     assert.equal(JSON.parse(s.run(["check", "sites/options", "--expect", name, "--json"]).stdout).next, `post its card: (cd sites/options && ${OPEN})`);
     assert.equal(s.cards().length, 2);
   } finally {
@@ -604,7 +615,7 @@ test("a card's command that fails leaves the check passed, and names the command
     const out = s.run(["check", "sites/laptops", "--expect", "Option A, Option B, Option C"], { environment });
     assert.equal(out.status, 0, out.stdout + out.stderr);
     assert.match(out.stdout, /^The card was not posted: the instafy command was not found\.$/m);
-    assert.equal(lastLine(out.stdout), "next: post its card: (cd sites/laptops && instafy preview open --title 'Compare three options' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)");
+    assert.deepEqual(lastTwo(out.stdout), ["next: post its card: (cd sites/laptops && instafy preview open --title 'Compare three options' --serve-cmd 'instafy bind serve . --port {port} --preview' --start --json)", STARTER_SHOWS]);
   } finally {
     s.done();
   }

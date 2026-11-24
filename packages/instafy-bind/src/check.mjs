@@ -10,7 +10,8 @@
 // it: one whose words a script holds where the check cannot place them, or that a script fetches from another site, is
 // one its files can't tell about, which it looks for on the page as drawn (checkReport). On a page of options it also
 // checks the values, where each row comes from and, on a comparison, that it sorts by a column that reads as a number,
-// so something is said under its title (below). A source line drawn by hand (an element with the class "trust") links
+// so something is said under its title (below); a comparison's check ends with how many of its values the page shows,
+// for the reply's first line (shownLine). A source line drawn by hand (an element with the class "trust") links
 // the page its fact was read on, unless it says it is not checked: written as plain text, a page to
 // share once gave its sources as two lines nobody could open, where site.trust(fact) would have linked each. So does a
 // fact site.trust draws: one with its source and no page draws a line that links nothing. The check names only a line
@@ -1041,6 +1042,57 @@ export function checkValues(dir) {
   return { checked: true, problems, notes };
 }
 
+/** Does the compare starter draw a value in this cell (app.js valueOf and cell, site.trust)? A fact with its page or
+ *  an estimate; in the price column a price a check read, unless that check found the store blocked; on a page from
+ *  what Octo knows, any value ("<value>, not checked"). Neither a fact without its page nor a page read without the
+ *  value draws one. */
+function drawsValue(cell, records, memory) {
+  const { fact } = cell;
+  if (memory) return hasValue(fact);
+  if (cell.price) {
+    const newest = (list) => list.sort((a, b) => (Date.parse(b.prov?.observed_at) || 0) - (Date.parse(a.prov?.observed_at) || 0))[0];
+    const priced = (r) => r.type === "offer" && typeof r.price?.amount === "number";
+    const live = newest(records.filter((r) => (cell.key === "price" && priced(r)) || (r.type === "claim" && r.attr === cell.key)));
+    const top = newest(records.filter((r) => priced(r) || (r.type === "claim" && r.attr === "price")));
+    const blocked = top?.type === "claim" && top.status !== "error" && (top.status === "uncertain" || top.status === "not_found" || top.value == null);
+    if (live && !blocked) {
+      if (priced(live)) return true;
+      return !["uncertain", "not_found", "error"].includes(live.status) && live.value != null && !NO_VALUE.test(String(live.value).trim());
+    }
+  }
+  return hasValue(fact) && !!(fact.src || fact.est);
+}
+
+/** The check's last line, which the reply's first line follows: how many of a comparison's values the page shows, in
+ *  all and per column, by each column's label in the page's order ("The page shows 1 of 9 values: Location 1 of 3, What
+ *  reviewers say 0 of 3, Price 0 of 3."), as the compare starter draws them (drawsValue). A reply opened "The
+ *  comparison page covers location, reviewer comments and date-specific prices for all three hotels" over a page that
+ *  showed one of those nine values, after a check that counted only the hotels it named (a local test, Nov 23). On a
+ *  page from what Octo knows it says none is checked. null for a page that is no comparison, or has no rows. */
+export function shownLine(dir) {
+  const root = path.resolve(dir);
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(path.join(root, "data.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  if (!isOptionsData(data) || !Array.isArray(data.columns)) return null;
+  const memory = fromMemory(data);
+  const live = memory ? new Map() : liveRecords(root);
+  const columns = new Map();
+  for (const cell of optionCells(data)) {
+    const column = columns.get(cell.key) ?? columns.set(cell.key, { label: cell.label, shown: 0, of: 0 }).get(cell.key);
+    column.of++;
+    if (drawsValue(cell, live.get(cell.ref) ?? [], memory)) column.shown++;
+  }
+  const counts = [...columns.values()];
+  const of = counts.reduce((n, c) => n + c.of, 0);
+  if (!of) return null;
+  const shown = counts.reduce((n, c) => n + c.shown, 0);
+  return `The page shows ${shown} of ${of} values${memory ? ", from what Octo knows and none checked" : ""}: ${counts.map((c) => `${c.label} ${c.shown} of ${c.of}`).join(", ")}.`;
+}
+
 /** A price whose source dates it ("asof") over 30 days ago may have changed (site.old), so no sort names it first. */
 const OLD_PRICE_MS = 30 * 86400000;
 
@@ -1214,21 +1266,25 @@ export function cardWaits(dir, { summary = null } = {}) {
 /** The CLI's lines and exit code: 0 every item shown and every value fine, 1 an item missing, a value to fix, a source
  *  line that links no page, a typed "checked <date>" or "seen <date>", a file loaded from outside the site's folder or
  *  an error on the page as drawn, 2 nothing to check, or items it could tell about neither from the files nor from the
- *  page as drawn. `card`: the command that
- *  serves the site and posts its card, while no preview shows it. A check that passes takes that step itself with
- *  `post` (which runs the command and says what it answered); any other answer ends with the command, since a failing
- *  check never holds the card back, except for two findings. A page that loads files from outside its folder can't
- *  load them served on its own, so its card waits for the check that passes. And a typed "checked <date>" or "seen
- *  <date>" says on a page to share that something was read: its fix is always to delete the words, so the card waits
- *  until they are gone, and the answer ends with that step in the command's place. An item whose words a script holds
- *  where the check
- *  cannot read them (a page that draws its text with document.createElement, or as HTML from a string) is looked for
- *  on the page as drawn, in the same step: a new page's card is posted first, as a passing check posts it, and `look`
- *  runs the page check on the port it is served on (that card's, else `served`'s: a preview that already shows it).
- *  Each line that sets HTML from a string is named, with how to draw it instead, and never fails the page. */
+ *  page as drawn. `card`: the command that serves the site and posts its card, while no preview shows it. A check that
+ *  passes takes that step itself with `post` (which runs the command and says what it answered); any other answer
+ *  names the command as its next step, since a failing check never holds the card back, except for two findings. A
+ *  page that loads files from outside its folder can't load them served on its own, so its card waits for the check
+ *  that passes. And a typed "checked <date>" or "seen <date>" says on a page to share that something was read: its fix
+ *  is always to delete the words, so the card waits until they are gone, and the answer names that step in the
+ *  command's place. On a comparison every answer ends with one line for the reply (`for_the_reply` with --json): how
+ *  many of its values the page shows (shownLine), which the reply's first line follows. An item whose words a script
+ *  holds where the check cannot read them (a page that draws its text with document.createElement, or as HTML from a
+ *  string) is looked for on the page as drawn, in the same step: a new page's card is posted first, as a passing check
+ *  posts it, and `look` runs the page check on the port it is served on (that card's, else `served`'s: a preview that
+ *  already shows it). Each line that sets HTML from a string is named, with how to draw it instead, and never fails
+ *  the page. */
 export function checkReport(dir, expect, { json = false, card = null, post = null, look = null, served = null } = {}) {
   const { starter, ...result } = checkSite(dir, expect);
   const values = checkValues(dir);
+  const reply = shownLine(dir);
+  const replyLines = reply ? [reply] : [];
+  const replyKey = reply ? { for_the_reply: reply } : {};
   const { missing, unknown, unlinked, typed, outside, markup } = result;
   const fix = outside.length ? outsideLines(dir, outside, starter) : null;
   // where a card's command would be named, a page that types those words is told its card waits for their deletion
@@ -1239,8 +1295,8 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (!result.items.length && !values.problems.length && !unlinked.length && !typed.length) {
     const message = 'nothing to check: pass --expect "<item>,<item>" (each item the request named) or put "expect": [...] in data.json';
     const exit = fix ? 1 : 2;
-    if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, markup, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}) })] };
-    return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...markupNotes, ...nextLines] };
+    if (json) return { exit, lines: [JSON.stringify({ ok: false, error: message, values, markup, ...(fix ? { outside, init: fix.init } : {}), ...(next ? { next } : {}), ...replyKey })] };
+    return { exit, lines: [...(fix ? fix.lines : []), message, ...values.notes.map((n) => `NOTE: ${n}`), ...markupNotes, ...nextLines, ...replyLines] };
   }
   const failing = missing.length || values.problems.length || unlinked.length || typed.length || fix;
   // the check that passes posts the card itself, while no preview shows the site; so does one that can't read an item
@@ -1255,7 +1311,7 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   if (json) {
     const step = posted ? { card: { posted: posted.ok, command: posted.command, ...(posted.ok ? { answer: answerOf(posted.output) } : { error: posted.error }) }, ...(posted.ok ? {} : { next: `post its card: ${posted.command}` }) } : next ? { next } : {};
     const page = drawn ? { drawn } : unknown.length && !failing ? { drawn: { port, error: unseen ?? "nothing serves the page" } } : {};
-    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...page, ...step })] };
+    return { exit, lines: [JSON.stringify({ ok: exit === 0, ...result, values, ...(fix ? { init: fix.init } : {}), ...page, ...step, ...replyKey })] };
   }
   const lines = [...(fix ? fix.lines : [])];
   const absent = [...missing, ...(drawn ? drawn.missing.map((m) => (m.sizes.length ? `${m.item} (not on the ${listed(m.sizes)} size)` : m.item)) : [])];
@@ -1293,7 +1349,7 @@ export function checkReport(dir, expect, { json = false, card = null, post = nul
   }
   if (posted?.ok) lines.push(`Posted its card: ran ${posted.command}, which answered:`, ...(posted.output ? posted.output.split("\n") : []));
   else if (posted) lines.push(`The card was not posted: ${posted.error}.`, `next: post its card: ${posted.command}`);
-  return { exit, lines: [...lines, ...(posted ? [] : nextLines)] };
+  return { exit, lines: [...lines, ...(posted ? [] : nextLines), ...replyLines] };
 }
 
 /** What the card's command answered: its JSON, or its words. */

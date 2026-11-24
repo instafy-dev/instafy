@@ -15,6 +15,8 @@ Skills are persistent context nodes. Use them to stay consistent without loading
 ## Default rules (strict)
 
 - **Minimal reads**: Use the Skills index + `instafy-skill-router` to pick the smallest set of relevant skills.
+- **Whole reads**: Read each skill you pick on its own and whole: one SKILL.md per command, with no output cap below
+  its size; a read cut in its middle misses its rules.
 - **Conflict handling**: If two skills conflict:
   - Prefer the more specific scope (task- or integration-specific beats general).
   - Prefer newer/updated content when the difference is clear.

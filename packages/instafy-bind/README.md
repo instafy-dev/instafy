@@ -212,7 +212,12 @@ in a string or a comment), to draw with `site.h` (text as text) and `site.trust(
 page. A comparison the compare starter draws writes the line under its title itself, so a `lede` in its `data.json`
 is not read as the page's words, and the check notes that it isn't drawn. That starter also names what each row is
 still missing once, from its cells, first under "Still to confirm", so the check notes an `unchecked` entry that names
-a column no row has a value for: the entry stays only for what the reader can do that the page doesn't say. On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
+a column no row has a value for: the entry stays only for what the reader can do that the page doesn't say. A
+comparison's check ends with one line for the reply, which the reply's first line follows (with `--json`,
+`for_the_reply`, its last key): how many of its values the page shows, in all and per column by label ("The page shows
+1 of 9 values: Location 1 of 3, What reviewers say 0 of 3, Price 0 of 3."), counted as the compare starter draws them:
+a value with its page, an estimate, or a price a check read, and on a page from what Octo knows every value, with "none
+checked". On a page of options (the compare and ranked starters' `data.json`) it also exits 1 for a
 value that only says nothing (`"—"`, `"n/a"`: leave out `v` and say why in `note`), a value without the page and day
 it was read (`src`, `url`, `date`), a filter applied without `site.byFilter`, and a comparison of two or more options
 with no `sort` entry by a column that reads as a number, while one reads as a number in every row (the line under its
@@ -248,9 +253,9 @@ content, until the CLI has recorded a preview of that space opened from the fold
 page and posts its card in Studio (`instafy preview open … --serve-cmd 'instafy bind serve . --port {port} --preview'
 --start`, run in the site's folder). A check that passes on a new page, one the space's record of its pages
 (`.instafy/pages/pages.json`, which that command writes) does not hold yet, runs that command itself, titled from the
-page (`data.json`'s title, else the page's own), and says what it answered; any other check ends with it: a failing
-check never holds the card back, except for two findings. A page with typed "checked <date>" or "seen <date>" words
-says on a page to share that something was read, so its card waits until they are deleted: its check ends with that
+page (`data.json`'s title, else the page's own), and says what it answered; any other check names it as its next
+step: a failing check never holds the card back, except for two findings. A page with typed "checked <date>" or "seen <date>" words
+says on a page to share that something was read, so its card waits until they are deleted: its check names that
 step and no card command, `instafy bind card` posts none, and the card's own command (`instafy preview open` for a
 page `instafy bind serve` serves, also one already running, which it reads from the process on the port or, where
 that can't be read, from the server's own `.bind/server.json`) answers with the same lines, exit 1, and starts

@@ -6,8 +6,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import vm from "node:vm";
-import { knownNumber, unsortedNumbers } from "../src/check.mjs";
+import { knownNumber, shownLine, unsortedNumbers } from "../src/check.mjs";
 
 const STARTERS = new URL("../src/starters/", import.meta.url);
 const SITE_JS = fs.readFileSync(new URL("site.js", STARTERS), "utf8");
@@ -1526,4 +1528,75 @@ test("compare: a label's unit in brackets never makes \"Still to confirm\" say a
     const { document } = await draw("compare", data, { width });
     assert.deepEqual(confirmEntries(document), ["Reader A and Reader B: Weight (g), Price (€)"], `${width}px`);
   }
+});
+
+// `instafy bind check` ends a comparison's answer with one line for the reply, which the reply's first line follows:
+// how many of its values the page shows (shownLine). A reply had opened "The comparison page covers location, reviewer
+// comments and date-specific prices for all three hotels" over a page that showed one of those nine values (a local
+// test, Nov 23). The line counts what this starter draws, so here it is read off the table as drawn, column by column:
+// a cell that shows a value, never one that reads "Unknown", "Not found" or "Couldn't check".
+test("compare: the check's line for the reply counts the values the table draws, column by column", async () => {
+  const at = new Date().toISOString();
+  const older = new Date(Date.now() - 60000).toISOString();
+  const read = { src: "Maker", url: "https://maker.example/a", date: DAY, viewer: "server fetch" };
+  const claim = (ref, attr, value, status, when = at) => ({ type: "claim", cid: `clm_${ref}_${attr}`, ref: `option:${ref}`, attr, value, status, basis: "live",
+    confidence: "high", prov: { source: "shop.example", lane: "local", observed_at: when, ttl_s: 86400 } });
+  const offer = (ref, amount, when = at) => ({ type: "offer", ref: `option:${ref}`, price: { amount, currency: "USD" }, seller: { name: "Shop" },
+    prov: { source: "shop.example", url: "https://shop.example/" + ref, lane: "local", observed_at: when, ttl_s: 86400 } });
+  const store = { store: { name: "Shop", url: "https://shop.example/", readable: true } };
+  const mixed = {
+    title: "Four options",
+    sort: [{ key: "price", label: "Price, low to high", dir: "asc" }],
+    columns: [{ key: "price", label: "Price", type: "price" }, { key: "weight", label: "Weight", type: "number" },
+      { key: "rating", label: "Rating", type: "number" }, { key: "battery", label: "Battery", type: "text" },
+      { key: "cost", label: "Cost to run", type: "price" }, { key: "colour", label: "Colour", type: "text" }],
+    items: [
+      // a price a check read; an estimate; a value only a web search gave; a check's value in a price column of its own
+      item("a", "Option A", { price: { note: "no price on the shop's page today" }, weight: { v: "about 9 oz", est: true, url: "https://maker.example/how" },
+        rating: { v: "4.6 of 5", ...read }, battery: { v: "Weeks", ...read, viewer: "provider search" }, cost: { note: "not listed" }, colour: { v: "Grey", ...read } }, store),
+      // a blocked check keeps the seed; a value with no page; a dash; a number
+      item("b", "Option B", { price: { v: "$129", ...read }, weight: { v: "9.1 oz" }, rating: { v: "—", ...read }, battery: { v: 0, ...read }, cost: { v: "$4", ...read } }, store),
+      // a page read without the value; "n/a"; nothing at all for the price, with a store that can be checked
+      item("c", "Option C", { weight: { ...read }, rating: { note: "no rating found" }, battery: { v: "n/a", ...read } }, store),
+      // a check that failed takes the seed's place; a value with a page but no source name
+      item("d", "Option D", { price: { v: "$140", ...read }, weight: { v: "8 oz", url: "https://maker.example/d" }, rating: { v: "4.1 of 5", ...read } }, store),
+    ],
+  };
+  const records = [offer("a", 120), claim("a", "cost", "$3 a year", "ok"), offer("b", 99, older), claim("b", "price", null, "uncertain"),
+    claim("d", "price", null, "error")];
+  const memory = { title: "Two options", from: "memory", columns: [{ key: "screen", label: "Display", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    items: [item("e", "Option E", { screen: { v: "6 in" }, price: { v: "$130" } }), item("f", "Option F", { screen: { v: "—" }, price: { note: "not known" } })] };
+  const hotels = JSON.parse(fs.readFileSync(new URL("fixtures/hotel-comparison/data.json", import.meta.url), "utf8"));
+  for (const [name, data, recs, line] of [
+    ["the hotels", hotels, [], "The page shows 1 of 9 values: Location 1 of 3, What reviewers say 0 of 3, Price for 12–14 February 0 of 3."],
+    ["the vacuums", compareData(), [], "The page shows 4 of 15 values: Price 2 of 5, Battery 1 of 5, Suction 1 of 5."],
+    ["the options", mixed, records, "The page shows 9 of 20 values: Price 2 of 4, Weight 1 of 4, Rating 2 of 4, Battery 2 of 4, Cost to run 2 of 4."],
+    ["from what Octo knows", memory, [], "The page shows 2 of 4 values, from what Octo knows and none checked: Display 1 of 2, Price 1 of 2."],
+  ]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compare-shown-"));
+    try {
+      fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(data));
+      fs.mkdirSync(path.join(dir, "data", "records"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "data", "records", "read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: recs }));
+      assert.equal(shownLine(dir), line, name);
+      const client = () => ({ on() {}, ready: Promise.resolve({ connected: true, names: ["read_offer"] }), names: ["read_offer"], isPending: () => false,
+        records: (ref) => recs.filter((r) => r.ref === ref), expired: () => false });
+      const { document } = await draw("compare", data, { width: 1280, search: "?show=all", bind: client });
+      const rows = document.getElementById("list").querySelectorAll("tr").filter((tr) => tr.getAttribute("data-ref"));
+      assert.equal(rows.length, data.items.length, name);
+      // the table's columns are the first five; a cell's value is drawn in its .v, after the option's own cell
+      const columns = data.columns.slice(0, 5).map((c, i) => ({ label: c.label, shown: rows.filter((tr) => tr.children[i + 1].querySelector(".v")).length }));
+      const drawn = columns.reduce((n, c) => n + c.shown, 0);
+      const memoryWords = data.from === "memory" ? ", from what Octo knows and none checked" : "";
+      assert.equal(`The page shows ${drawn} of ${rows.length * columns.length} values${memoryWords}: ${columns.map((c) => `${c.label} ${c.shown} of ${rows.length}`).join(", ")}.`, line, name);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  // what the line counts as none reads "Unknown" in its cell, never "Not checked": a value with no page, "—", a page
+  // read without the value
+  const { document } = await draw("compare", mixed, { width: 1280, search: "?show=all" });
+  const cellText = (ref, key) => document.getElementById("list").querySelectorAll("tr").find((tr) => tr.getAttribute("data-ref") === `option:${ref}`)
+    .children[mixed.columns.findIndex((c) => c.key === key) + 1].textContent;
+  for (const [ref, key] of [["b", "weight"], ["b", "rating"], ["c", "weight"]]) assert.equal(cellText(ref, key), "Unknown", `${ref}: ${key}`);
 });
