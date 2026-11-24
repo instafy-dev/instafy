@@ -492,11 +492,32 @@ Two steps never ask, in Ask too:
   both is a small part of the page) whose words accept, which is refused as
   `step_refused_consent`, in a banner that speaks of cookies. That banner, or
   a container around it, is named after them (its id, class, label or test
-  id, or a dialog's title), or its own text says "cookie": a dialog that
-  speaks only of privacy or consent (a policy to accept, whose "Decline" may
-  close an account) is no cookie banner, and the browser leaves it to the
-  turn. Never the accept, the settings or anything else on the banner, never
-  a link, a form's button, a control turned off or one something covers,
+  id, or a dialog's title), or its own text says "cookie" or names tracking
+  as the site's technology ("tracking technologies",
+  "Website-Tracking-Technologien", "tracking pixels"): a dialog that speaks
+  only of privacy or consent (a policy to accept, whose "Decline" may close an
+  account) is no cookie banner, nor is one about a tracker the person owns, a
+  tool or service that tracks time or a parcel, or a parcel's tracking
+  number, and the browser leaves it to the turn. Like "cookie", those words
+  make a privacy dialog that names tracking technologies a cookie banner. A
+  banner whose own buttons hold no refusal (an accept and its settings) is
+  refused in its own settings when the page already holds them, hidden, with
+  a refusal: a hidden button the action policy reads as a refusal, outside the
+  banner, in a container around it named after a notice, which holds no
+  sign-in, password, code or payment field. Its settings button beside its
+  accept (a button named by them, such as "Customize", "Manage preferences",
+  "Your Privacy Choices" or "Cookie settings", never a link, a save or a
+  switch) is pressed once on the page, only to show them (the action feed
+  shows "Open cookie settings"), and then a refusal they show ("Reject all",
+  "Only necessary") beside an accept or that button, in that container,
+  however long: the notice's own refusal before a purpose's, whose name
+  repeats beside every purpose. A dialog the press shows outside that
+  container is never pressed. Settings a press would only draw, or that hold
+  no refusal or such a field, are never shown, so they never cover the page;
+  settings that show a sign-in, password, code or payment field are left with
+  nothing pressed in them. Never the accept, a save, a switch or anything else
+  on the banner or in its settings, never a link, a form's button, a control
+  turned off or one something covers,
   never in a frame (a reading lists the page's own controls only), never on a
   page that may show a secret or holds a sign-in, password, code or payment
   field among the controls a reading lists, and never on a page with a frame
@@ -509,9 +530,9 @@ Two steps never ask, in Ask too:
   the step's activity says so (`declined: "cookies"`) and Details list
   "Declined cookies on <site>" after the step; a banner whose button took no
   press (its script not ready yet) stays up and is not said to be declined.
-  Octo reads the page as it is after the press. A banner with no refusal of
-  its own stays up, and Octo carries on under it: a cookie notice is never
-  the person's step (below).
+  Octo reads the page as it is after the press. A banner with no refusal on
+  it or in its settings stays up, and Octo carries on under it: a cookie
+  notice is never the person's step (below).
 - **A covered click is refused at once, before anyone is asked.** A click
   whose control has something outside it over its middle (a notice, a dialog,
   a loading screen) would go to that instead. A click that asks the person is

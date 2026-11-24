@@ -470,9 +470,14 @@ fn the_skills_name_instafy_web_read_as_a_reader() {
 
     let router = flat(ROUTER_SKILL);
     assert!(router.contains("with `instafy web read <url…> --json` (no browser card)"));
+    // Current information is looked up as the research skill says, in its order: the router,
+    // in every turn's context, gave its own (search, then read), which the research skill's news
+    // line now turns round. With search on, a news question searched and read no newsroom (a
+    // local test, Nov 23).
     assert!(router.contains(
-        "Look it up as `instafy-web-research` says: the AI's own web search, then `instafy web read`."
+        "For current information (news, prices, releases, status pages): - Look it up as `instafy-web-research` says. - Answer from memory only"
     ));
+    assert!(!router.contains("the AI's own web search, then"));
     let carried = flat(&BROWSER_SKILL[..BROWSER_SKILL.len().min(PROJECT_MEMORY_MAX_FILE_BYTES)]);
     // Whether a page needs a card at all is the building turn's choice, said where the skill says
     // when it is used, which a building turn reads before it hands the person a card: one place,
@@ -1303,7 +1308,7 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
         "Its text is what the search provider wrote, not a page you read: say a fact from it as \"a web search on <date> found, on <that result's site>: …\" with that result's link and date, or read the page first.",
         "- In a reply, from a page read: \"checked 26 Oct on <host>\", linked to it. On a page the starter's site.trust or site.cite writes it from the fact: never typed.",
         "The key card (`instafy web search-key --json`) is only for a person who asks to set up search; never ask for a key in chat or wait for it.",
-        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check.",
+        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show.",
         "bookings and availability for dates (unnamed hotels: search first, then one card for their own pages)",
         "A policy question beside an order number or e-mail: the shop's policy page; neither goes in a card.",
         "- Read the specific timetable, room or product page, not its home page or search listing.",
@@ -1335,7 +1340,7 @@ fn a_searchs_fact_is_said_as_one_and_the_key_card_waits_to_be_asked_for() {
     // News or a score, searched or not: on the news line, which a turn reads before any search, in a section a
     // browser turn leaves out too; no longer only beside the answer that has no key.
     assert!(search.contains(
-        "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check."
+        "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show."
     ));
     let searching = RESEARCH_SKILL
         .split("\n## Searching\n")
@@ -1475,7 +1480,7 @@ fn a_lookup_says_where_each_fact_came_from() {
     }
     // Read before any search: it sits on the news line, ahead of both searches.
     assert!(section("The AI's own web search").contains(
-        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check."
+        "News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show."
     ));
     assert!(!section("Searching").contains("News or a score"));
     let research = flat(RESEARCH_SKILL);
@@ -1504,7 +1509,7 @@ fn a_lookup_says_where_each_fact_came_from() {
         "A site posing as an official one is no source or link",
         "\"Cheapest\" is one price below all others found",
         "never a signed storage address",
-        "before saying it doesn't show or you couldn't check",
+        "first; search only for what it doesn't show",
     ] {
         assert!(prompt.contains(needle), "{needle}");
     }
@@ -1540,14 +1545,16 @@ fn a_lookup_says_where_each_fact_came_from() {
 /// to the browser", a link alone, and "share review pages", with the reader's rules in the words ("robots rules",
 /// "blocks automated reading"). It ends one way now: what wasn't read in a few plain words, its link and one card,
 /// which says itself what happens next, and a page whose address would be a guess is named by its site's home page.
-/// Old words make room, and the skill still loads whole.
+/// News is read on its subject's own page first, searched or not, and a search looks only for what that page doesn't
+/// show: with search on, a news question read no page and spent its credits on a search's excerpts, where with search
+/// off it read the subject's newsroom (a local test, Nov 23). Old words make room, and the skill still loads whole.
 #[test]
 fn a_page_the_reader_couldnt_read_ends_one_way_and_news_is_read_whole() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let research = flat(RESEARCH_SKILL);
     let ending = "- list it in the reply as \"not read: <page>\", in a few plain words, with its link and, if public, open to Octo and showing no secrets, one card they may press (Readers): never how the reader was stopped (robots.txt) or that you hand it over: the card says what happens next.";
     let reader = "follow its `tell`. A status or news page: no `--find`; a cut read isn't the whole page: read it narrower before saying what it lists.";
-    let news = "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check.";
+    let news = "- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show.";
     for needle in [
         ending,
         reader,
@@ -1565,6 +1572,7 @@ fn a_page_the_reader_couldnt_read_ends_one_way_and_news_is_read_whole() {
         "- From a page read:",
         "Prices are stored with \"seen <date>\"",
         "\"Several reads in one card\")",
+        "before saying it doesn't show or you couldn't check",
     ] {
         assert!(!research.contains(gone), "{gone}");
     }
@@ -1718,7 +1726,13 @@ fn a_comparison_takes_the_latest_from_the_maker_and_a_price_from_the_items_own_p
 /// is the shape it rules out). "I didn't find" is only for a value looked for. Which sites were tried is not the
 /// skill's to ask for: where a browser turn's words are posted, the replies guide already has them say where they
 /// looked, and in a page's hand-back they reach neither the person nor the build. A run's own web search, and the
-/// missing line for a review still without a page, stay.
+/// missing line for a review still without a page, stay. Then a comparison's first pass wrote reviews in its missing
+/// line with no reviewer's site opened, and its fill-in opened three reviewers' home pages: one read with no review of
+/// the model on it, one whose search a cookie notice covered and one a privacy notice covered; every review cell said
+/// "I didn't find" (local tests, Nov 22). Two reviewers are tried in the same pass before a review goes in the missing
+/// line, a home page with no review of the model is not a look (the site's own search box, a search that stays on its
+/// site, or its reviews section is), so a review is a value not found only once a reviewer's search results or reviews
+/// section was read, and a reviewer a notice covered is "not checked".
 #[test]
 fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_found() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1727,8 +1741,10 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
     let mut at = 0;
     for line in [
         "- A review no page you read links to: the AI's own web search finds it (\"<exact model> review\") when this run has it; else it comes from a reviewer's own site: its home page, its links and its own search box.",
-        "- With no search, open up to two reviewers' own sites that way and follow their links. Only once a reviewer's page was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
-        "- A review no reviewer's page could be read for (none could be tried, or each one stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
+        "- With no search, try up to two reviewers' own sites that way, in the same pass, before a review goes in the missing line.",
+        "A home page with no review of the model is not a look: search the site with its own box (a search that stays on its site needs no prompt) or open its reviews section, and open the model's review from there.",
+        "Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find, not a page to read: in Instafy's browser it goes in the missing line, never the unread line.",
+        "- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you) is \"not checked\" on the page and goes in neither line. Such reviews are named once in the reply, as not checked, with an offer to read a site the person names.",
     ] {
         let found = comparing[at..]
             .find(line)
@@ -1768,18 +1784,49 @@ fn reviews_are_looked_for_on_two_reviewers_own_sites_before_they_count_as_not_fo
             json!({ "browserTransport": transport }),
         );
         assert!(
-            prompt.contains("- With no search, open up to two reviewers' own sites that way"),
+            prompt.contains(
+                "- With no search, try up to two reviewers' own sites that way, in the same pass"
+            ),
             "{transport}"
         );
         assert!(
-            prompt.contains("Only once a reviewer's page was read is a review you have no address or link for a value you didn't find"),
+            prompt.contains("Only once a reviewer's search results or reviews section was read is a review you have no address or link for a value you didn't find"),
             "{transport}"
         );
         assert!(
-            prompt.contains("- A review no reviewer's page could be read for (none could be tried, or each one stopped you)"),
+            prompt.contains("- A review no reviewer's search results or reviews section could be read for (none could be tried, or each one was covered by a notice or stopped you)"),
             "{transport}"
         );
     }
+}
+
+/// A comparison's first pass left a product page's "Show all technical specs" closed, though its reading listed it, and
+/// put the weights in its missing line; a warranty's support articles said where the warranty is and that its terms
+/// differ by country, and each cell said "I didn't find warranty"; and a page put a sibling hotel's line, from that
+/// hotel's own site, under another hotel of the same district (local tests, Nov 22). A toggle the item's page names is
+/// opened in the same pass before a value is missing, what a page read says of a value fills its cell even in part, and
+/// a fact is an item's only from a page that names that item.
+#[test]
+fn a_comparison_opens_a_pages_toggle_keeps_part_of_a_value_and_no_siblings_fact() {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let comparing = flat(COMPARING_SKILL);
+    for needle in [
+        "- A value is often behind a tab, toggle or link of the item's own page (specs, a \"Show all specs\" toggle, warranty, support, FAQ): open the one for it, in the same pass, before you call the value not found.",
+        "- A fact is an item's only when its page names that item; a sibling's page (a hotel of the same group or district, a model of the same line) is not its source.",
+        "- What a page read says of a value, even in part, fills its cell in the page's words (\"in the device's settings; the terms differ by country\"), never \"I didn't find\".",
+    ] {
+        assert!(comparing.contains(needle), "{needle}");
+    }
+    // A value read in part comes before what a value nobody found says.
+    let part = comparing
+        .find("- What a page read says of a value, even in part")
+        .unwrap();
+    assert!(part < comparing.find("- It reads `Unknown`, with why.").unwrap());
+    assert!(
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len() <= TOPIC_SKILLS_MAX_BYTES,
+        "{} bytes",
+        COMPARING_SKILL.len() + GETTING_AROUND_SKILL.len()
+    );
 }
 
 /// A comparison's page cited a maker's home page as the source of "0 of 2 confirmed" reviews and sorted by a value no

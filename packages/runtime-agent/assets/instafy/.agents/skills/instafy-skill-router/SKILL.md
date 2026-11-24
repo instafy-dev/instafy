@@ -123,5 +123,5 @@ Use these mappings unless a project-specific skill overrides them.
 - If the user asks “use a browser” but they actually want a shareable link:
   - Ask one short clarification: “Do you want a shareable public preview link, or a live browser walkthrough here?”
 - For current information (news, prices, releases, status pages):
-  - Look it up as `instafy-web-research` says: the AI's own web search, then `instafy web read`.
+  - Look it up as `instafy-web-research` says.
   - Answer from memory only when no page can be read, and then say no live browsing was used.
