@@ -1264,9 +1264,12 @@ describe("what a stop leaves open", () => {
 
 describe("an address nobody gave", () => {
   const NOT_GIVEN = "no message, page read or search result gave this address, so it was not read";
+  const KEEP_ITS_LINK =
+    "Not reading it says nothing about the page: keep its link where the person, a file they attached, or a page or " +
+    "search result in this chat gave it, but never link, cite or card an address you put together yourself.";
   const readHome = (home: string) =>
-    `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. Never link, cite or card this address.`;
-  const NO_HOME = "Octo reads only addresses it was given. Other sources can still be read. Never link, cite or card this address.";
+    `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. ${KEEP_ITS_LINK}`;
+  const NO_HOME = `Octo reads only addresses it was given. Other sources can still be read. ${KEEP_ITS_LINK}`;
 
   /**
    * The folder the runtime gives a turn for the addresses it was given (INSTAFY_TURN_GIVEN_DIR), with its seed: the
@@ -1364,6 +1367,18 @@ describe("an address nobody gave", () => {
     const [home, product] = (await read(["http://shop.example.net/", asked], {}, inTurn(dir))).pages;
     expect(home!.status).toBe("read");
     expect(product).toMatchObject({ status: "read", fromCache: false });
+  });
+
+  it("leaves a refused address's link to the turn where the person, a file or a page in the chat gave it", async () => {
+    // Told never to link, cite or card a refused address, a turn dropped the link to a page the chat had read before
+    // its runtime started again. A refusal proves nothing about the page; only an address the turn made up stays out.
+    const dir = givenFolder();
+    for (const asked of ["http://shop.example.net/products/x-123", "http://search.example.org/find?q=air+fryer"]) {
+      const { tell } = await one(asked, {}, inTurn(dir));
+      expect(tell).not.toMatch(/Never link, cite or card this address/);
+      expect(tell).toContain("keep its link where the person, a file they attached, or a page or search result in this chat gave it");
+      expect(tell).toMatch(/never link, cite or card an address you put together yourself\.$/);
+    }
   });
 
   it("reads what the person's messages, a page read or a search result gave, and nothing beside it", async () => {

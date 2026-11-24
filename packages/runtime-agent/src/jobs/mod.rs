@@ -9143,6 +9143,8 @@ impl JobProcessor {
                         native_image_limit,
                     )
                     .await?;
+                // The links in the text files the person attached are theirs to give.
+                turn_files.give_what_the_attachments_name(job, &workspace_dir);
                 codex_run_options.input_images = input_images;
                 (
                     prompt,

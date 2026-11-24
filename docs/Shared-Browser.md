@@ -1980,11 +1980,11 @@ whatever its query or fragment. The run's approval directory keeps them as
 fingerprints (`given.json`, the first 32 hex digits of the SHA-256 of each
 site and path, and of each site given alone, at most 4,000, newest last):
 runtime-agent starts it with the addresses and sites the task and the history
-name and those the chat's earlier runs on this browser were given, the
-controller script adds each page the run reads and, past its root, its site,
-and runtime-agent carries them, in memory, into the chat's next runs and into
-no other chat's. A run without the record (one runtime-agent did not start)
-refuses nothing.
+name, what Octo's replies in the history carry (below) and those the chat's
+earlier runs on this browser were given, the controller script adds each page
+the run reads and, past its root, its site, and runtime-agent carries them, in
+memory, into the chat's next runs and into no other chat's. A run without the
+record (one runtime-agent did not start) refuses nothing.
 
 **A card gives the browser only what its turn was given.** Every other turn of
 Octo's keeps the same record for `instafy web read` (`INSTAFY_TURN_GIVEN_DIR`,
@@ -1992,9 +1992,22 @@ Octo's keeps the same record for `instafy web read` (`INSTAFY_TURN_GIVEN_DIR`,
 the pages its reader read (their own addresses, links and spelled-out
 addresses) and what its web searches found, and when the turn ends
 runtime-agent carries it, in memory, into the chat's next turns and browser
-runs. A team agent's request, its lead's plan or its agents' reports, gives it
-nothing, as the AI wrote it; a skill setup's first turn is given what its
-installed skills name, so its card opens the sign-in address a skill declares.
+runs on that runtime. That memory goes when the runtime starts again, so the
+turn's reply also carries what the record holds of the addresses and sites the
+reply names into the chat's history: an `agent/given-addresses` artifact of
+fingerprints (at most 256), which the controller keeps with the reply in its
+`metadata.artifacts`. The chat's next turns and browser runs start with what
+the replies in their history carry, on any runtime: a person who asked a
+restarted runtime to open the page a reply had linked got a card for the
+site's home page, and a reader that refused the page. An address a reply made
+up is in no record, so no reply carries it, and a reply's words give nothing.
+A team agent's request, its lead's plan or its agents' reports, gives the
+record nothing, as the AI wrote it; a skill setup's first turn is given what
+its installed skills name, so its card opens the sign-in address a skill
+declares; and the person's own turn is given what the text files they attached
+name (the first 256 KB of each `.txt` and `.md` its lease signed, and no
+other file of the workspace): a person who attached a list of pages and asked
+Octo to check each one had every page past a site's root refused.
 When the turn posts a `request_browser` card, each address of the card's
 task past a site's root that the record doesn't hold is replaced by that
 site's home page, so the card's browser run opens the home page and finds the

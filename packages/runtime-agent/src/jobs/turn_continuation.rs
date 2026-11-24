@@ -38,6 +38,8 @@ const STEP_RECORD_MAX_BYTES: usize = 2_000;
 const TIMED_COMMANDS_MAX: usize = 200;
 const COMMAND_TEXT_MAX_CHARS: usize = 160;
 const DEFAULT_WRAP_UP_SECONDS: u64 = 120;
+/// The most of each text file the person attached that is read for the addresses it names.
+const ATTACHMENT_READ_MAX_BYTES: u64 = 256 * 1024;
 /// The shortest turn a team's job gets, even once the team's time is up, and the shortest further
 /// turn the controller starts (its `team_clock::MIN_TEAM_TURN`).
 const MIN_TEAM_TURN: Duration = Duration::from_secs(180);
@@ -85,14 +87,11 @@ impl TurnFiles {
             || crate::personal_browser::payload_requests_personal_browser(&job.payload);
         if !in_a_browser {
             let chat = shared_browser_chat(job);
-            // A team agent's request is its lead's plan, or its agents' reports: the AI wrote it.
-            let the_persons_request = !is_multi_agent_worker_payload(&job.payload)
-                && !is_multi_agent_lead_continuation_payload(&job.payload);
             files.start_given(
                 &crate::shared_browser::given_addresses_for_a_turn(
                     &job.payload,
                     chat,
-                    the_persons_request,
+                    is_the_persons_request(&job.payload),
                 ),
                 chat,
             );
@@ -181,6 +180,44 @@ impl TurnFiles {
         }
     }
 
+    /// Gives the person's own turn what the text files they attached name (`.txt` and `.md`, the
+    /// first [`ATTACHMENT_READ_MAX_BYTES`] of each, as the pre-turn download left them in the
+    /// workspace): a person who attached a list of pages and asked Octo to check each one had
+    /// every page past a site's root refused, as no message named it. Only the attachments this
+    /// turn's lease signed are read, no other file of the workspace, and never a command's output.
+    /// A team agent's turn, whose request the AI wrote, is given none. Kept as a file of the
+    /// record's own, and for the chat when the turn ends.
+    pub(super) fn give_what_the_attachments_name(&self, job: &LeaseJob, workspace_dir: &Path) {
+        let Some(dir) = self
+            .given
+            .as_ref()
+            .filter(|_| is_the_persons_request(&job.payload))
+        else {
+            return;
+        };
+        let texts = super::chat_attachments::leased_text_attachments(
+            workspace_dir,
+            job.conversation_id.as_ref(),
+            &job.payload,
+            ATTACHMENT_READ_MAX_BYTES,
+        );
+        if texts.is_empty() {
+            return;
+        }
+        // One line apart, so no address runs from one file into the next.
+        let named = crate::shared_browser::given_addresses_named_in(&texts.join("\n"));
+        if named.is_empty() {
+            return;
+        }
+        if let Err(error) = crate::shared_browser::write_turn_given(dir, "attachments.json", &named)
+        {
+            warn!(
+                ?error,
+                "could not give the turn the addresses its attachments name"
+            );
+        }
+    }
+
     /// What the turn's record holds now: what its request and chat gave, the pages it read and
     /// what its searches found. None when the turn has no record, or one that takes any address
     /// (a search of the turn's listed none of its pages).
@@ -193,14 +230,16 @@ impl TurnFiles {
     }
 
     /// Keeps what the turn was given for its chat's next turns and browser runs on this runtime,
-    /// before the folder goes with the job.
-    fn keep_given_for_the_chat(&self) {
-        let (Some(dir), Some(chat)) = (self.given.as_ref(), self.chat) else {
-            return;
-        };
-        if let Some(addresses) = crate::shared_browser::read_turn_given(dir) {
-            crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(chat, addresses);
+    /// before the folder goes with the job, and returns it. None for a turn without a record.
+    fn keep_given_for_the_chat(&self) -> Option<Vec<String>> {
+        let addresses = crate::shared_browser::read_turn_given(self.given.as_ref()?)?;
+        if let Some(chat) = self.chat {
+            crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(
+                chat,
+                addresses.clone(),
+            );
         }
+        Some(addresses)
     }
 
     pub(super) fn continuable(&self) -> bool {
@@ -279,6 +318,12 @@ impl TurnFiles {
     pub(super) fn remove(&self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Whether the job's request is the person's own: a team agent's request is its lead's plan, or
+/// its agents' reports, which the AI wrote.
+fn is_the_persons_request(payload: &JsonValue) -> bool {
+    !is_multi_agent_worker_payload(payload) && !is_multi_agent_lead_continuation_payload(payload)
 }
 
 /// Whether the controller may start another turn for this job: a team's lane whose continuation
@@ -521,6 +566,23 @@ fn shorten_command(text: &str) -> String {
     out
 }
 
+/// Carries into the chat's history what the turn's record (`given`) holds of the addresses its
+/// reply names, as an artifact the controller keeps with the reply
+/// (`shared_browser::given_addresses_a_reply_carries`), so the chat's next turns start with them
+/// even on a runtime that started again. Only the runtime's own artifact of that kind is sent.
+fn carry_what_the_reply_was_given(execution: &mut JobExecution, given: &[String]) {
+    let kind = crate::shared_browser::REPLY_GIVEN_ARTIFACT_KIND;
+    execution
+        .artifacts
+        .retain(|artifact| artifact["kind"].as_str() != Some(kind));
+    execution
+        .artifacts
+        .extend(crate::shared_browser::given_addresses_a_reply_carries(
+            &execution.summary,
+            given,
+        ));
+}
+
 /// The run log and timings of a turn that ended in an error, from the events streamed so far.
 pub(super) fn failed_turn_artifacts(events: &[JsonValue]) -> Vec<JsonValue> {
     if events.is_empty() {
@@ -588,7 +650,7 @@ pub(super) fn attach_turn_records(
     let steps = files.step_timings();
     let note = files.continuation_note();
     let continuable = files.continuable();
-    files.keep_given_for_the_chat();
+    let given = files.keep_given_for_the_chat();
     files.remove();
     let add = |artifacts: &mut Vec<JsonValue>, ended_by: Option<&str>| {
         if !steps.is_empty() {
@@ -618,6 +680,9 @@ pub(super) fn attach_turn_records(
         Ok(mut execution) => {
             let ended_by = note.is_some().then_some("agent");
             add(&mut execution.artifacts, ended_by);
+            if let Some(given) = given.as_deref() {
+                carry_what_the_reply_was_given(&mut execution, given);
+            }
             Ok(execution)
         }
         Err(error) => {
@@ -1183,6 +1248,205 @@ mod tests {
             .as_deref(),
             Some("Open https://app.provider.example/ for me.")
         );
+        files.remove();
+    }
+
+    /// A turn reads a product page and links it in its reply, beside an address it made up. The
+    /// runtime then starts again (its chats' records in memory are gone), and the person asks it
+    /// to open the page in the browser. The reply carried what its turn was given into the chat's
+    /// history, so the next turn's record holds the page it linked: the card keeps the address
+    /// and the reader reads it. The address the reply made up was in no record: a card naming it
+    /// still names the site's home page. A reply's words alone give nothing, nor does such an
+    /// artifact on a row no agent's job wrote.
+    #[test]
+    fn a_page_a_reply_linked_stays_given_on_a_runtime_that_started_again() {
+        let product = "https://www.shop.example/products/x-123";
+        let made_up = "https://www.shop.example/products/x-999";
+        let job = |request: &str, history: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                // Each turn's chat holds nothing in this process: as after a restart.
+                "conversation_id": Uuid::new_v4(),
+                "payload": {
+                    "prompt_text": request,
+                    "conversation_history": history,
+                    "metadata": {},
+                },
+            }))
+            .expect("lease job")
+        };
+        let asked = "Find the X-123 air fryer on shop.example.";
+        let first = TurnFiles::for_job(&job(asked, json!([])));
+        // The turn's reader read the product page.
+        crate::shared_browser::write_turn_given(
+            &first.given_dir().expect("a building turn's record"),
+            "read-1.json",
+            &[given_key("shop.example/products/x-123")],
+        )
+        .unwrap();
+        let mut answered = execution(Vec::new());
+        // A reply links its pages as Markdown does.
+        answered.summary = format!(
+            "Here it is: [X-123 air fryer]({product}) (129 EUR). A bigger one may be at [X-999]({made_up})."
+        );
+        let reply = answered.summary.clone();
+        let done = attach_turn_records(Ok(answered), &first).unwrap();
+        let carried: Vec<&JsonValue> = done
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact["kind"] == crate::shared_browser::REPLY_GIVEN_ARTIFACT_KIND)
+            .collect();
+        assert_eq!(carried.len(), 1, "{:?}", done.artifacts);
+        let addresses = carried[0]["addresses"].as_array().unwrap();
+        assert!(addresses.contains(&json!(given_key("shop.example/products/x-123"))));
+        assert!(!addresses.contains(&json!(given_key("shop.example/products/x-999"))));
+
+        // The controller keeps the job's artifacts with its reply, and the history returns them.
+        let history = |metadata: JsonValue| {
+            json!([
+                { "role": "user", "content": asked },
+                { "role": "assistant", "content": reply, "metadata": metadata },
+            ])
+        };
+        let card = format!("Open {product} and show me the price.");
+        let second = TurnFiles::for_job(&job(
+            "Open it in the browser.",
+            history(
+                json!({ "source": "agent", "outcome": "succeeded", "artifacts": done.artifacts }),
+            ),
+        ));
+        let given = second.given_addresses().expect("the next turn's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(&card, &given),
+            None
+        );
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(
+                &format!("Open {made_up}."),
+                &given
+            )
+            .as_deref(),
+            Some("Open https://www.shop.example/.")
+        );
+        let seed = crate::shared_browser::read_turn_given(&second.given_dir().unwrap()).unwrap();
+        assert!(seed.contains(&given_key("shop.example/products/x-123")));
+        second.remove();
+
+        for metadata in [
+            json!({ "source": "agent", "outcome": "succeeded" }),
+            json!({ "artifacts": done.artifacts }),
+        ] {
+            let next =
+                TurnFiles::for_job(&job("Open it in the browser.", history(metadata.clone())));
+            let given = next.given_addresses().expect("the next turn's record");
+            assert!(
+                !given.contains(&given_key("shop.example/products/x-123")),
+                "{metadata}"
+            );
+            next.remove();
+        }
+    }
+
+    /// The person attaches a list of pages and asks Octo to check each one. Their links are
+    /// theirs to give: once the attachments are downloaded, the turn's record holds each address
+    /// the text files this lease signed name, so a card for one keeps it and the reader reads it.
+    /// Only the first part of a long file is read, an attachment this lease didn't sign is not
+    /// read, nor is a link planted in an attachment's place, and a team agent's turn is given none.
+    #[test]
+    fn a_persons_text_attachments_give_the_addresses_they_name() {
+        let chat = Uuid::new_v4();
+        let workspace = tempfile::tempdir().unwrap();
+        let folder = workspace
+            .path()
+            .join(".instafy/attachments")
+            .join(chat.to_string());
+        fs::create_dir_all(&folder).unwrap();
+        let name = |extension: &str| format!("{}.{extension}", Uuid::new_v4());
+        let (list, notes, unsigned, image) = (name("txt"), name("md"), name("txt"), name("png"));
+        fs::write(
+            folder.join(&list),
+            "Check each page:\nhttps://shop.example/products/a-1\nshop.example/products/b-2。\n",
+        )
+        .unwrap();
+        fs::write(
+            folder.join(&notes),
+            format!(
+                "See **https://docs.example/guide/setup**.\n{}\nhttps://shop.example/products/past-the-end\n",
+                "x".repeat(ATTACHMENT_READ_MAX_BYTES as usize)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            folder.join(&unsigned),
+            "https://shop.example/products/unsigned\n",
+        )
+        .unwrap();
+        fs::write(
+            folder.join(&image),
+            "https://shop.example/products/in-an-image\n",
+        )
+        .unwrap();
+        let mut signed = vec![list.clone(), notes.clone(), image.clone()];
+        #[cfg(unix)]
+        {
+            let outside = workspace.path().join("planted.txt");
+            fs::write(&outside, "https://shop.example/products/planted\n").unwrap();
+            let link = name("txt");
+            std::os::unix::fs::symlink(&outside, folder.join(&link)).unwrap();
+            signed.push(link);
+        }
+        let job = |metadata: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "conversation_id": chat,
+                "payload": {
+                    "prompt_text": "Check each page in the list I attached.",
+                    "attachment_downloads": signed.iter().map(|name| json!({
+                        "name": name,
+                        "url": format!("https://storage.example/{name}"),
+                        "sizeBytes": 64,
+                    })).collect::<Vec<_>>(),
+                    "metadata": metadata,
+                },
+            }))
+            .expect("lease job")
+        };
+        let card = "Open https://shop.example/products/a-1 and note its price.";
+        let persons = job(json!({}));
+        let files = TurnFiles::for_job(&persons);
+        let given = files.given_addresses().expect("the person's turn's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given).as_deref(),
+            Some("Open https://shop.example/ and note its price.")
+        );
+        files.give_what_the_attachments_name(&persons, workspace.path());
+        let given = files.given_addresses().expect("the person's turn's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given),
+            None
+        );
+        for page in [
+            "shop.example/products/a-1",
+            "shop.example/products/b-2",
+            "docs.example/guide/setup",
+        ] {
+            assert!(given.contains(&given_key(page)), "{page}");
+        }
+        for page in [
+            "shop.example/products/past-the-end",
+            "shop.example/products/unsigned",
+            "shop.example/products/in-an-image",
+            "shop.example/products/planted",
+        ] {
+            assert!(!given.contains(&given_key(page)), "{page}");
+        }
+        files.remove();
+
+        let lane = job(json!({ "multiAgentPlan": { "role": "worker" } }));
+        let files = TurnFiles::for_job(&lane);
+        files.give_what_the_attachments_name(&lane, workspace.path());
+        let given = files.given_addresses().expect("a team agent's record");
+        assert!(!given.contains(&given_key("shop.example/products/a-1")));
         files.remove();
     }
 
