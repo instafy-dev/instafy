@@ -741,6 +741,17 @@ box would have taken without asking.) The conditions:
 - the run is under routine browsing, which covers the run's page and Octo's
   own tabs alike. In Ask mode it asks like every other step.
 
+A site search that asks (in Ask mode, or a box whose form the page's script
+sends, such as a field with no name or a box with no form) asks as a search:
+the browser leads its prompt's label with `Search this site`, and Studio asks
+"Octo wants to search {site}." ([Chat Activity](Chat-Activity.md#browser-prompts)).
+One whose entries, once read, make it more than a search (a key-like value, an
+export or sign-out address) asks as the form it is, and a form that posts or
+goes to another site is no site search, whatever its words. As the browser
+sends a site search, it marks that action `"step": "search"` in its action
+log, and runtime-agent, which reads the log while the step runs, names the
+step a search from then on ("Searching {site}").
+
 While a site search runs, the step's guard lets no form post leave the tab, to
 the page's own site included: a page script that turns the search into a post
 is stopped before it leaves the browser, and the step fails saying so. The
