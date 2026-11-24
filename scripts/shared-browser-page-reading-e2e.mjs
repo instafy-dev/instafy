@@ -53,9 +53,12 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    refused in its own settings, which its settings button shows once when
 //    the page holds them hidden with a refusal: their refusal of the whole
 //    notice, never an accept, a purpose's box or button, the save there, or a
-//    dialog the press showed outside the notice. Settings with no refusal or
-//    with a sign-in field are never shown, so the page under them still
-//    clicks. Never one with no reject button anywhere, one in a frame, one on
+//    dialog the press showed outside the notice, after 192 of the page's own
+//    controls too. Settings with no refusal or with a sign-in field are never
+//    shown, so the page under them still clicks, and settings shown with no
+//    refusal pressed (it stayed hidden, or a sign-in form showed with them)
+//    are closed with their own "Close" or Escape, so it clicks there too.
+//    Never one with no reject button anywhere, one in a frame, one on
 //    a page with a sign-in field or a frame holding card fields, a notice that
 //    names neither cookies nor tracking, a dialog about a privacy policy that
 //    never speaks of cookies, about a tracker or a tool or service that
@@ -523,6 +526,9 @@ const CHECKOUT = `<p>Total 140 euros</p><form method="post" action="/pay">
 // gives each purpose an "Accept" and a "Reject" button of its own instead of
 // its box, `inSettings` adds to the settings (a sign-in form), and what
 // `extra` marks `data-with-settings` shows with them, as a late dialog would.
+// `purposes` names the purposes the settings list. `close` lets a person close
+// the settings as they are, with nothing chosen: "button" with an icon button
+// named "Close" at their top, "escape" with the Escape key.
 // The page records the answer, how many purposes were on then, how often its
 // settings were shown and any other press. `words` and `label` are the
 // banner's: a notice that names neither cookies nor tracking is no cookie
@@ -537,6 +543,8 @@ const TWO_LAYER_NOTICE = ({
   refusal = true,
   pairs = false,
   inSettings = "",
+  purposes = SETTINGS_PURPOSES,
+  close = "",
 } = {}) => `<h1>Magazine</h1><p><a href="/reading/visit">Reviews</a> · <a href="/reading/visit">Gear</a></p>${extra}
 <div id="consent-sdk">
 <div role="region" aria-label="${label}" style="position:fixed;left:0;right:0;bottom:0;padding:16px;background:#fff;z-index:10"><div role="dialog" aria-label="Privacy">
@@ -545,9 +553,9 @@ const TWO_LAYER_NOTICE = ({
 </div></div>
 <div id="preference-center" style="display:none;position:fixed;left:40px;right:40px;top:20px;height:440px;background:#fff;z-index:20">
 <div role="dialog" aria-modal="true" aria-label="Privacy Preference Center" style="display:flex;flex-direction:column;height:100%"><div style="flex:1;overflow:auto;padding:16px">
-<h2>Privacy Preference Center</h2><p>When you visit any website, it may store or retrieve information on your browser, mostly in the form of cookies.</p>${inSettings}
+${close === "button" ? `<button type="button" id="close-settings" aria-label="Close" style="float:right;width:24px;height:24px"></button>` : ""}<h2>Privacy Preference Center</h2><p>When you visit any website, it may store or retrieve information on your browser, mostly in the form of cookies.</p>${inSettings}
 <button type="button" id="allow-all">Allow All</button><h3>Manage Consent Preferences</h3>
-${SETTINGS_PURPOSES.map((name, index) => `<div><h4 id="purpose-${index}">${name}</h4><p>${"Partners can use this purpose to keep and read information on your device, measure what was shown and learn how the service is used, across sessions and devices. ".repeat(4)}</p>${pairs
+${purposes.map((name, index) => `<div><h4 id="purpose-${index}">${name}</h4><p>${"Partners can use this purpose to keep and read information on your device, measure what was shown and learn how the service is used, across sessions and devices. ".repeat(4)}</p>${pairs
     ? `<button type="button" class="purpose-button">Accept</button> <button type="button" class="purpose-button">Reject</button>`
     : `<input type="checkbox" class="purpose" aria-labelledby="purpose-${index}">`}</div>`).join("\n")}
 </div><div style="padding:16px;border-top:1px solid #94a3b8">${refusal ? `<button type="button" id="reject-all"${refusal === "hidden" ? " hidden" : ""}>Reject All</button> ` : ""}<button type="button" id="confirm">Confirm My Choices</button></div>
@@ -568,6 +576,10 @@ document.getElementById("allow-all").onclick = () => answer("accepted");
 document.getElementById("confirm").onclick = () => answer("saved");
 const reject = document.getElementById("reject-all");
 if (reject) reject.onclick = () => answer("rejected");
+const closeSettings = () => { document.getElementById("preference-center").style.display = "none"; };
+const closeButton = document.getElementById("close-settings");
+if (closeButton) closeButton.onclick = closeSettings;
+${close === "escape" ? `document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeSettings(); });` : ""}
 </script>`;
 // A transport operator's privacy settings in a shadow root, as a consent
 // manager draws them: a line that names its tracking technologies and never
@@ -602,6 +614,16 @@ const UNDER_SETTINGS = `<p style="margin-top:120px"><button type="button" onclic
 const POLICY_WITH_SETTINGS = `<div data-with-settings hidden><div role="dialog" aria-modal="true" aria-label="Privacy policy update" style="position:fixed;left:20px;right:20px;top:480px;padding:16px;background:#fff;z-index:30">
 <p>Please accept the new policy to keep your account. If you decline, your account will be closed.</p>
 <button type="button" onclick="window.policyAnswer = 'declined'">Decline</button> <button type="button" onclick="window.policyAnswer = 'accepted'">Accept</button></div></div>`;
+// A sign-in form the page shows with a notice's settings, outside the notice.
+const SIGN_IN_WITH_SETTINGS = `<div data-with-settings hidden>${SIGN_IN_FORM}</div>`;
+// A news page's headlines, as many controls as a page holds before a consent
+// manager's notice at its end: with them, the notice's banner and the start
+// of its settings fill the 200 controls a reading lists, and their purposes
+// push its "Reject All" past them.
+const HEADLINES = (count) => `<ul>${Array.from({ length: count }, (_, index) =>
+  `<li><a href="/reading/visit">Headline ${index + 1}</a></li>`).join("")}</ul>`;
+const MANY_PURPOSES = [...SETTINGS_PURPOSES, "Use precise geolocation data", "Actively scan device characteristics for identification",
+  "Ensure security, prevent and detect fraud", "Deliver and present advertising and content", "Save and communicate privacy choices"];
 // A parcel's delivery dialog whose "tracking" is its tracking number: its
 // "Accept" and "Decline" are the person's. Named "Delivery", it is in no
 // notice; named after privacy (`named`), its buttons are judged as a
@@ -1445,7 +1467,17 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/two-layer-notice": page("Magazine", TWO_LAYER_NOTICE()),
       "site.test /reading/two-layer-no-refusal": page("Magazine", TWO_LAYER_NOTICE({ refusal: false, extra: UNDER_SETTINGS })),
       "site.test /reading/two-layer-pairs": page("Magazine", TWO_LAYER_NOTICE({ pairs: true })),
-      "site.test /reading/two-layer-refusal-hidden": page("Magazine", TWO_LAYER_NOTICE({ refusal: "hidden" })),
+      "site.test /reading/two-layer-refusal-hidden": page("Magazine", TWO_LAYER_NOTICE({ refusal: "hidden", extra: UNDER_SETTINGS, close: "escape" })),
+      // 189 headlines and the page's own button before a two-layer notice
+      // whose settings list 12 purposes' boxes before their "Reject All".
+      "site.test /reading/two-layer-crowded": page("Magazine", TWO_LAYER_NOTICE({
+        extra: `${UNDER_SETTINGS}${HEADLINES(189)}`,
+        purposes: MANY_PURPOSES,
+      })),
+      "site.test /reading/two-layer-shows-sign-in": page("Magazine", TWO_LAYER_NOTICE({
+        extra: `${UNDER_SETTINGS}${SIGN_IN_WITH_SETTINGS}`,
+        close: "button",
+      })),
       "site.test /reading/two-layer-settings-sign-in": page("Magazine", TWO_LAYER_NOTICE({
         extra: UNDER_SETTINGS,
         inSettings: `<p>Sign in to keep your choices on every device.</p>${SIGN_IN_FORM}`,
@@ -2028,11 +2060,44 @@ export async function runSharedBrowserPageReadingFixture() {
       assert.deepEqual(await noticeState(), { answer: null, shown: 0, on: 0, pressed: null }, what);
       assert.equal(clicked.activity.declined, undefined, what);
     }
+    // A page with 192 controls of its own before its notice, whose settings'
+    // 12 purposes put their "Reject All" past the 200 controls a reading of
+    // the page lists: the settings are read in the notice alone, and the
+    // notice is refused there.
+    const settingsOpen = () => runPage.evaluate(() => getComputedStyle(document.getElementById("preference-center")).display !== "none");
+    const pageButtonClicks = async (shown, what) => {
+      await ok("POST", "/v1/click", { index: control(shown, "Show prices").index, snapshotId: shown.snapshotId });
+      assert.equal(await runPage.evaluate(() => window.pageButton ?? 0), 1, `${what}: a button of the page's own did not click`);
+    };
+    actionsBeforeSettings = fs.readFileSync(actionsPath, "utf8").length;
+    reading = await read("/reading/two-layer-crowded");
+    assert.deepEqual(await noticeState(), { answer: "rejected", shown: 1, on: 0, pressed: null }, "a notice after 192 of the page's controls was not refused in its own settings");
+    assert.equal(reading.activity.declined, "cookies");
+    assert.deepEqual(settingsActions(actionsBeforeSettings), ["Open cookie settings", "Decline cookies"]);
+    await pageButtonClicks(reading, "after a crowded page's notice was refused");
+    // Settings the browser showed and pressed no refusal in are closed as a
+    // person closes them, with nothing chosen: with their own "Close", or
+    // with Escape when they have none. A button of the page's own under them
+    // still clicks. Settings that showed a sign-in form outside the notice
+    // have nothing else pressed in them.
+    actionsBeforeSettings = fs.readFileSync(actionsPath, "utf8").length;
+    reading = await read("/reading/two-layer-shows-sign-in");
+    assert.deepEqual(await noticeState(), { answer: null, shown: 1, on: 0, pressed: null }, "settings that showed a sign-in form were pressed in");
+    assert.equal(await settingsOpen(), false, "settings that showed a sign-in form were left open over the page");
+    assert.deepEqual(settingsActions(actionsBeforeSettings), ["Open cookie settings", "Close cookie settings"]);
+    assert.equal(reading.activity.declined, undefined);
+    assert.ok(labels(reading).includes("Your Privacy Choices"));
+    await pageButtonClicks(reading, "under settings that showed a sign-in form");
+    actionsBeforeSettings = fs.readFileSync(actionsPath, "utf8").length;
     reading = await read("/reading/two-layer-refusal-hidden");
     assert.deepEqual(await noticeState(), { answer: null, shown: 1, on: 0, pressed: null }, "settings whose refusal stayed hidden were pressed in");
+    assert.equal(await settingsOpen(), false, "settings whose refusal stayed hidden were left open over the page");
+    assert.deepEqual(settingsActions(actionsBeforeSettings), ["Open cookie settings"]);
+    assert.match(fs.readFileSync(actionsPath, "utf8").slice(actionsBeforeSettings), /"type":"type","label":"Close cookie settings"/u);
     assert.equal(reading.activity.declined, undefined);
     reading = await ok("GET", "/v1/snapshot");
     assert.deepEqual(await noticeState(), { answer: null, shown: 1, on: 0, pressed: null }, "a second look pressed the settings button again");
+    await pageButtonClicks(reading, "under settings whose refusal stayed hidden");
     reading = await read("/reading/tracking-sign-in");
     assert.equal(await consentAnswer(), null, "a tracking notice on a sign-in page was answered");
     assert.ok(labels(reading).includes("Ablehnen"));
@@ -3363,7 +3428,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "a long page's text says where it is cut and how far to scroll, and scrolling reads all of it within the reading's cap, past a skip link and a pinned header, on a plain-text page and in a long paragraph; a view out of reach says so; past 200 controls those scrolled past are left out and counted, past 600 matches too, and a closed list's options never crowd out a form",
         "password, card and code fields in a frame or a shadow root carry no value into the reading, a frame's fields are never listed, a key in a shadow root's read-only field or in a control's name the list leaves out still makes a secret screen, and a code in boxes of its own is masked",
         "a section marked open is no control, and a click whose middle lands on a form's button or a frame inside the control is refused, sending and asking nothing",
-        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, or of tracking technologies and never cookies, never its accept, and the step says so once the banner is gone; a banner whose own buttons hold no refusal is refused in its own settings when the page holds them hidden with a refusal, shown once by its settings button, by their refusal of the whole notice, with no accept, purpose's box or button, save or dialog the press showed outside the notice pressed, while settings with no refusal or with a sign-in field are never shown, so the page under them still clicks; never a banner on a page with a sign-in field or a frame holding card fields, one in a frame, a notice that names neither cookies nor tracking, a dialog about a privacy policy that never speaks of cookies, about a tracker or a tool or service that tracks, or a parcel's dialog whose tracking is its number, in a notice or not; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
+        "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, or of tracking technologies and never cookies, never its accept, and the step says so once the banner is gone; a banner whose own buttons hold no refusal is refused in its own settings when the page holds them hidden with a refusal, shown once by its settings button, by their refusal of the whole notice, with no accept, purpose's box or button, save or dialog the press showed outside the notice pressed, after 192 of the page's own controls too, while settings with no refusal or with a sign-in field are never shown, so the page under them still clicks, and settings shown with no refusal pressed are closed with their own Close or Escape, so it clicks there too; never a banner on a page with a sign-in field or a frame holding card fields, one in a frame, a notice that names neither cookies nor tracking, a dialog about a privacy policy that never speaks of cookies, about a tracker or a tool or service that tracks, or a parcel's dialog whose tracking is its number, in a notice or not; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
         "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field whose list opened and stayed empty says so after the whole 3 s, with the page's requests that failed meanwhile by site and reason, a socket that never opened too (never a picture, nor a request the page dropped itself), while the same field whose stops came names them as before, and a list that shows rows the text shares no word with, that the field doesn't name or that are a calendar's days never reads as empty; a step whose snapshotId the browser never gave, cut short or made up, types, clicks, sends and asks nothing; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",

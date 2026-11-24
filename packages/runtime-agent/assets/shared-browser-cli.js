@@ -4045,9 +4045,15 @@ function leftOutFacts(entry) {
 // `accepts` collects them, for the browser's own decline of the notice
 // (declineCookieBanner), which looks for its refusal beside them. `left`
 // (leftOutRecord) takes what each control left out is and why, for the
-// reading's split of that count.
-async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null, left = null) {
-  const matches = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
+// reading's split of that count. `within`, a handle on a part of the page,
+// reads that part's controls alone, with no rows of a field's list: the
+// browser's own decline reads a notice's settings so (declineCookieBanner),
+// where the page's controls before the notice could take all of the list's
+// room. Its entries' indices are its own, never a snapshot's.
+async function collectInteractiveElements(page, hiddenNames = null, leftNames = null, accepts = null, left = null, within = null) {
+  const matches = within
+    ? await (async () => within.$$(INTERACTIVE_SELECTOR))().catch(() => [])
+    : await page.locator(INTERACTIVE_SELECTOR).elementHandles();
   const judged = matches.slice(0, MAX_JUDGED_CONTROLS);
   if (leftNames) {
     for (let ordinal = judged.length; ordinal < matches.length; ordinal += 1) leftNames.push("");
@@ -4056,7 +4062,7 @@ async function collectInteractiveElements(page, hiddenNames = null, leftNames = 
   // The rows of the list the focused field opened that are no controls of
   // their own (a planner's stops drawn as plain rows) come after the page's
   // controls: a type step names them, and a click takes them.
-  const handles = [...judged, ...(await fieldRowsOf(page))];
+  const handles = [...judged, ...(within ? [] : await fieldRowsOf(page))];
   const described = await page
     .evaluate(DESCRIBE_ALL_IN_PAGE, { elements: handles, sources: PAGE_POLICY_SOURCES, limit: MAX_INTERACTIVE_ELEMENTS })
     .catch(() => null);
@@ -4737,6 +4743,34 @@ function noticeSettingsInPage(element, request) {
   return level === null ? places : null;
 }
 
+// Runs inside the page through Playwright, so it must not use anything from
+// this file's scope. Which of `request.elements` sit outside the banner of a
+// notice's settings button (`element`): the nearest container around it that
+// holds one of `request.others` (the notice's accepts), as
+// noticeSettingsInPage finds it. Under the notice's container, those are its
+// settings' own. None when the button has no such banner.
+function outsideNoticeBannerInPage(element, request) {
+  const doc = element.ownerDocument;
+  const roots = [doc.body, doc.documentElement];
+  const up = (node) => node.assignedSlot || node.parentElement || (node.parentNode && node.parentNode.host) || null;
+  const holds = (container, node) => {
+    for (let current = node, depth = 0; current && depth < 512; current = up(current), depth += 1) {
+      if (current === container) return true;
+    }
+    return false;
+  };
+  const others = Array.isArray(request && request.others) ? request.others : [];
+  const elements = Array.isArray(request && request.elements) ? request.elements : [];
+  let banner = null;
+  for (let node = up(element), depth = 0; node && node.nodeType === 1 && !roots.includes(node) && depth < 16; node = up(node), depth += 1) {
+    if (others.some((other) => other && holds(node, other))) {
+      banner = node;
+      break;
+    }
+  }
+  return elements.map((other) => Boolean(banner && other && !holds(banner, other)));
+}
+
 // Words that name a field whose value is a payment detail, a password or a
 // code, in a frame element's own title, name, label or id: a payment
 // provider's card fields sit in such a frame (sensitiveFrameInPage).
@@ -4933,6 +4967,27 @@ async function pressOnNotice(page, entry, pageUrl, { once = false, label = "Decl
       .catch(() => true);
     if (before === true) return null;
   }
+  const box = entry.description.box;
+  return await guardedNoticePress(
+    page,
+    async () => ({
+      type: "click",
+      label,
+      url: pageUrl,
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+      ...(await viewport(page)),
+    }),
+    () => entry.locator.click({ timeout: DECLINE_CLICK_TIMEOUT_MS }),
+    after,
+  );
+}
+
+// The browser's own press on a notice (`press`), shown in the action feed as
+// `action` says, under the step's guard, which lets no form post leave the
+// tab. `after` runs once the page settled, under the guard. False when the
+// press failed, else true.
+async function guardedNoticePress(page, action, press, after = async () => {}) {
   // A reading step's own guard holds the press; a look at the page has
   // none, so one is set up for it.
   const own = runningStepGuard === null;
@@ -4941,18 +4996,8 @@ async function pressOnNotice(page, entry, pageUrl, { once = false, label = "Decl
     approvalProtocol.authority();
     assertStepOnTime();
     guard.limitFormPosts([]);
-    const box = entry.description.box;
-    emitAction({
-      type: "click",
-      label,
-      url: pageUrl,
-      x: box.x + box.width / 2,
-      y: box.y + box.height / 2,
-      ...(await viewport(page)),
-    });
-    const pressed = await entry.locator
-      .click({ timeout: DECLINE_CLICK_TIMEOUT_MS })
-      .then(() => true, () => false);
+    emitAction(await action());
+    const pressed = await (async () => press())().then(() => true, () => false);
     if (!pressed) return false;
     await settleAfterAction(page);
     if (own) guard.assertNoneBlocked();
@@ -4961,6 +5006,54 @@ async function pressOnNotice(page, entry, pageUrl, { once = false, label = "Decl
   } finally {
     if (own) await guard.release();
   }
+}
+
+// Closes a notice's settings the browser showed and pressed no refusal in
+// (declineCookieBanner), as a person closes them with nothing chosen, so they
+// never stay open over the page: open, they would cover every control the
+// page has under them, as no first layer of the notice did. `controls` are
+// those shown in the notice's container (`within`, collectInteractiveElements);
+// the settings' own are those outside the banner around its settings button
+// (`button`), beside its accepts (`accepts`, outsideNoticeBannerInPage). They
+// are closed with the first of their own dismissals ("Close", "×": the action
+// policy's privacy-preserving dismissal, which presses nothing else), and
+// when they have none, or it leaves them up, with Escape on one of their
+// controls, as a person would close a dialog. Never an accept, a refusal, a
+// save or anything else in them. Settings that show nothing of their own
+// (a press that showed nothing) are left as they are.
+async function closeNoticeSettings(page, button, accepts, controls, pageUrl) {
+  if (!controls.length) return;
+  const outside = await button.locator
+    .evaluate(outsideNoticeBannerInPage, {
+      kind: "notice-settings-controls",
+      others: accepts,
+      elements: controls.map(({ locator }) => locator),
+    })
+    .catch(() => null);
+  if (!Array.isArray(outside) || outside.length !== controls.length) return;
+  const settings = controls.filter((_, ordinal) => outside[ordinal] === true);
+  if (!settings.length) return;
+  const dismissal = settings.find(({ description }) => {
+    const step = classifyStep("click", description, { pageUrl });
+    return step.verdict === "allow" && step.category === "dismiss" && step.consentRejection !== true &&
+      pressesNothingElse(description, pageUrl);
+  });
+  if (dismissal) {
+    const closed = await pressOnNotice(page, dismissal, pageUrl, { label: "Close cookie settings" });
+    if (closed === true) {
+      const gone = await dismissal.locator
+        .evaluate(controlGoneInPage, { kind: "control-gone" })
+        .catch(() => false);
+      if (gone === true) return;
+    }
+  }
+  if (addressWithoutFragment(page.url()) !== addressWithoutFragment(pageUrl)) return;
+  const [first] = settings;
+  await guardedNoticePress(
+    page,
+    async () => ({ type: "type", label: "Close cookie settings", url: pageUrl }),
+    () => first.locator.press("Escape", { timeout: DECLINE_CLICK_TIMEOUT_MS }),
+  );
 }
 
 // Presses the first of a notice's refusals that sits in its banner beside one
@@ -4997,17 +5090,22 @@ async function refuseNotice(page, refusals, others, pageUrl, request = {}) {
 // button beside its accept (isNoticeSettingsButton) is pressed once on the
 // page, only to show them, then a refusal they show ("Reject all", "Only
 // necessary"), the notice's own before a purpose's (noticeRefusalFirst),
-// beside an accept or that button, in that notice. Never an accept, a save, a
-// switch or anything else on it, never a link or a form's button, never one
-// turned off or covered, and never in a frame: a reading lists the page's own
-// controls only. The caller has ruled out a page that may show a secret or
-// holds a sign-in or payment field, settings that show such a field are left
-// as they are, and a page whose frame holds a payment, password or code field
-// (sensitiveFrameInPage) is left alone too. It shares nothing and switches
-// nothing on, so it asks nobody in any mode, as Octo's own press of a refusal
-// never did, and no form may leave the tab while it runs. The step says the
-// banner was declined only once its refusal is gone. True when it pressed
-// something, so the page is read again; a banner it could not press stays up.
+// beside an accept or that button, in that notice: read in the notice's
+// container alone, so no number of the page's own controls before it leaves
+// that refusal out. Settings it pressed no refusal in (none shown, or they
+// showed a sign-in, password, code or payment field) are closed again with
+// their own "Close" or Escape (closeNoticeSettings), never with a choice, so
+// they never stay open over the page. Never an accept, a save, a switch or
+// anything else on it, never a link or a form's button, never one turned off
+// or covered, and never in a frame: a reading lists the page's own controls
+// only. The caller has ruled out a page that may show a secret or holds a
+// sign-in or payment field, and a page whose frame holds a payment, password
+// or code field (sensitiveFrameInPage) is left alone too. It shares nothing
+// and switches nothing on, so it asks nobody in any mode, as Octo's own press
+// of a refusal never did, and no form may leave the tab while it runs. The
+// step says the banner was declined only once its refusal is gone. True when
+// it pressed something, so the page is read again; a banner it could not
+// press stays up.
 // `leftOut`: the accepts the reading leaves out of its list
 // (collectInteractiveElements). Notices that stayed up in local tests (Nov 22)
 // stopped at no accept among the controls a reading lists (one drawn in a
@@ -5036,14 +5134,25 @@ async function declineCookieBanner(page, interactive, leftOut = []) {
       // A press that took the tab to another page leaves it there, to be read
       // as it is.
       if (addressWithoutFragment(page.url()) !== addressWithoutFragment(pageUrl)) return true;
+      // The settings are read in the notice's container alone: a page that
+      // holds nearly as many controls as a reading lists before its notice
+      // leaves the settings' refusal, past their purposes, out of a reading
+      // of the whole page.
       const accepts = [];
-      const shownControls = await collectInteractiveElements(page, null, null, accepts);
-      if (holdsPersonalFields(shownControls) || !(await framesHoldNoSecretField(page))) return true;
-      const inSettings = noticeControls(shownControls, accepts, pageUrl);
-      await refuseNotice(page, noticeRefusalFirst(inSettings.refusals), [...inSettings.accepts, entry.locator], pageUrl, {
-        settings: true,
-        root,
-      });
+      const settingsControls = await collectInteractiveElements(page, null, null, accepts, null, root);
+      const shownControls = await collectInteractiveElements(page);
+      let refused = false;
+      if (!holdsPersonalFields(shownControls) && !holdsPersonalFields(settingsControls) &&
+        (await framesHoldNoSecretField(page))) {
+        const inSettings = noticeControls(settingsControls, accepts, pageUrl);
+        refused = await refuseNotice(page, noticeRefusalFirst(inSettings.refusals), [...inSettings.accepts, entry.locator], pageUrl, {
+          settings: true,
+          root,
+        });
+      }
+      // Settings with nothing pressed in them are closed again, so they
+      // leave the page as their notice's first layer did.
+      if (!refused) await closeNoticeSettings(page, entry, notice.accepts, settingsControls, pageUrl);
       return true;
     } finally {
       await (async () => root.dispose())().catch(() => {});

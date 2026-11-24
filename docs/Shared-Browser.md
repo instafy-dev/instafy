@@ -511,13 +511,19 @@ Two steps never ask, in Ask too:
   shows "Open cookie settings"), and then a refusal they show ("Reject all",
   "Only necessary") beside an accept or that button, in that container,
   however long: the notice's own refusal before a purpose's, whose name
-  repeats beside every purpose. A dialog the press shows outside that
-  container is never pressed. Settings a press would only draw, or that hold
-  no refusal or such a field, are never shown, so they never cover the page;
-  settings that show a sign-in, password, code or payment field are left with
-  nothing pressed in them. Never the accept, a save, a switch or anything else
-  on the banner or in its settings, never a link, a form's button, a control
-  turned off or one something covers,
+  repeats beside every purpose. The settings are read in that container
+  alone, so a page with nearly as many controls of its own before the notice
+  as a reading lists never leaves their refusal out. A dialog the press shows
+  outside that container is never pressed. Settings a press would only draw,
+  or that hold no refusal or such a field, are never shown, so they never
+  cover the page. Settings the browser showed and pressed no refusal in (none
+  shown, or they showed a sign-in, password, code or payment field) are closed
+  again, as a person closes them with nothing chosen: with their own "Close"
+  or "×" outside the banner, or else with Escape (the action feed shows "Close
+  cookie settings"), so the page under them clicks as it did under the
+  banner. Never the accept, a save, a switch or anything else on the banner
+  or in its settings, never a link, a form's button, a control turned off or
+  one something covers,
   never in a frame (a reading lists the page's own controls only), never on a
   page that may show a secret or holds a sign-in, password, code or payment
   field among the controls a reading lists, and never on a page with a frame
