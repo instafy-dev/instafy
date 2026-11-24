@@ -1607,7 +1607,20 @@ ran their whole turn again (a local test, Nov 20). After an attempt that
 answered at once, it keeps them and is told to find the page first. The line
 under the turn names the same rules. A turn that changed files keeps
 its answer, which says what it made. A card that retry writes is checked the
-same way and not tried again. An address only Octo read,
+same way and not tried again. An answer that links a page the turn's own
+reader was refused for what the site gave the reader alone (robots.txt, HTTP
+403 or 429) and posts no card runs once more the same way, asked only for the
+card, while its words stay as a true account: a return policy's turn with
+search on ended in the policy page's link and no card, so nothing opened it.
+Which pages stopped the reader is what the reader reported, from the whole of
+its output (a long read of several pages kept only its end in the turn's
+events), never what a page wrote. Asked only for the card, that retry leaves
+the first answer as the turn's, with no card, when it fails or brings none. A
+page that stopped the reader at a sign-in, a paywall, a bot check, a secret,
+a private address, a link-only site or a download gets only its link, and a
+turn nobody watches (a scheduled automation's or a space review's), which is
+offered no card, isn't run again for one. Neither retry is billed, as no retry
+is. An address only Octo read,
 a search result's among them, still leaves the card a button until the person
 opens it ("How Studio opens it"). A card the routing step posts carries the
 person's own words, whatever they name.
@@ -2152,11 +2165,18 @@ while the person is away. What the person reads tells the two apart, with no cod
 prompt, gone by then, reads "Your OK didn't come in time, so I didn't do that
 step. Send a message when you're ready and I'll ask again.", never that Octo is
 still waiting, a denial reads "You said no, so that step didn't
-happen, and nothing from it was sent. Tell me what to try instead.", and the
-step tells the turn "The person said no, so this step didn't happen. Don't try
-it another way. Instafy tells them so and asks what to try instead: your reply
-says neither." and each later call of the run "The person said no to an
-earlier step, so the browser is done for this turn. End this turn now.",
+happen, and nothing from it was sent. Tell me what to try instead." where the
+runtime says it, and the step tells a turn whose findings go back to the
+building turn "The person said no, so this step didn't happen. Don't try it
+another way. Instafy tells them so and asks what to try instead: your reply
+says neither.", any other turn "The person said no, so this step didn't
+happen. Don't try it another way. Say once in your reply that nothing from it
+was sent, and ask what they'd like to try instead." (the runtime tells the
+browser which, `INSTAFY_SHARED_BROWSER_HANDS_BACK`), and each later call of
+the run "The person said no to an earlier step, so the browser is done for
+this turn. End this turn now.", which asks any turn but the first kind again
+to say once that nothing from it was sent and what to try instead (steps run
+from code may print only a later call's answer),
 `approval_stale` (the page changed after the yes) reads "The page changed
 after you said yes, so I didn't do that step. Send a message and I'll ask again.", and every other terminal code reads one plain
 message. Each speaks
@@ -2168,7 +2188,12 @@ message, under a controller whose every lease says it hands such a turn back
 line it wrote, and the pages its steps opened, by address, when it wrote no
 finding line; a finding that says a page stopped it at the page of that step
 is left out, unless the browser told a step that very stop there, since the
-step never reached its page. A question's turn says the line under its words.
+step never reached its page. A question's turn says the line under its words,
+except after a no: its own words say it once, as the step asked, and the
+runtime adds nothing under them (it did, and a denied order ended twice, in the
+turn's words and then Instafy's); the step's row and the turn's done line
+still say "you said no to …". A turn that wrote no words of its own reads the
+line alone.
 A turn whose findings go back to its build hands them back as any finished
 turn does, without the line, and one that read no page hands its build the
 message; that build makes the change from what was read and writes "not checked"
@@ -3820,8 +3845,14 @@ unless the policy is `"covered"`.
   person, a step whose approval ended the turn, or a step the browser refused
   as the person's own. Its steps show in the turn's line and Details as the
   turn's own do, its words join the turn's (so a first line that said a page
-  stopped the turn stays) and its findings join the turn's, each pass's lines
-  its own: a second pass that wrote none adds the pages its steps opened, by
+  stopped the turn stays), starting with one sentence on what it read now,
+  which it is asked for, or, when it wrote none but read pages, the runtime's
+  "Then read <N> more pages on <site>." from its finding lines (asked only for
+  its lines, a comparison's second pass read the three product pages its first
+  pass couldn't, and the chat said only that they couldn't be read), and its
+  findings join the turn's, each pass's lines its own, but for a first pass's
+  line that a page stopped it where the second read that page, which goes: a
+  second pass that wrote none adds the pages its steps opened, by
   address, and a turn whose answer holds no finding line gets the wrap-up pass
   below first, which also asks for its unread line, and the second pass then
   reads the pages that line names. A page its finding lines list already, read or

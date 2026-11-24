@@ -301,9 +301,11 @@ come from `turnActivity.ts`, a pure module that reads the turn's steps:
   begins: words written for a browser card it refused, or a list of files that were never
   written. A turn whose browser step
   ended its run on the approval lane (a step the person said no to or left, or a page waiting for
-  their input) shows no draft: the runtime replies with its own sentence ("You said no, so that
-  step didn't happen, and nothing from it was sent. Tell me what to try instead."), never the
-  model's words before it. The file
+  their input) shows no draft until its reply lands: the runtime settles that reply, with its
+  own sentence for a prompt left to run out ("Your OK didn't come in time, so I didn't do that
+  step. Send a message when you're ready and I'll ask again."), or, after a no in a turn with
+  no build after it, the turn's own words alone, which say once that nothing was sent and ask
+  what to try instead, as the step asked them to. The file
   changes stay under the reply and its cards. Run traces keep their full view.
 - Octo is not asked for replies the person could send next, and none is shown or sent for them:
   Enter in an empty composer sends nothing, and the composer's own completion, when the person

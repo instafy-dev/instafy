@@ -23,6 +23,15 @@
 //! first attempt that looked nothing up has nothing to write the card from: its retry keeps the
 //! shell, told to find the page first.
 //!
+//! A page the reader couldn't read ends with its waiting card in every search state: a return
+//! policy's turn read the shop's returns page, was refused by its robots.txt, and ended in the
+//! words and the page's link with no card, so no retry ran and nothing opened the page (a local
+//! test, Nov 23). Such an answer now runs once more the same way, asked only for the card, while
+//! its words stay: they are a true account. A turn with a card beside the link is untouched.
+//! That retry is asked only for the card: when it fails, or brings no card, the first answer
+//! stands as the turn's, with no card, as it did with no retry. And a page refused early in a
+//! long read of several pages, whose start the turn's events no longer hold, gets its card too.
+//!
 //! A card names only pages its turn was given. The stand-in turns find their pages as a turn's
 //! reader and search would, and record them so in the turn's record of the addresses it was given
 //! (`INSTAFY_TURN_GIVEN_DIR`); a retry's card naming a page nothing gave names its site's home
@@ -74,6 +83,24 @@ const PRICE_NO_PAGE: &str = "Check the vacuum's price at the shop.";
 /// The retry's card names the shop's home page, as told for a page whose address would be a guess.
 const PRICE_HOME_PAGE: &str = "Open https://shop.example and find the vacuum's price.";
 const PRICE_WORDS: &str = "I couldn't read the vacuum's price on the shop's site.";
+/// A return policy whose page on the shop's site the reader was refused by its robots.txt. The
+/// command reads as the reader's, finds no reader on its `PATH`, so nothing goes out, and prints
+/// the reader's own stop for that page.
+const REFUSED_READ_COMMAND: &str = "PATH=/nonexistent instafy web read 'https://shop.example/help/returns' --json 2>/dev/null || printf '%s\\n' '{' ' \"pages\": [' '  {' '   \"requestedUrl\": \"https://shop.example/help/returns\",' '   \"status\": \"stopped\",' '   \"code\": \"robots\"' '  }' ' ]' '}'";
+/// What the turn says of it: a few plain words and the page's link, as a page the reader
+/// couldn't read ends.
+const REFUSED_WORDS: &str = "I couldn't check the shop's return policy, so I can't confirm how it applies to your order. You can read the shop's [returns page](https://shop.example/help/returns).";
+/// The card for that page, which names it by its address and leaves the person's details out.
+const RETURNS_CARD: &str =
+    "Open https://shop.example/help/returns and read the return policy that may apply to an order.";
+/// A long read of two pages, the refused returns page first, then a read page whose text runs
+/// past what the turn's events keep of a command's output, so its start, and the stop with it,
+/// is gone from them.
+const LONG_READ_COMMAND: &str = "PATH=/nonexistent instafy web read 'https://shop.example/help/returns' 'https://shop.example/help/contact' --json 2>/dev/null || printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n   \"text\": \"%9000s\"\\n%s\\n%s\\n%s\\n' '{' ' \"pages\": [' '  {' '   \"requestedUrl\": \"https://shop.example/help/returns\",' '   \"status\": \"stopped\",' '   \"code\": \"robots\"' '  },' '  {' '   \"requestedUrl\": \"https://shop.example/help/contact\",' '   \"status\": \"read\",' '' '  }' ' ]' '}'";
+/// What a retry that leaves the card out says.
+const WORDS_WITHOUT_A_CARD: &str = "I couldn't check the shop's return policy for your order.";
+/// The line under the turn as its retry begins (runtime-agent `NO_CARD_RETRY_LINE`).
+const NO_CARD_LINE: &str = "Retrying: the answer links a page Octo couldn't read, with no card to open it in Instafy's browser. The retry adds only the card.";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Case {
@@ -87,6 +114,18 @@ enum Case {
     RefusedTwice,
     /// The first attempt read a page before its card named none: the retry fixes only the card.
     AfterARead,
+    /// The reader was refused the page the answer links, and the answer has no card: the retry
+    /// adds only the card.
+    NoCardForARefusedPage,
+    /// The same, with the card beside the link.
+    ACardForARefusedPage,
+    /// The retry that adds the card fails at the provider: the first answer stands.
+    CardRetryFails,
+    /// The retry that adds the card answers without one: the first answer stands.
+    CardRetryBringsNoCard,
+    /// The refused page came first in a long read of two pages, whose start the turn's events
+    /// no longer hold: the retry still adds its card.
+    RefusedEarlyInALongRead,
     /// As [`Case::TheOnlyCard`], but nothing gave the turn the page its retry's card names.
     AMadeUpPage,
 }
@@ -109,9 +148,49 @@ impl Case {
             Self::AfterARead => {
                 "evidence_retry::refused_card::a_refused_cards_retry_adds_no_search_and_no_read_via_proxy"
             }
+            Self::NoCardForARefusedPage => {
+                "evidence_retry::refused_card::a_page_its_reader_was_refused_that_the_answer_links_gets_its_waiting_card_via_proxy"
+            }
+            Self::ACardForARefusedPage => {
+                "evidence_retry::refused_card::an_answer_with_the_card_for_a_page_its_reader_was_refused_is_untouched_via_proxy"
+            }
+            Self::CardRetryFails => {
+                "evidence_retry::refused_card::a_failed_retry_for_a_missing_card_leaves_the_first_answer_via_proxy"
+            }
+            Self::CardRetryBringsNoCard => {
+                "evidence_retry::refused_card::a_retry_that_brings_no_card_leaves_the_first_answer_via_proxy"
+            }
+            Self::RefusedEarlyInALongRead => {
+                "evidence_retry::refused_card::a_page_refused_early_in_a_long_read_gets_its_waiting_card_via_proxy"
+            }
             Self::AMadeUpPage => {
                 "evidence_retry::refused_card::a_retrys_card_naming_a_page_nothing_gave_names_its_home_page_via_proxy"
             }
+        }
+    }
+
+    /// The answer links a page its reader was refused, with no card for it: the retry is asked
+    /// only for the card.
+    fn misses_a_card(self) -> bool {
+        matches!(
+            self,
+            Self::NoCardForARefusedPage
+                | Self::CardRetryFails
+                | Self::CardRetryBringsNoCard
+                | Self::RefusedEarlyInALongRead
+        )
+    }
+
+    /// Whether the first attempt reads a page before it answers, and with which command.
+    fn first_read(self) -> Option<&'static str> {
+        match self {
+            Self::AfterARead => Some(READ_COMMAND),
+            Self::NoCardForARefusedPage
+            | Self::ACardForARefusedPage
+            | Self::CardRetryFails
+            | Self::CardRetryBringsNoCard => Some(REFUSED_READ_COMMAND),
+            Self::RefusedEarlyInALongRead => Some(LONG_READ_COMMAND),
+            _ => None,
         }
     }
 
@@ -121,9 +200,15 @@ impl Case {
         match self {
             // The answer read the league's text-only page.
             Self::TheOnlyCard | Self::ACardLeft => Some(RESULTS_SITE_PATH),
-            // A search found the shop's own page.
-            Self::AWaitingCard => Some(POLICY_SITE_PATH),
-            // Its reader was refused, or it found nothing.
+            // A search found the shop's own page, which the reader of the cases that read it
+            // was then refused by its robots.txt.
+            Self::AWaitingCard
+            | Self::NoCardForARefusedPage
+            | Self::ACardForARefusedPage
+            | Self::CardRetryFails
+            | Self::CardRetryBringsNoCard
+            | Self::RefusedEarlyInALongRead => Some(POLICY_SITE_PATH),
+            // Its reader was refused a page no search found, or it found nothing.
             Self::RefusedTwice | Self::AfterARead | Self::AMadeUpPage => None,
         }
     }
@@ -131,7 +216,7 @@ impl Case {
     /// The provider request the retry sends: after the first answer, which follows a read for
     /// the case that reads first.
     fn retry_index(self) -> usize {
-        if self == Self::AfterARead { 2 } else { 1 }
+        if self.first_read().is_some() { 2 } else { 1 }
     }
 
     /// The person's message.
@@ -140,7 +225,12 @@ impl Case {
             Self::TheOnlyCard | Self::ACardLeft | Self::AMadeUpPage => {
                 "Who won the team's game last night, and what was the final score?"
             }
-            Self::AWaitingCard => POLICY_REQUEST,
+            Self::AWaitingCard
+            | Self::NoCardForARefusedPage
+            | Self::ACardForARefusedPage
+            | Self::CardRetryFails
+            | Self::CardRetryBringsNoCard
+            | Self::RefusedEarlyInALongRead => POLICY_REQUEST,
             Self::RefusedTwice => HOTEL_REQUEST,
             Self::AfterARead => PRICE_REQUEST,
         }
@@ -157,8 +247,9 @@ impl Case {
         // message, and it is what a card may name for Studio to open it by itself.
         if matches!(
             self,
-            Self::AWaitingCard | Self::RefusedTwice | Self::AfterARead
-        ) {
+            Self::AWaitingCard | Self::RefusedTwice | Self::AfterARead | Self::ACardForARefusedPage
+        ) || self.misses_a_card()
+        {
             payload["conversation_history"] = json!([{"role":"user","content":self.request()}]);
             payload["metadata"]["groupParticipation"] = json!({
                 "decision":"respond","reason":"single_human_conversation",
@@ -186,6 +277,15 @@ impl Case {
             Self::RefusedTwice if stand_alone => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
             Self::RefusedTwice => Some(answer(HOTEL_OPENED, HOTEL_NO_PAGE)),
             Self::AfterARead => Some(answer(PRICE_WORDS, PRICE_HOME_PAGE)),
+            // Its words as they were, and the card it left out.
+            Self::NoCardForARefusedPage | Self::RefusedEarlyInALongRead => {
+                Some(answer(REFUSED_WORDS, RETURNS_CARD))
+            }
+            // The provider fails it.
+            Self::ACardForARefusedPage | Self::CardRetryFails => None,
+            Self::CardRetryBringsNoCard => Some(json!({
+                "summary":WORDS_WITHOUT_A_CARD,"code":"","suggestions":[],"files":[],"actions":[],
+            })),
         }
     }
 
@@ -197,15 +297,30 @@ impl Case {
             Self::AWaitingCard => vec![POLICY_PAGE.to_string()],
             Self::RefusedTwice => Vec::new(),
             Self::AfterARead => vec![PRICE_HOME_PAGE.to_string()],
+            Self::NoCardForARefusedPage
+            | Self::ACardForARefusedPage
+            | Self::RefusedEarlyInALongRead => vec![RETURNS_CARD.to_string()],
+            Self::CardRetryFails | Self::CardRetryBringsNoCard => Vec::new(),
         }
     }
 
     fn first_answer(self) -> Value {
+        if self.misses_a_card() || self == Self::ACardForARefusedPage {
+            let actions = if self == Self::ACardForARefusedPage {
+                json!([{"type":"request_browser","task":RETURNS_CARD}])
+            } else {
+                json!([])
+            };
+            return json!({
+                "summary":REFUSED_WORDS,"code":"","suggestions":[],"files":[],"actions":actions,
+            });
+        }
         let no_page = match self {
             Self::TheOnlyCard | Self::ACardLeft | Self::AMadeUpPage => NAMES_NO_PAGE,
             Self::AWaitingCard => POLICY_NO_PAGE,
             Self::RefusedTwice => HOTEL_NO_PAGE,
             Self::AfterARead => PRICE_NO_PAGE,
+            _ => unreachable!(),
         };
         let mut actions = vec![json!({
             "type":"request_browser","task":no_page,
@@ -227,6 +342,7 @@ impl Case {
             ),
             Self::RefusedTwice => (HOTEL_OPENED.to_string(), json!([])),
             Self::AfterARead => (PRICE_HAND_OVER.to_string(), json!([])),
+            _ => unreachable!(),
         };
         json!({
             "summary":summary,"code":"","suggestions":[],
@@ -261,6 +377,33 @@ fn a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy() -> Resu
 #[test]
 fn a_refused_cards_retry_adds_no_search_and_no_read_via_proxy() -> Result<()> {
     run_isolated(Case::AfterARead)
+}
+
+#[test]
+fn a_page_its_reader_was_refused_that_the_answer_links_gets_its_waiting_card_via_proxy()
+-> Result<()> {
+    run_isolated(Case::NoCardForARefusedPage)
+}
+
+#[test]
+fn an_answer_with_the_card_for_a_page_its_reader_was_refused_is_untouched_via_proxy() -> Result<()>
+{
+    run_isolated(Case::ACardForARefusedPage)
+}
+
+#[test]
+fn a_failed_retry_for_a_missing_card_leaves_the_first_answer_via_proxy() -> Result<()> {
+    run_isolated(Case::CardRetryFails)
+}
+
+#[test]
+fn a_retry_that_brings_no_card_leaves_the_first_answer_via_proxy() -> Result<()> {
+    run_isolated(Case::CardRetryBringsNoCard)
+}
+
+#[test]
+fn a_page_refused_early_in_a_long_read_gets_its_waiting_card_via_proxy() -> Result<()> {
+    run_isolated(Case::RefusedEarlyInALongRead)
 }
 
 #[test]
@@ -359,13 +502,19 @@ async fn provider_request(
     }
     match (state.case, index) {
         // The first attempt reads first: the command stands in for the reader.
-        (Case::AfterARead, 0) => response(json!({
+        (case, 0) if case.first_read().is_some() => response(json!({
             "id":"tool_first_read","type":"function_call","name":"exec_command",
             "call_id":"call_first_read","status":"completed",
-            "arguments":json!({"cmd":READ_COMMAND,"max_output_tokens":64}).to_string()
+            "arguments":json!({"cmd":case.first_read().unwrap(),"max_output_tokens":256}).to_string()
         })),
-        (Case::AfterARead, 1) => response(final_answer(&Case::AfterARead.first_answer())),
+        (case, 1) if case.first_read().is_some() => response(final_answer(&case.first_answer())),
         (case, 0) => response(final_answer(&case.first_answer())),
+        // The retry, and any request after it, fails at the provider.
+        (Case::CardRetryFails, index) if index >= Case::CardRetryFails.retry_index() => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":{"message":"the provider failed","type":"server_error"}})),
+        )
+            .into_response(),
         (case, index)
             if index == case.retry_index() && case.retry_answer(stand_alone).is_some() =>
         {
@@ -491,7 +640,7 @@ async fn run_case(case: Case) -> Result<()> {
         project_id: Some(project_id),
         run_id: Some(Uuid::new_v4()),
         // A chat's message keeps its thread, which its first attempt starts.
-        conversation_id: (case == Case::AfterARead).then(Uuid::new_v4),
+        conversation_id: case.first_read().is_some().then(Uuid::new_v4),
         session_id: None,
         credential_id: None,
         payload: case.payload(),
@@ -556,11 +705,14 @@ async fn run_case(case: Case) -> Result<()> {
         .map(|message| message.content.as_str())
         .collect();
     // Every card the turn posted, settled or streamed with its answer, by its task.
-    let cards: Vec<String> = execution
+    let posted_cards: Vec<&runtime_agent::jobs::JobMessage> = execution
         .final_messages
         .iter()
         .chain(&streamed)
         .filter(|message| message.message_type.as_deref() == Some("action_request"))
+        .collect();
+    let cards: Vec<String> = posted_cards
+        .iter()
         .filter_map(|message| {
             message
                 .metadata
@@ -572,8 +724,9 @@ async fn run_case(case: Case) -> Result<()> {
         .collect();
     let requests = state.requests.lock().unwrap().clone();
     // The first answer's words were written for a card that never came: they are gone from the
-    // reply being written as the retry begins, not left there until the retry's words come.
-    if case != Case::ACardLeft {
+    // reply being written as the retry begins, not left there until the retry's words come. An
+    // answer that only left out a page's card is a true account: its words stay.
+    if !matches!(case, Case::ACardLeft | Case::ACardForARefusedPage) {
         let shown = state
             .draft_as_the_retry_began
             .lock()
@@ -581,7 +734,12 @@ async fn run_case(case: Case) -> Result<()> {
             .clone()
             .context("the retry's request reached the model")?;
         assert!(shown.segment > 0, "the first answer was drafted: {shown:?}");
-        assert_eq!(shown.text, "", "{shown:?}");
+        let kept = if case.misses_a_card() {
+            REFUSED_WORDS
+        } else {
+            ""
+        };
+        assert_eq!(shown.text, kept, "{shown:?}");
     }
     match case {
         Case::AWaitingCard | Case::RefusedTwice => {
@@ -692,6 +850,126 @@ async fn run_case(case: Case) -> Result<()> {
             assert_eq!(outputs, 1, "retry input: {retry_input}");
             assert_eq!(execution.summary, PRICE_WORDS);
         }
+        Case::NoCardForARefusedPage => {
+            // Unbilled as any retry, with the line of a turn still at work.
+            assert_eq!(
+                retries,
+                vec![(
+                    json!("no_card_for_a_page_it_couldnt_read"),
+                    json!("Working")
+                )]
+            );
+            assert_eq!(retry_lines, [NO_CARD_LINE]);
+            assert_eq!(
+                requests.len(),
+                3,
+                "the read, the first answer, then the retry's"
+            );
+            let retry = &requests[2];
+            let retry_input = retry["input"].to_string();
+            for words in [
+                "Add only that card: it names the page by the address your answer links and what to do there. Keep your words, with the link.",
+                "This turn's searches and reads are done: do not search or read any page again.",
+                "or that it is queued",
+            ] {
+                assert!(retry_input.contains(words), "{words}: {retry_input}");
+            }
+            // It runs on the first attempt's own thread, which holds its one read, with no
+            // shell and no web search: it can't read or search again.
+            let tools = retry["tools"].to_string();
+            for tool in ["\"exec_command\"", "\"exec\"", "\"shell\"", "web_search"] {
+                assert!(!tools.contains(tool), "{tool}: {tools}");
+            }
+            let outputs = retry["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|item| item["type"] == "function_call_output")
+                .count();
+            assert_eq!(outputs, 1, "retry input: {retry_input}");
+            // Unbilled: a turn is charged from the first run log that ends its turn
+            // (runtime-controller `extract_turn_usage_from_artifacts`), and that is the first
+            // attempt's, which holds its read. The retry's own run log comes after it.
+            let run_logs: Vec<&Value> = execution
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact["kind"] == "codex/run-log")
+                .collect();
+            assert_eq!(run_logs.len(), 2, "one run log per attempt");
+            assert_eq!(run_logs[0]["metadata"]["attempt"], 1);
+            let charged = run_logs[0]["events"].to_string();
+            assert!(
+                charged.contains("turn.completed") && charged.contains("instafy web read"),
+                "{charged}"
+            );
+            // Its words, above the one card, which waits for the person's press.
+            assert_eq!(execution.summary, REFUSED_WORDS);
+        }
+        Case::ACardForARefusedPage => {
+            assert!(retries.is_empty(), "{retries:?}");
+            assert_eq!(requests.len(), 2, "the read and one answer, not run again");
+            assert_eq!(execution.summary, REFUSED_WORDS);
+        }
+        // The retry ran, asked only for the card, and brought none: the first answer, a true
+        // account, is the turn's, with no card, as with no retry, and its charge still comes from
+        // the first attempt's run log.
+        Case::CardRetryFails | Case::CardRetryBringsNoCard => {
+            assert_eq!(
+                retries,
+                vec![(
+                    json!("no_card_for_a_page_it_couldnt_read"),
+                    json!("Working")
+                )]
+            );
+            assert_eq!(retry_lines, [NO_CARD_LINE]);
+            assert!(
+                requests.len() >= 3,
+                "the read, the first answer, then the retry's"
+            );
+            assert_eq!(execution.summary, REFUSED_WORDS);
+            let run_logs: Vec<&Value> = execution
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact["kind"] == "codex/run-log")
+                .collect();
+            assert_eq!(run_logs[0]["metadata"]["attempt"], 1);
+            let charged = run_logs[0]["events"].to_string();
+            assert!(
+                charged.contains("turn.completed") && charged.contains("instafy web read"),
+                "{charged}"
+            );
+        }
+        // The stop came first, outside what the turn's events keep of the read's output: the
+        // retry still runs for the card, which waits for the person's press.
+        Case::RefusedEarlyInALongRead => {
+            assert_eq!(
+                retries,
+                vec![(
+                    json!("no_card_for_a_page_it_couldnt_read"),
+                    json!("Working")
+                )]
+            );
+            assert_eq!(
+                requests.len(),
+                3,
+                "the read, the first answer, then the retry's"
+            );
+            assert_eq!(execution.summary, REFUSED_WORDS);
+        }
+    }
+    // A card for a page the reader was refused waits for the person's press.
+    if matches!(
+        case,
+        Case::NoCardForARefusedPage | Case::ACardForARefusedPage | Case::RefusedEarlyInALongRead
+    ) {
+        assert_eq!(posted_cards.len(), 1, "one card");
+        assert_eq!(
+            posted_cards[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/details/browserRequest/waitsForThePerson")),
+            Some(&json!(true))
+        );
     }
     // A card posted names its page, and a refused one is never posted.
     assert_eq!(cards, case.cards());
