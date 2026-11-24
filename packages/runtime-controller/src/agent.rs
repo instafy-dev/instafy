@@ -1540,6 +1540,9 @@ async fn idle_lease_poll_finds_no_work(
                         where aj.project_id = r.project_id
                           and aj.status = 'queued'
                           and not ",
+                crate::message_turns::waits_for_an_earlier_turn!("aj"),
+                "
+                          and not ",
                 crate::device_grants::run_once_job_cannot_start!("$4"),
                 "
                           and (
@@ -5218,6 +5221,10 @@ pub(crate) async fn lease_next_agent_job(
                 ", crate::claude_code_lane::lane_job_login!(), "
                 where aj.project_id = $1
                   and status = 'queued'
+                  -- One of the agents a message names takes its turn once the
+                  -- turn of the agent named before it has ended
+                  -- (`message_turns`, docs/Local-Engine-Turns.md 11.22).
+                  and not ", crate::message_turns::waits_for_an_earlier_turn!("aj"), "
                   -- A job holding device grants is leased once, only within
                   -- its minute to start, and only by a runtime that says it
                   -- runs such a job as a granted turn (`device_grants.rs`).

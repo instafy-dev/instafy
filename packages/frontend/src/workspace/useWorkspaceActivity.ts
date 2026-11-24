@@ -44,7 +44,7 @@ export function hasActiveRunsForProject(
     if (run.projectId !== projectId) {
       return false;
     }
-    return isRunActivelyProgressing(run, nowMs);
+    return isRunActivelyProgressing(run, nowMs, runs);
   });
 }
 

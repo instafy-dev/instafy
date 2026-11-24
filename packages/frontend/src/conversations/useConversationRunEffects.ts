@@ -86,7 +86,9 @@ export function useConversationRunEffects({
         run.status === "success" ||
         run.status === "failed" ||
         run.status === "canceled" ||
-        isQueuedRunStale(run, nowMs)
+        // A turn that waits for an earlier agent's turn of its message is
+        // not stuck, however long that turn takes (messageTurns).
+        isQueuedRunStale(run, nowMs, runs)
       ) {
         staleRunIdsToUnlink.add(run.id);
       }

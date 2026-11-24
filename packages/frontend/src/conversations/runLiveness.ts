@@ -1,5 +1,9 @@
 import type { RunRecord } from "../types";
+import { earlierTurnEndedAtMs, waitsForEarlierTurn } from "./messageTurns";
 import { readRunInterruption } from "./runInterruption";
+
+/** The runs a page has, by id, which a turn of a message's agents is read against. */
+type RunsById = Readonly<Record<string, RunRecord>> | null | undefined;
 
 export const ACTIVE_CONVERSATION_RUN_STATUSES: ReadonlySet<RunRecord["status"]> = new Set([
   "queued",
@@ -86,11 +90,20 @@ function resolveQueuedRunStaleAfter(run: RunRecord, activityTimestamp: number): 
   return Math.max(staleAfter, Math.min(resumeByMs, activityTimestamp + STALE_IN_PROGRESS_RUN_TIMEOUT_MS));
 }
 
-export function isQueuedRunStale(run: RunRecord, nowMs = Date.now()): boolean {
+/**
+ * Whether a queued run has waited too long to be live. A turn that waits for
+ * an earlier agent's turn of its message (docs/Local-Engine-Turns.md 11.22)
+ * is not stuck, however long that turn takes, and its own wait counts from
+ * when that turn ended; both need the page's `runs`.
+ */
+export function isQueuedRunStale(run: RunRecord, nowMs = Date.now(), runs?: RunsById): boolean {
   if (run.status !== "queued") {
     return false;
   }
-  const activityTimestamp = resolveRunActivityTimestamp(run);
+  if (waitsForEarlierTurn(run, runs)) {
+    return false;
+  }
+  const activityTimestamp = Math.max(resolveRunActivityTimestamp(run), earlierTurnEndedAtMs(run, runs));
   if (activityTimestamp <= 0) {
     return false;
   }
@@ -108,11 +121,11 @@ export function isInProgressRunStale(run: RunRecord, nowMs = Date.now()): boolea
   return nowMs - activityTimestamp > STALE_IN_PROGRESS_RUN_TIMEOUT_MS;
 }
 
-export function isRunActivelyProgressing(run: RunRecord, nowMs = Date.now()): boolean {
+export function isRunActivelyProgressing(run: RunRecord, nowMs = Date.now(), runs?: RunsById): boolean {
   if (!ACTIVE_CONVERSATION_RUN_STATUSES.has(run.status)) {
     return false;
   }
-  if (run.status === "queued" && isQueuedRunStale(run, nowMs)) {
+  if (run.status === "queued" && isQueuedRunStale(run, nowMs, runs)) {
     return false;
   }
   if (run.status === "in_progress" && isInProgressRunStale(run, nowMs)) {

@@ -118,6 +118,7 @@ mod tests {
                 "Continue the goal",
                 &["reviewer".into()],
                 &HashMap::new(),
+                false,
             );
             let reapplied = plan["reviewer"].to_json();
             for key in ["mode", "ownedPaths", "readOnlyPaths"] {
@@ -136,6 +137,7 @@ mod tests {
             "Continue",
             &["octo".into()],
             &HashMap::new(),
+            false,
         );
         assert_eq!(plan["octo"].to_json()["mode"], "unscoped");
     }
@@ -149,6 +151,7 @@ mod tests {
             "Continue",
             &["reviewer".into()],
             &HashMap::new(),
+            false,
         );
         assert_eq!(plan["reviewer"].to_json()["mode"], "read_only");
     }

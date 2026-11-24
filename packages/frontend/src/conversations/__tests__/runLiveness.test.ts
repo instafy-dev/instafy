@@ -55,6 +55,37 @@ describe("runLiveness", () => {
     expect(isRunActivelyProgressing(run, nowMs)).toBe(false);
   });
 
+  // docs/Local-Engine-Turns.md 11.22: a turn of a message's agents waits,
+  // queued, for the turns of the agents named before it.
+  it("never counts a queued turn that waits for an earlier agent's turn as stale", () => {
+    const nowMs = Date.now();
+    const earlier = createRun({
+      id: "run-earlier",
+      status: "in_progress",
+      updatedAt: new Date(nowMs - 1_000).toISOString(),
+    });
+    const run = createRun({
+      status: "queued",
+      updatedAt: new Date(nowMs - STALE_QUEUED_RUN_TIMEOUT_MS - 60_000).toISOString(),
+      metadata: { takesTurns: { version: 1, after: [{ runId: "run-earlier", agent: "a" }] } },
+    });
+    const runs = { [earlier.id]: earlier, [run.id]: run };
+    expect(isQueuedRunStale(run, nowMs, runs)).toBe(false);
+    expect(isRunActivelyProgressing(run, nowMs, runs)).toBe(true);
+    // Without the page's runs, it reads as any queued run.
+    expect(isQueuedRunStale(run, nowMs)).toBe(true);
+
+    // Once the earlier turn has ended, its own wait counts from that end.
+    const endedJustNow = { ...earlier, status: "success" as const, updatedAt: new Date(nowMs - 1_000).toISOString() };
+    expect(isQueuedRunStale(run, nowMs, { ...runs, [earlier.id]: endedJustNow })).toBe(false);
+    const endedLongAgo = {
+      ...earlier,
+      status: "success" as const,
+      updatedAt: new Date(nowMs - STALE_QUEUED_RUN_TIMEOUT_MS - 1_000).toISOString(),
+    };
+    expect(isQueuedRunStale(run, nowMs, { ...runs, [earlier.id]: endedLongAgo })).toBe(true);
+  });
+
   it("keeps fresh in-progress runs active", () => {
     const nowMs = Date.now();
     const run = createRun({

@@ -2151,6 +2151,7 @@ fn normalize_plan_agent_write_scope(
             "",
             &[handle.to_string()],
             &Default::default(),
+            false,
         );
         let assignment = &assignments[handle];
         if assignment.is_coordination_required() {
@@ -3425,6 +3426,7 @@ mod tests {
                 "",
                 &handles,
                 &Default::default(),
+                false,
             );
             handles
                 .into_iter()
@@ -3639,6 +3641,7 @@ mod tests {
             "",
             &["worker".to_string()],
             &Default::default(),
+            false,
         );
         (metadata, assignments["worker"].to_json())
     }

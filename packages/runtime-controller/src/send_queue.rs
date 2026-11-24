@@ -1967,8 +1967,11 @@ struct ActiveAgentHandles {
     has_untargeted: bool,
     /// The person and handle of each local-engine turn that still waits for
     /// its person's own computer (crate::claude_code_lane), possibly for
-    /// days. Such a turn keeps only its own person's agent busy: it is not in
-    /// `handles`, and only that person's entries wait behind it.
+    /// days, and of each turn that has not started and still waits for an
+    /// earlier agent's turn of its message (crate::message_turns), which may
+    /// itself wait for that computer. Such a turn keeps only its own person's
+    /// agent busy: it is not in `handles`, and only that person's entries wait
+    /// behind it.
     waiting_for_a_computer: HashSet<(Uuid, String)>,
 }
 
@@ -1982,12 +1985,17 @@ where
 {
     let rows = connection
         .query(
-            "select payload,
-                    engine is not null and status = 'queued' and lease_attempts = 0
+            concat!(
+                "select payload,
+                    status = 'queued' and lease_attempts = 0
+                      and (engine is not null or ",
+                crate::message_turns::waits_for_an_earlier_turn!("agent_jobs"),
+                ")
                       as waits_for_a_computer
              from agent_jobs
              where conversation_id = $1
-               and status in ('queued','leased')",
+               and status in ('queued','leased')"
+            ),
             &[&conversation_id],
         )
         .await
