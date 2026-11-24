@@ -4,12 +4,13 @@ import { wasRunStartedByPromptSentFromThisPage } from "../../../conversations/se
 import type { ControllerConversationStopResult } from "../../../services/runtimeController/conversationStop";
 import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
-import { isAutomaticRetryPending } from "./automaticRetryFold";
+import { isAutomaticRetryPending, readPendingRetry } from "./automaticRetryFold";
 import { isBrowserNoticePrompt } from "./browserHandBack";
 import { browserRequestFromMessage, browserRequestKey } from "./browserRequest";
 import { extractAgentIdentityFromMetadata } from "./chatAssistantIdentity";
 import { readPendingHandBack } from "./chatMessagePresentation";
 import { resolveExpectedSteerJobId, resolveSteerableComposerRuns } from "./composerSendMode";
+import { getControllerConversationNoticeKind, readChatRunStopNotice } from "./controllerConversationNotice";
 
 export type ChatRunStopTarget = {
   jobId: string;
@@ -26,10 +27,13 @@ export function resolveChatRunStopTargets(
   options: { getAgentDisplayName?: (handle: string) => string | null | undefined } = {},
 ): ChatRunStopTarget[] {
   const seen = new Set<string>();
+  // A turn a stop notice of the chat names is over, while its own record
+  // may still say it runs: its row reads "Stopped" already.
+  const stopped = idsNamedByStopNotices(messages);
   return resolveSteerableComposerRuns(runs, messages).flatMap((run) => {
-    if (!["queued", "in_progress", "awaiting_approval"].includes(run.status)) return [];
+    if (!["queued", "in_progress", "awaiting_approval"].includes(run.status) || stopped.has(run.id)) return [];
     const jobId = resolveExpectedSteerJobId(run, messages);
-    if (!jobId || seen.has(jobId)) return [];
+    if (!jobId || seen.has(jobId) || stopped.has(jobId)) return [];
     seen.add(jobId);
     const identity = extractAgentIdentityFromMetadata(run.metadata);
     const handle = identity?.handle ?? "agent";
@@ -45,6 +49,39 @@ export function resolveChatRunStopTargets(
       initiatingUserId: typeof initiator === "string" && initiator.trim() ? initiator.trim() : null,
     }];
   });
+}
+
+/** Every run and job a stop notice of the chat names: a Stop's, a take-over's or any other cancel's. */
+function idsNamedByStopNotices(messages: readonly ChatMessage[]): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (getControllerConversationNoticeKind(message) !== "run_cancellation") continue;
+    const notice = readChatRunStopNotice(message);
+    for (const id of [...notice.runIds, ...notice.jobIds]) ids.add(id.trim());
+  }
+  return ids;
+}
+
+/**
+ * The chat's turns someone stopped (a Stop, a take-over), by run and by job:
+ * each run whose record says canceled, and each run and job a stop notice of
+ * the chat names. A turn's row reads "Stopped" from whichever of the two
+ * reaches the chat first (useAgentJobThreadPreviewState), and a Stop's own
+ * answer comes by a third way, sometimes after both. None of these turns goes
+ * on: none is a target, nor a part of a message on its way, nor a reason for
+ * Stop to stay (useChatRunStop's `stopped`).
+ */
+export function chatRunStopEndedIds(runs: readonly RunRecord[], messages: readonly ChatMessage[]): ReadonlySet<string> {
+  const ended = idsNamedByStopNotices(messages);
+  for (const run of runs) {
+    if (run.status !== "canceled") continue;
+    ended.add(run.id);
+    for (const key of ["jobId", "job_id", "jobID"]) {
+      const jobId = run.metadata?.[key];
+      if (typeof jobId === "string" && jobId.trim()) ended.add(jobId.trim());
+    }
+  }
+  return ended;
 }
 
 function promptRunId(message: ChatMessage): string | null {
@@ -83,6 +120,8 @@ export function chatRunStopFollowOnTargets(
  * or Instafy's own retry of a failed turn. Only the newest row counts, as for
  * the typing row: the fold keeps a routed card's key once its turn has shown
  * something (the chat takes the card out then), so a key alone is no gap.
+ * A hand-back or retry someone stopped is no gap either: the row reads
+ * "Stopped" for it, and nothing of it is on its way.
  */
 export function chatRunStopBetweenParts(chat: {
   /** Studio is opening a browser card by itself. */
@@ -93,11 +132,19 @@ export function chatRunStopBetweenParts(chat: {
   newestRow: ChatMessage | null | undefined;
   /** The routed cards the fold keeps as standing in for their turn (routedBrowserFold.ts, `waitingCardKeys`). */
   routedWaitingKeys: ReadonlySet<string>;
+  /** The chat's turns someone stopped, by run and by job (chatRunStopEndedIds). */
+  stopped?: ReadonlySet<string>;
 }): boolean {
   if (chat.browserCardOpening || chat.handBackDue) return true;
   const row = chat.newestRow;
   if (!row) return false;
-  if (readPendingHandBack(row) || isAutomaticRetryPending(row)) return true;
+  const someoneStopped = (...ids: (string | null)[]) => ids.some((id) => id !== null && chat.stopped?.has(id) === true);
+  const handBack = readPendingHandBack(row);
+  if (handBack && !someoneStopped(handBack.runId)) return true;
+  if (isAutomaticRetryPending(row)) {
+    const retry = readPendingRetry(row);
+    if (!retry || !someoneStopped(retry.runId, retry.jobId)) return true;
+  }
   return row.role === "assistant" && browserRequestFromMessage(row)?.routed === true &&
     chat.routedWaitingKeys.has(browserRequestKey(row));
 }

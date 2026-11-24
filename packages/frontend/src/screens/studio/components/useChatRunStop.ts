@@ -43,7 +43,19 @@ export type ChatRunStopOptions = {
    * stops once they start, never a message someone sends.
    */
   followOnTargets?: readonly ChatRunStopTarget[];
+  /**
+   * The chat's turns someone stopped, by run and by job
+   * (chatRunStopEndedIds): their rows read "Stopped". One that leaves the
+   * targets was stopped, never ended by itself, so Stop keeps no place for a
+   * next part; and a Stop whose turns all read "Stopped" has nothing left
+   * to show, whenever its own answer comes.
+   */
+  stopped?: ReadonlySet<string>;
 };
+
+function isStopped(stopped: ReadonlySet<string> | undefined, target: ChatRunStopTarget): boolean {
+  return stopped !== undefined && (stopped.has(target.runId) || stopped.has(target.jobId));
+}
 
 type StopState = {
   conversationId: string | null;
@@ -98,18 +110,29 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     setHandingOver(false);
   }, [conversationId]);
   // Before the frame that would draw no Stop: the turns ended by themselves,
-  // none of them by this Stop.
-  const shownJobIds = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId)).map((target) => target.jobId);
-  const shownJobIdsKey = shownJobIds.join(",");
-  const lastShown = useRef<{ conversationId: string | null; jobIds: string[] }>({ conversationId, jobIds: [] });
+  // none of them by a Stop. A turn a Stop ended reads "Stopped" (`stopped`)
+  // also while the Stop's own answer is on its way: its run's record and the
+  // chat's notice of it can come first. Read as a turn that ended by itself,
+  // it kept Stop for the moment left for a next part, after every Stop of a
+  // local test (Nov 22: 0.5 to 1.5 s after the row read "Stopped").
+  const shownJobIdsKey = targets
+    .filter((target) => !state.acceptedJobIds.includes(target.jobId))
+    .map((target) => target.jobId)
+    .join(",");
+  const lastShown = useRef<{ conversationId: string | null; targets: readonly ChatRunStopTarget[] }>({ conversationId, targets: [] });
   useLayoutEffect(() => {
-    const ended = lastShown.current.conversationId === conversationId ? lastShown.current.jobIds : [];
-    lastShown.current = { conversationId, jobIds: shownJobIdsKey ? shownJobIdsKey.split(",") : [] };
-    if (lastShown.current.jobIds.length > 0) {
+    const ended = lastShown.current.conversationId === conversationId ? lastShown.current.targets : [];
+    const { options: current, state: now } = latest.current;
+    lastShown.current = {
+      conversationId,
+      targets: current.targets.filter((target) => !now.acceptedJobIds.includes(target.jobId)),
+    };
+    if (lastShown.current.targets.length > 0) {
       setHandingOver(false);
       return;
     }
-    if (ended.length > 0 && !ended.some((jobId) => latest.current.state.acceptedJobIds.includes(jobId))) {
+    if (ended.length > 0 && !ended.some((target) =>
+      now.acceptedJobIds.includes(target.jobId) || isStopped(current.stopped, target))) {
       setHandingOver(true);
     }
   }, [conversationId, shownJobIdsKey]);
@@ -122,6 +145,16 @@ export function useChatRunStop(options: ChatRunStopOptions) {
     if (state.phase !== "requested") return;
     if (effectivePhase(state, targets) === "idle") setState((previous) => ({ ...previous, phase: "idle", attemptedTargets: [] }));
   }, [state, targets]);
+  // Every turn this Stop was sent for reads "Stopped": nothing is left for
+  // it to show, whatever its answer says. One that failed or timed out has
+  // nothing left to retry either, also once another turn starts. A press
+  // between two parts waits for the next one, as before.
+  const stopOver = !state.awaitingNext && state.attemptedTargets.length > 0
+    && state.attemptedTargets.every((target) => isStopped(options.stopped, target));
+  useEffect(() => {
+    if (state.phase !== "error" || !stopOver) return;
+    setState((previous) => ({ ...previous, phase: "idle", attemptedTargets: [], error: null }));
+  }, [state.phase, stopOver]);
 
   const execute = useCallback(async (selection: readonly ChatRunStopTarget[]) => {
     const current = latest.current.options;
@@ -280,7 +313,8 @@ export function useChatRunStop(options: ChatRunStopOptions) {
   const availableTargets = targets.filter((target) => !state.acceptedJobIds.includes(target.jobId));
   const phase = effectivePhase(state, targets);
   const visible = canStop && Boolean(conversationId)
-    && (availableTargets.length > 0 || phase === "stopping" || phase === "error" || phase === "requested" || between);
+    && (availableTargets.length > 0 || between
+      || (!stopOver && (phase === "stopping" || phase === "error" || phase === "requested")));
   return {
     visible, phase, feedbackId, escapeStops: options.escapeStops !== false,
     targets: availableTargets, groups: groupChatRunStopTargets(availableTargets),
