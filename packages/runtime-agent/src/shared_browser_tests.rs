@@ -4048,6 +4048,174 @@ async fn an_address_no_message_or_page_gave_is_not_opened() {
     end_chat_browser_run(run);
 }
 
+/// A card gives the browser only the addresses its turn was given. The turn's record starts with
+/// what its request and chat named, holds the pages its reader read and what its searches found,
+/// and its card names its site's home page in place of a path nothing gave: a reply's card
+/// carried a product address no page had given, which the browser opened as the shop's own page.
+/// When the turn ends its record is the chat's, so the card's browser run opens the page the turn
+/// read and the search result's address, opens the shop's home page, and refuses the made-up path
+/// with that home page as the way on.
+#[tokio::test]
+async fn a_card_naming_a_made_up_path_opens_its_home_page_and_what_its_turn_was_given() {
+    let fixture = EmbeddedControllerFixture::new();
+    let chat = Uuid::new_v4();
+    let key = |site_path: &str| approval_test_sha256(site_path)[..32].to_string();
+    let navigate = |url: &str| {
+        fixture
+            .command_for(
+                "safe",
+                "page-target",
+                "POST",
+                "/v1/navigate",
+                Some(&json!({ "url": url }).to_string()),
+            )
+            .output()
+            .expect("run the controller")
+    };
+    let asked = "What's the cheapest price for the dual-zone air fryer at shop.example and on reviews.example?";
+    let record = tempfile::tempdir().unwrap();
+    let seed = given_addresses_for_a_turn_at(
+        &fixture.approval_dir,
+        &json!({ "prompt_text": asked, "conversation_history": [{ "role": "user", "content": asked }] }),
+        Some(chat),
+        true,
+    );
+    write_turn_given(record.path(), TURN_GIVEN_SEED, &seed).unwrap();
+    // What the AI's own search found, as the run's search ends, and a page the reader read.
+    keep_what_a_search_found(
+        record.path(),
+        Some(&[
+            json!({ "type": "text_result", "url": "https://reviews.example/laptops/one?utm_source=openai", "title": "Review" }),
+            json!({ "type": "search_usage", "searches": 1 }),
+        ]),
+    );
+    write_turn_given(
+        record.path(),
+        "read-1.json",
+        &[key("example.test/reports/q3")],
+    )
+    .unwrap();
+    let given: std::collections::HashSet<String> = read_turn_given(record.path())
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(given.contains(&key("reviews.example/laptops/one")));
+    let made_up = "https://www.shop.example/products/air-fryer-dual-zone-10219916.html";
+    let task = with_home_pages_where_not_given(
+        &format!("Open {made_up}, https://reviews.example/laptops/one and https://example.test/reports/q3, and note the prices."),
+        &given,
+    )
+    .expect("the made-up path goes");
+    assert_eq!(
+        task,
+        "Open https://www.shop.example/, https://reviews.example/laptops/one and https://example.test/reports/q3, and note the prices."
+    );
+    // The turn ends: its record is the chat's.
+    remember_given_addresses(
+        &fixture.approval_dir,
+        chat,
+        read_turn_given(record.path()).unwrap(),
+    );
+
+    let run = chat_browser_run_given(
+        &fixture,
+        chat,
+        json!({
+            "prompt_text": task,
+            "metadata": { "browserTransport": "shared", "browserRequestOf": "job:00000000-0000-4000-8000-0000000000b2" },
+            "conversation_history": [{ "role": "user", "content": asked }],
+        }),
+    );
+    for url in [
+        "https://www.shop.example/",
+        "https://reviews.example/laptops/one",
+        "https://example.test/reports/q3",
+    ] {
+        payload_of(&navigate(url));
+    }
+    let words = failure_of(&navigate(made_up));
+    assert!(
+        words.contains(&made_up_address_words("https://www.shop.example")),
+        "{words}"
+    );
+    end_chat_browser_run(run);
+
+    // Before, the card's own words gave the browser the path a turn made up.
+    let before = chat_browser_run_given(
+        &fixture,
+        Uuid::new_v4(),
+        json!({ "prompt_text": format!("Open {made_up} and note the price.") }),
+    );
+    payload_of(&navigate(made_up));
+    end_chat_browser_run(before);
+}
+
+/// A turn's record of the addresses it was given is fingerprints in files of their writers' own:
+/// without its seed there is none, a file that isn't one of its records is skipped, and a search
+/// gives each result's own address, never its site, and nothing for an answer that names no page.
+/// A search that lists none of its pages (a provider's own search tool) leaves the record taking
+/// any address, and keeping what it holds.
+#[test]
+fn a_turns_record_is_its_seed_and_what_its_tools_added() {
+    let key = |site_path: &str| approval_test_sha256(site_path)[..32].to_string();
+    let record = tempfile::tempdir().unwrap();
+    assert_eq!(read_turn_given(record.path()), None);
+    write_turn_given(record.path(), "read-1.json", &[key("example.test/a")]).unwrap();
+    assert_eq!(read_turn_given(record.path()), None, "no seed");
+    assert!(!turn_given_takes_any_address(record.path()), "no seed");
+    write_turn_given(record.path(), TURN_GIVEN_SEED, &[key("example.test/seed")]).unwrap();
+    std::fs::write(record.path().join("read-2.json"), "{not json").unwrap();
+    std::fs::write(
+        record.path().join("read-3.json"),
+        json!({ "version": 1, "addresses": ["https://example.test/clear", "ABC", key("example.test/b")] }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        record.path().join(".read-4.json.tmp"),
+        json!({ "version": 1, "addresses": [key("example.test/c")] }).to_string(),
+    )
+    .unwrap();
+    keep_what_a_search_found(
+        record.path(),
+        Some(&[json!({ "type": "search_usage", "searches": 1 })]),
+    );
+    keep_what_a_search_found(
+        record.path(),
+        Some(&[
+            json!({ "url": "https://www.found.example/page/?x=1" }),
+            json!({ "url": "https://www.found.example/page" }),
+            json!({ "url": "ftp://found.example/file" }),
+        ]),
+    );
+    assert!(!turn_given_takes_any_address(record.path()));
+    let held = read_turn_given(record.path()).unwrap();
+    assert_eq!(held.first(), Some(&key("example.test/seed")));
+    for kept in ["example.test/a", "example.test/b", "found.example/page"] {
+        assert!(held.contains(&key(kept)), "{kept}: {held:?}");
+    }
+    assert!(!held.contains(&key("example.test/c")));
+    assert!(!held.contains(&key("found.example")));
+    assert_eq!(
+        held.iter()
+            .filter(|address| **address == key("found.example/page"))
+            .count(),
+        1
+    );
+    let files = std::fs::read_dir(record.path()).unwrap().count();
+    assert_eq!(
+        files, 6,
+        "the seed, three reads, a search and a temporary file; an empty search wrote none"
+    );
+    for entry in std::fs::read_dir(record.path()).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        assert!(!text.contains("found.example"), "{text}");
+    }
+    // A search that lists none of the pages it found: any of them may be read now.
+    keep_what_a_search_found(record.path(), None);
+    assert!(turn_given_takes_any_address(record.path()));
+    assert_eq!(read_turn_given(record.path()).unwrap(), held);
+}
+
 /// The words an address no message and no page gave is refused with, on a site the chat was
 /// given: that site's home page, by its address, always opens, and the next source is the one
 /// the browser skill's "Finding a page" names.
@@ -4645,6 +4813,54 @@ fn a_tasks_addresses_are_kept_by_their_site_and_path() {
             key("visitporto.travel/en/lello"),
             key("example.org/b_(c)"),
         ]
+    );
+    // A Chinese, Japanese or Korean sentence's own marks end an address as a space does, and so
+    // do an ellipsis and a dash; letters of any script in a path stay (`instafy web read`'s
+    // `addressesInText`, the same cases). The person's "…營業時間：https://…/museum/hours。謝謝"
+    // named "/museum/hours。謝謝", and the address they gave was refused as one nobody gave.
+    let message = "請幫我看這個頁面的營業時間：https://news.example.org/museum/hours。謝謝 公式サイト（https://news.example.org/access）をご覧ください、またはhttps://news.example.org/map，";
+    assert_eq!(
+        given_addresses_in_text(&format!(
+            "{message} ja.wikipedia.org/wiki/東京、「https://example.org/c」 https://example.org/a…and https://example.org/b—then"
+        )),
+        vec![
+            key("news.example.org/museum/hours"),
+            key("news.example.org/access"),
+            key("news.example.org/map"),
+            key("ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC"),
+            key("example.org/c"),
+            key("example.org/a"),
+            key("example.org/b"),
+        ]
+    );
+    // Emphasis's asterisks around an address go, as a skill's own text may write the address its
+    // setup opens.
+    assert_eq!(
+        given_addresses_in_text(
+            "Sign in at **https://app.provider.example/settings/api-keys**, or *visitporto.travel/en/lello*."
+        ),
+        vec![
+            key("app.provider.example/settings/api-keys"),
+            key("visitporto.travel/en/lello"),
+        ]
+    );
+    // A card in the person's language keeps the address they gave, with the sentence's own mark
+    // after it, and names the home page in place of one nobody gave.
+    let given: std::collections::HashSet<String> =
+        given_addresses_from_payload(&json!({ "prompt_text": message }))
+            .into_iter()
+            .collect();
+    assert_eq!(
+        with_home_pages_where_not_given(
+            "打開https://news.example.org/museum/hours。查看營業時間（https://news.example.org/access）",
+            &given
+        ),
+        None
+    );
+    assert_eq!(
+        with_home_pages_where_not_given("打開https://news.example.org/museum/tickets。", &given)
+            .as_deref(),
+        Some("打開https://news.example.org/。")
     );
 }
 

@@ -22,6 +22,11 @@
 //! with no shell and no web search, told which rule its card broke and what to name instead. A
 //! first attempt that looked nothing up has nothing to write the card from: its retry keeps the
 //! shell, told to find the page first.
+//!
+//! A card names only pages its turn was given. The stand-in turns find their pages as a turn's
+//! reader and search would, and record them so in the turn's record of the addresses it was given
+//! (`INSTAFY_TURN_GIVEN_DIR`); a retry's card naming a page nothing gave names its site's home
+//! page instead (`AMadeUpPage`).
 
 // The proxy fixtures of `tests/proxy_integration.rs`, as the evidence retry's own tests use them.
 use crate::*;
@@ -35,10 +40,16 @@ const FIRST_LINE: &str = "I've opened a browser check of the official results.";
 const NAMES_NO_PAGE: &str = "Check the official results for the team's game on November 18, 2026, and tell me who won and the final score.";
 const NAMES_ITS_PAGE: &str =
     "Open https://scores.example/2026-11-18 and read the team's final score.";
+/// The same card where nothing gave the turn the results page: it names the site's home page.
+const NAMES_THE_HOME_PAGE: &str = "Open https://scores.example/ and read the team's final score.";
 /// A return policy asked beside the person's details, and the shop's own page a search found.
 const POLICY_REQUEST: &str = "My email is ana@example.com and my order is 123-4567. What is the shop's return policy for it?";
 const POLICY_NO_PAGE: &str = "Check the shop's return policy for my order.";
 const POLICY_PAGE: &str = "Open https://shop.example/help/returns and explain the return policy that may apply to my order. Do not use or submit my email address or order number.";
+/// The shop's own returns page, by its site and path as the turn's record keeps it.
+const POLICY_SITE_PATH: &str = "shop.example/help/returns";
+/// The results page, by its site and path as the turn's record keeps it.
+const RESULTS_SITE_PATH: &str = "scores.example/2026-11-18";
 const POLICY_WORDS: &str = "I found the shop's official returns page, but its site refused a direct read. A search result says unopened items can be returned within 365 days with proof of purchase; I couldn't check the full terms. The card opens the official page.";
 /// A hotel asked for dates, and the retry's own card naming no page either.
 const HOTEL_REQUEST: &str =
@@ -76,6 +87,8 @@ enum Case {
     RefusedTwice,
     /// The first attempt read a page before its card named none: the retry fixes only the card.
     AfterARead,
+    /// As [`Case::TheOnlyCard`], but nothing gave the turn the page its retry's card names.
+    AMadeUpPage,
 }
 
 impl Case {
@@ -96,6 +109,22 @@ impl Case {
             Self::AfterARead => {
                 "evidence_retry::refused_card::a_refused_cards_retry_adds_no_search_and_no_read_via_proxy"
             }
+            Self::AMadeUpPage => {
+                "evidence_retry::refused_card::a_retrys_card_naming_a_page_nothing_gave_names_its_home_page_via_proxy"
+            }
+        }
+    }
+
+    /// The page the stand-in turn finds, as its reader or its search would, by its site and path:
+    /// what goes into the turn's record of the addresses it was given before the turn answers.
+    fn found(self) -> Option<&'static str> {
+        match self {
+            // The answer read the league's text-only page.
+            Self::TheOnlyCard | Self::ACardLeft => Some(RESULTS_SITE_PATH),
+            // A search found the shop's own page.
+            Self::AWaitingCard => Some(POLICY_SITE_PATH),
+            // Its reader was refused, or it found nothing.
+            Self::RefusedTwice | Self::AfterARead | Self::AMadeUpPage => None,
         }
     }
 
@@ -108,7 +137,7 @@ impl Case {
     /// The person's message.
     fn request(self) -> &'static str {
         match self {
-            Self::TheOnlyCard | Self::ACardLeft => {
+            Self::TheOnlyCard | Self::ACardLeft | Self::AMadeUpPage => {
                 "Who won the team's game last night, and what was the final score?"
             }
             Self::AWaitingCard => POLICY_REQUEST,
@@ -151,7 +180,7 @@ impl Case {
         };
         match self {
             // It hands over the page it read by its address.
-            Self::TheOnlyCard => Some(answer("", NAMES_ITS_PAGE)),
+            Self::TheOnlyCard | Self::AMadeUpPage => Some(answer("", NAMES_ITS_PAGE)),
             Self::ACardLeft => None,
             Self::AWaitingCard => Some(answer(POLICY_WORDS, POLICY_PAGE)),
             Self::RefusedTwice if stand_alone => Some(answer(HOTEL_WORDS, HOTEL_NO_PAGE)),
@@ -164,6 +193,7 @@ impl Case {
     fn cards(self) -> Vec<String> {
         match self {
             Self::TheOnlyCard | Self::ACardLeft => vec![NAMES_ITS_PAGE.to_string()],
+            Self::AMadeUpPage => vec![NAMES_THE_HOME_PAGE.to_string()],
             Self::AWaitingCard => vec![POLICY_PAGE.to_string()],
             Self::RefusedTwice => Vec::new(),
             Self::AfterARead => vec![PRICE_HOME_PAGE.to_string()],
@@ -172,7 +202,7 @@ impl Case {
 
     fn first_answer(self) -> Value {
         let no_page = match self {
-            Self::TheOnlyCard | Self::ACardLeft => NAMES_NO_PAGE,
+            Self::TheOnlyCard | Self::ACardLeft | Self::AMadeUpPage => NAMES_NO_PAGE,
             Self::AWaitingCard => POLICY_NO_PAGE,
             Self::RefusedTwice => HOTEL_NO_PAGE,
             Self::AfterARead => PRICE_NO_PAGE,
@@ -185,7 +215,7 @@ impl Case {
             actions.push(json!({"type":"request_browser","task":NAMES_ITS_PAGE}));
         }
         let (summary, files) = match self {
-            Self::TheOnlyCard | Self::ACardLeft => (
+            Self::TheOnlyCard | Self::ACardLeft | Self::AMadeUpPage => (
                 format!(
                     "I couldn't verify the result from the league's text-only score page. {FIRST_LINE}"
                 ),
@@ -231,6 +261,30 @@ fn a_retry_whose_card_is_refused_too_ends_in_its_words_alone_via_proxy() -> Resu
 #[test]
 fn a_refused_cards_retry_adds_no_search_and_no_read_via_proxy() -> Result<()> {
     run_isolated(Case::AfterARead)
+}
+
+#[test]
+fn a_retrys_card_naming_a_page_nothing_gave_names_its_home_page_via_proxy() -> Result<()> {
+    run_isolated(Case::AMadeUpPage)
+}
+
+/// Keeps a page the stand-in turn found in the turn's record of the addresses it was given, as
+/// `instafy web read` and `instafy web search` do: its fingerprint, the first 32 hex digits of the
+/// SHA-256 of its site and path, in a file of the folder the runtime names for the turn.
+fn record_what_the_turn_found(site_path: &str) {
+    use sha2::Digest;
+    let dir = std::env::var("INSTAFY_TURN_GIVEN_DIR")
+        .expect("the turn's record of the addresses it was given");
+    let key: String = sha2::Sha256::digest(site_path.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    fs::write(
+        std::path::Path::new(&dir).join("read-stand-in.json"),
+        json!({ "version": 1, "addresses": [key] }).to_string(),
+    )
+    .expect("a page the turn found, in its record");
 }
 
 fn run_isolated(case: Case) -> Result<()> {
@@ -297,6 +351,11 @@ async fn provider_request(
     };
     if index == state.case.retry_index() {
         *state.draft_as_the_retry_began.lock().unwrap() = Some(state.draft.borrow().clone());
+    }
+    if index == 0
+        && let Some(found) = state.case.found()
+    {
+        record_what_the_turn_found(found);
     }
     match (state.case, index) {
         // The first attempt reads first: the command stands in for the reader.
@@ -551,7 +610,7 @@ async fn run_case(case: Case) -> Result<()> {
             // that a browser check was opened, which the stand-in model writes again untold.
             assert_eq!(execution.summary, words);
         }
-        Case::TheOnlyCard => {
+        Case::TheOnlyCard | Case::AMadeUpPage => {
             // Nothing failed that the person saw: the line reads "Working…".
             assert_eq!(
                 retries,

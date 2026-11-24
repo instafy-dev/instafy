@@ -31,6 +31,7 @@ import {
   type WebSearchDeps,
   type WebSearchReport,
 } from "../src/web-search.js";
+import { TURN_GIVEN_SEED, TurnGiven } from "../src/web-shared.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TEST_POLICY = JSON.parse(fs.readFileSync(path.resolve(here, "../../browser-action-policy/test/link-only-policy.json"), "utf8"));
@@ -198,6 +199,26 @@ describe("searching with the space's own key (fixtures)", () => {
     ]);
     expect(report.results.map((r) => r.rank)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(report.budget).toMatchObject({ scope: "this turn", searchesUsed: 1, searchesLeft: 3, searchesPerTurn: 4 });
+  });
+
+  it("gives the turn its results' addresses, as fingerprints only, so `instafy web read` reads them and nothing beside them", async () => {
+    const dir = path.join(base, "given");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, TURN_GIVEN_SEED), JSON.stringify({ version: 1, addresses: [] }));
+    const env = turnEnv(caseNo, { BRAVE_SEARCH_API_KEY: BRAVE_KEY, INSTAFY_TURN_GIVEN_DIR: dir });
+    const before = TurnGiven.load(env)!;
+    expect(before.has(new URL("https://blog.example.org/ramen"))).toBe(false);
+    const report = await search("ramen shinjuku", env);
+    expect(report.results.length).toBeGreaterThan(0);
+    const given = TurnGiven.load(env)!;
+    for (const result of report.results) expect(given.has(new URL(result.url)), result.url).toBe(true);
+    expect(given.has(new URL("https://blog.example.org/ramen/made-up"))).toBe(false);
+    const written = fs.readdirSync(dir).filter((name) => name !== TURN_GIVEN_SEED);
+    expect(written).toEqual([expect.stringMatching(/^search-[0-9a-f-]+\.json$/)]);
+    expect(fs.readFileSync(path.join(dir, written[0]!), "utf8")).not.toMatch(/ramen|blog|booking|tabelog/);
+    // The same search again sends nothing and adds nothing.
+    expect((await search("ramen shinjuku", env)).repeat).toBe(true);
+    expect(fs.readdirSync(dir)).toHaveLength(2);
   });
 
   it("maps Kagi's fields from a POST with a Bearer key, and only its web results", async () => {
