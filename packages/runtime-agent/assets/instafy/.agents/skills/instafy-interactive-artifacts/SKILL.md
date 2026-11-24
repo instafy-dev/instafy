@@ -56,7 +56,8 @@ own kind of page.
   ("No options yet") while a page you read named what to compare. An item whose own page wasn't opened is "not
   checked (its own page wasn't opened)" in the reply, and each of its unknown values has `"note": "its own page wasn't
   opened"`. A value whose page you couldn't read is not checked: only its `"url"` (where to check) and
-  `"note": "its page couldn't be read"`, never a sentence about how that page is built.
+  `"note": "its page couldn't be read"`, never a sentence about how that page is built. A value says only what its
+  page or search result says: what nobody read is "not checked", never "not stated in the page read".
 - Options asked for from what you already know, with nothing looked up: the compare starter with `"from": "memory"`,
   each value only its `"v"`, from your own knowledge, never from the space's other pages. No `src`, `url`, `date`,
   store or filter (`instafy bind check` fails them): the starter reads each value "<value>, not checked" and says
@@ -93,9 +94,10 @@ own kind of page.
 ## 4. Reply
 
 2-5 lines in the user's terms: the verdict, what the page lets them do and what is unverified. The first line says
-what the page has, never something it lacks (prices, reviews, a route it doesn't show). Values whose page couldn't be
-read are named once, as not checked, with an offer to look in Instafy's browser. An `Assumed:` line only
-for a default you chose that the person didn't give (dates, a currency, which models), and none when there is none. A
-page they want to share says in one line who can open it (people in this space) and how to get a link anyone can open
-(ask for a public link), not as an assumption. The card speaks for itself: never point them to it or say it opened. No
-file paths, commands, "validation passed", "the provided read" or "updated for viewers".
+what the page has, as `instafy bind check`'s last line counts it ("The page shows 1 of 9 values: …"), never something
+it lacks (prices, reviews, a route it doesn't show). Values whose page couldn't be read are named once, as not
+checked, with an offer to look in Instafy's browser. An `Assumed:` line only for a default you chose that the person
+didn't give (dates, a currency, which models), and none when there is none. A page they want to share says in one line
+who can open it (people in this space) and how to get a link anyone can open (ask for a public link), not as an
+assumption. The card speaks for itself: never point them to it or say it opened. No file paths, commands, "validation
+passed", "the provided read" or "updated for viewers".

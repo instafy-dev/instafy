@@ -1,0 +1,53 @@
+{
+  "title": "Lisbon hotels · 12–14 February",
+  "sort": [],
+  "columns": [
+    { "key": "location", "label": "Location", "type": "text" },
+    { "key": "reviews", "label": "What reviewers say", "type": "text" },
+    { "key": "price", "label": "Price for 12–14 February", "type": "price" }
+  ],
+  "items": [
+    {
+      "ref": "hotel:art-legacy",
+      "name": "Art Legacy Hotel",
+      "why": "Lisbon stay",
+      "found": "Art Legacy Hotel",
+      "facts": {
+        "location": { "note": "Its page could not be reached, so location details are not checked" },
+        "reviews": { "note": "I didn't find reviewer comments for Art Legacy Hotel" },
+        "price": { "note": "I didn't find price for Art Legacy Hotel for 12 to 14 February" }
+      },
+      "sources": [{ "url": "https://www.artlegacyhotel.com/" }]
+    },
+    {
+      "ref": "hotel:independente-bica",
+      "name": "Independente Bica",
+      "why": "41 private rooms and a penthouse near Cais do Sodré.",
+      "facts": {
+        "location": { "v": "On Rua de São Paulo, steps from the Bica Funicular and Cais do Sodré.", "src": "Independente Lisboa Bica", "url": "https://www.independente.eu/lisboa-bica/", "date": "2026-11-23", "viewer": "Instafy's browser in the workspace" },
+        "reviews": { "note": "I didn't find reviewer comments for Independente Bica" },
+        "price": { "note": "I didn't find price for Independente Bica for 12 to 14 February" }
+      },
+      "more": [
+        { "label": "Rooms", "fact": { "v": "41 private rooms and a penthouse near Cais do Sodré.", "src": "INDEPENDENTE Hotel Group", "url": "https://www.independente.eu/", "date": "2026-11-23", "viewer": "Instafy's browser in the workspace" } }
+      ],
+      "sources": [{ "url": "https://www.independente.eu/lisboa-bica/" }, { "url": "https://www.independente.eu/" }]
+    },
+    {
+      "ref": "hotel:holiday-inn-principe-real",
+      "name": "Holiday Inn Express & Suites Lisbon - Príncipe Real",
+      "why": "Lisbon stay",
+      "found": "IHG",
+      "facts": {
+        "location": { "note": "I didn't find location details for Holiday Inn Express & Suites Lisbon - Príncipe Real" },
+        "reviews": { "note": "I didn't find reviewer comments for Holiday Inn Express & Suites Lisbon - Príncipe Real" },
+        "price": { "note": "I didn't find price for Holiday Inn Express & Suites Lisbon - Príncipe Real for 12 to 14 February" }
+      },
+      "more": [
+        { "label": "Brand detail", "fact": { "v": "Breakfast is included at Holiday Inn Express hotels; the offering and hours vary by location.", "src": "Holiday Inn Express by IHG", "url": "https://www.ihg.com/holidayinnexpress/hotels/gb/en/reservation", "date": "2026-11-23", "viewer": "Instafy's browser in the workspace" } }
+      ],
+      "sources": [{ "url": "https://www.ihg.com/holidayinnexpress/hotels/gb/en/reservation" }]
+    }
+  ],
+  "unchecked": ["The requested stay year wasn't specified; prices are not checked for any year.", "I couldn't reach Art Legacy Hotel's own website, so its location, reviews and date-specific price remain unverified."]
+}

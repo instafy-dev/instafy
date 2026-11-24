@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { TYPED_READ, UNAVAILABLE_KEYS, cardWaits, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, typedReads, typedWords, uncheckedRepeats, uncitedRows, unsaidReaders, unsortedNumbers } from "../src/check.mjs";
+import { TYPED_READ, UNAVAILABLE_KEYS, cardWaits, checkSite, checkValues, htmlLines, htmlText, jsonStrings, names, parseExpect, servedPath, shownLine, typedReads, typedWords, uncheckedRepeats, uncitedRows, unsaidReaders, unsortedNumbers } from "../src/check.mjs";
 import { readScript } from "../src/script-text.mjs";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "instafy-bind.mjs");
@@ -1205,6 +1205,103 @@ test("a price a check read counts for the filter; a check that found the shop bl
     assert.match(notes[0], /^1 item\(s\) have no price the page can show: Option A\./);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A comparison of three hotels showed one of the nine values the request asked for (a location), and its reply opened
+// "The comparison page covers location, reviewer comments and date-specific prices for all three hotels" (a local
+// test, Nov 23; the page's data as it was saved is tests/fixtures/hotel-comparison/data.json). Its check had passed,
+// counting the hotels it named, never their values. A comparison's check ends with one line for the reply, which the
+// reply's first line follows: how many of its values the page shows, in all and per column, in the page's order.
+test("a comparison's check ends with how many of its values the page shows, for the reply", () => {
+  const saved = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "hotel-comparison", "data.json"), "utf8"));
+  const expect = ["--expect", saved.items.map((item) => item.name).join(",")];
+  const last = (text) => text.trimEnd().split("\n").at(-1);
+  const saw = (dir) => {
+    const out = run("check", dir, ...expect);
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    const json = JSON.parse(run("check", dir, ...expect, "--json").stdout);
+    assert.equal(Object.keys(json).at(-1), "for_the_reply");
+    assert.equal(json.for_the_reply, last(out.stdout));
+    return last(out.stdout);
+  };
+  const dir = optionsSite("compare", () => saved);
+  try {
+    assert.equal(saw(dir), "The page shows 1 of 9 values: Location 1 of 3, What reviewers say 0 of 3, Price for 12–14 February 0 of 3.");
+    // every value read on its page: all nine
+    const read = { src: "The hotel's own page", url: "https://hotel.example/stay", date: "2026-11-23", viewer: "shared browser" };
+    const all = structuredClone(saved);
+    for (const item of all.items) for (const key of Object.keys(item.facts)) item.facts[key] = { v: `${key} of ${item.name}`, ...read };
+    fs.writeFileSync(path.join(dir, "data.json"), JSON.stringify(all, null, 2));
+    assert.equal(saw(dir), "The page shows 9 of 9 values: Location 3 of 3, What reviewers say 3 of 3, Price for 12–14 February 3 of 3.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The count is of what the compare starter draws (app.js and site.trust): a value with its page or an estimate, and in
+// the price column a price a check read, unless that check found the store blocked (the seed is drawn then). A value
+// with no page reads "Not checked", a page read without the value "Not found", "—" nothing: none is a value. On a page
+// from what Octo knows every value is drawn, "<value>, not checked", and the line says none is checked. A sixth column
+// is never drawn, and a page with no columns (ranked, timeline, blank) or no rows has no such line.
+test("the line for the reply counts the values the page draws, as the compare starter draws them", () => {
+  const read = { src: "Maker", url: "https://maker.example/a", date: "2026-11-23", viewer: "server fetch" };
+  const dir = optionsSite("compare", (data, d) => {
+    fs.mkdirSync(path.join(d, "data/records"), { recursive: true });
+    const at = new Date().toISOString();
+    fs.writeFileSync(path.join(d, "data/records/read_offer.json"), JSON.stringify({ schema: "instafy.records@1", records: [
+      { type: "offer", ref: "option:option-c", price: { amount: 120, currency: "USD" }, prov: { observed_at: at } },
+      { type: "claim", ref: "option:option-b", attr: "price", value: null, status: "uncertain", note: "blocked", prov: { observed_at: at } },
+    ] }));
+    return {
+      ...data,
+      columns: [...data.columns, { key: "colour", label: "Colour", type: "text" }, { key: "size", label: "Size", type: "text" }],
+      items: data.items.map((item, i) => ({ ...item, facts: {
+        price: i === 1 ? { v: "$129", ...read } : { note: "no price on the shop's page today" },
+        weight: [{ v: "about 9 oz", est: true, url: "https://maker.example/how" }, { v: "9.1 oz" }, { ...read }][i],
+        rating: [{ v: "4.6 of 5", ...read }, { v: "—", ...read }, { note: "no rating found" }][i],
+        warranty: { v: "2 years", ...read },
+        colour: { v: "Grey", ...read },
+        size: { v: "Large", ...read },
+      } })),
+    };
+  });
+  try {
+    // Option C's price a check read, Option B's seed kept by the blocked check; Option A's weight an estimate, B's
+    // without a page and C's read without the value; a dash says nothing; the sixth column isn't drawn
+    assert.equal(shownLine(dir), "The page shows 10 of 15 values: Price 2 of 3, Weight 1 of 3, Rating 1 of 3, Warranty 3 of 3, Colour 3 of 3.");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const memory = optionsSite("compare", (data) => ({ title: "Two e-readers", from: "memory",
+    columns: [{ key: "screen", label: "Display", type: "text" }, { key: "price", label: "Price", type: "price" }],
+    items: [{ ref: "reader:a", name: "Reader A", facts: { screen: { v: "6 in" }, price: { v: "$130" } } },
+      { ref: "reader:b", name: "Reader B", facts: { screen: { v: "7 in" }, price: { note: "not known" } } }] }));
+  try {
+    assert.equal(shownLine(memory), "The page shows 3 of 4 values, from what Octo knows and none checked: Display 2 of 2, Price 1 of 2.");
+  } finally {
+    fs.rmSync(memory, { recursive: true, force: true });
+  }
+  for (const starter of ["ranked", "timeline"]) {
+    const other = optionsSite(starter);
+    try {
+      assert.equal(shownLine(other), null, starter);
+      assert.doesNotMatch(run("check", other, "--expect", "Option A").stdout, /^The page shows/m, starter);
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  }
+  const blank = blankSite(null);
+  try {
+    assert.equal(shownLine(blank), null);
+  } finally {
+    fs.rmSync(blank, { recursive: true, force: true });
+  }
+  const empty = optionsSite("compare", (data) => ({ ...data, items: [] }));
+  try {
+    assert.equal(shownLine(empty), null);
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
   }
 });
 

@@ -541,6 +541,10 @@ const LEGACY_INTERACTIVE_ARTIFACTS_SHA256: &[&str] = &[
     // do, a tool nobody ran was captioned "not run" with no day, a page never said "I", and an
     // edit was followed by the check.
     "b067fc91eaf469f41628d5e6d8be9cda0e0012a423da782bae58226c8ff6110d", // v24
+    // From before a reply's first line said what the page has as `instafy bind check`'s last
+    // line counts it, and a value nobody read was "not checked", never "not stated in the page
+    // read".
+    "0c479d1a685a86b4258950d66dd3452134bb2bcd2e8dbd18336ae10b972eabc3", // v25
 ];
 const LEGACY_RESEARCH_TEAM_SHA256: &[&str] = &[
     "0855d10b442722d484f3c9fec42ba0f149fcf5102e55a6868170b0e0ab8d8fd2", // v1
@@ -931,6 +935,10 @@ const LEGACY_SKILL_READING_SHA256: &[&str] = &[
     // carried them read the map skill's trip reference cut at 1,400 or 4,000 tokens, or never,
     // and built no plan (local tests, Nov 1 and Nov 4); one without them read it whole.
     "d701a2dd4f1c24b2ca5f9e597b079d89ec6a135b1004f9d19e1e385ce3013489", // v1
+    // From before a turn read each skill it picks on its own and whole: turns read two or more
+    // skills in one command under an output cap below their size, and the reads came back cut in
+    // their middle, without the rules past the cut (local tests, Nov 23).
+    "7cf60853350e52eee03ec478a9f0111220c9ab125019036a2326ba472999e8ca", // v2
 ];
 const LEARNED_INDEX_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -3932,6 +3940,22 @@ mod tests {
         ensure_project_memory_scaffold(workspace.path());
         let path = workspace.path().join(SKILL_READING_RELATIVE_PATH);
         assert_eq!(fs::read_to_string(&path).unwrap(), SKILL_READING_TEMPLATE);
+    }
+
+    /// Turns read two or more skills in one command, under an output cap below their size, and
+    /// the reads came back cut in their middle: a page went out without the page skill's reply
+    /// rules past the cut, who can open it among them (local tests, Nov 23). The skill-reading
+    /// rules, in every turn's context, say to read each skill a turn picks on its own and whole.
+    #[test]
+    fn a_turn_reads_each_skill_it_picks_on_its_own_and_whole() {
+        let flat = SKILL_READING_TEMPLATE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains(
+            "- **Whole reads**: Read each skill you pick on its own and whole: one SKILL.md per command, with no output cap below its size; a read cut in its middle misses its rules."
+        ));
+        assert!(SKILL_READING_TEMPLATE.contains("always_include: true"));
     }
 
     /// A page the person wants to share: its reply says in one line who can open it and how to get
