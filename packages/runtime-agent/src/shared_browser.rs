@@ -1233,9 +1233,9 @@ const MAX_TASK_TEXT_BYTES: usize = 64 * 1024;
 
 /// The addresses each chat's runs were given, by approval directory and chat,
 /// the chat that ran last at the end. Kept in this process only: a runtime
-/// that starts again has only what the chat's history names
-/// ([`given_addresses_from_payload`]), and a turn finds any other page again
-/// from its site's root.
+/// that starts again has only what the chat's history names and what Octo's
+/// replies there carry ([`given_addresses_from_payload`]), and a turn finds any
+/// other page again from its site's root.
 static GIVEN_ADDRESSES: Mutex<Vec<((PathBuf, Uuid), Vec<String>)>> = Mutex::new(Vec::new());
 
 /// The fingerprint a given address is kept by: the first 32 hex digits of the
@@ -1309,6 +1309,7 @@ fn given_fingerprint(text: &str) -> String {
 /// person's messages and the chat's earlier browser tasks name (its
 /// `conversation_history` entries with `role: "user"`), and the pages the
 /// chat's browser turns read, by their finding lines ([`pages_read_in`]),
+/// and what Octo's earlier replies carry ([`given_addresses_a_reply_carried`]),
 /// which a runtime that started again no longer holds. No reply gives one by
 /// its words: a turn's reply can name an address it made up, and one that
 /// stopped it (a finding with `stopped`) was not read. A site's root needs
@@ -1337,6 +1338,7 @@ fn given_addresses_named_for(payload: &JsonValue, with_the_request: bool) -> Vec
         .into_iter()
         .flatten()
     {
+        addresses.extend(given_addresses_a_reply_carried(entry));
         let Some(content) = text(entry, "content") else {
             continue;
         };
@@ -1352,10 +1354,79 @@ fn given_addresses_named_for(payload: &JsonValue, with_the_request: bool) -> Vec
     newest_given_addresses(addresses)
 }
 
+/// The kind of the artifact with which a turn's reply carries into the chat's history what its
+/// turn was given ([`given_addresses_a_reply_carries`]). The controller keeps a job's artifacts
+/// in its reply's `metadata.artifacts`, and the history returns them.
+pub(crate) const REPLY_GIVEN_ARTIFACT_KIND: &str = "agent/given-addresses";
+/// The most fingerprints one reply carries.
+const MAX_REPLY_GIVEN_ADDRESSES: usize = 256;
+
+/// The artifact with which a turn's reply (`reply`, its words) carries into the chat's history
+/// the fingerprints of the addresses and sites it names that the turn's record (`given`) holds:
+/// a page the turn read or a search found and the reply linked, or one the person gave. The
+/// chat's next turns start with it ([`given_addresses_a_reply_carried`]) on any runtime: the
+/// record the turn's chat keeps in this process ([`keep_a_turns_given_addresses_for_its_chat`])
+/// is gone once the runtime starts again, and a person who asked a restarted runtime to open
+/// the page a reply linked got a card for the site's home page, and a reader that refused the
+/// page. An address the reply made up is in no record, so it carries none. None when the reply
+/// names nothing the record holds.
+pub(crate) fn given_addresses_a_reply_carries(reply: &str, given: &[String]) -> Option<JsonValue> {
+    let given: std::collections::HashSet<&str> = given.iter().map(String::as_str).collect();
+    let mut carried: Vec<String> = given_addresses_named_in(reply)
+        .into_iter()
+        .filter(|address| given.contains(address.as_str()))
+        .collect();
+    let excess = carried.len().saturating_sub(MAX_REPLY_GIVEN_ADDRESSES);
+    let carried = carried.split_off(excess);
+    (!carried.is_empty()).then(|| {
+        json!({
+            "kind": REPLY_GIVEN_ARTIFACT_KIND,
+            "version": 1,
+            "addresses": carried,
+        })
+    })
+}
+
+/// The fingerprints an agent's reply in the chat's history (`entry`) carries
+/// ([`given_addresses_a_reply_carries`]), from its `metadata.artifacts`: only a reply the
+/// controller wrote for an agent's job (`metadata.source` `agent`), and at most as many as one
+/// reply carries.
+fn given_addresses_a_reply_carried(entry: &JsonValue) -> impl Iterator<Item = String> + '_ {
+    let text = |pointer: &str| entry.pointer(pointer).and_then(JsonValue::as_str);
+    let agents_reply =
+        text("/role") == Some("assistant") && text("/metadata/source") == Some("agent");
+    agents_reply
+        .then(|| entry.pointer("/metadata/artifacts"))
+        .flatten()
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|artifact| {
+            artifact.get("kind").and_then(JsonValue::as_str) == Some(REPLY_GIVEN_ARTIFACT_KIND)
+                && artifact.get("version") == Some(&json!(1))
+        })
+        .filter_map(|artifact| artifact.get("addresses").and_then(JsonValue::as_array))
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .filter(|address| is_given_fingerprint(address))
+        .take(MAX_REPLY_GIVEN_ADDRESSES)
+        .map(str::to_string)
+}
+
+/// Whether `address` is a fingerprint as a record of given addresses keeps one: 32 lower-case
+/// hex digits ([`given_fingerprint`]).
+fn is_given_fingerprint(address: &str) -> bool {
+    address.len() == 32
+        && address
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// The fingerprints of the addresses and sites `text` names, all of it read, a part at a time
 /// (each address reader reads the first [`MAX_TASK_TEXT_BYTES`] of what it is handed): the
 /// installed skills a setup's first turn carries (`jobs::turn_continuation`'s
-/// `give_what_the_skills_declare`), whose addresses the setup opens "as the skill declares" them.
+/// `give_what_the_skills_declare`), whose addresses the setup opens "as the skill declares" them,
+/// and the text files the person attached to their message (`give_what_the_attachments_name`).
 pub(crate) fn given_addresses_named_in(text: &str) -> Vec<String> {
     let mut addresses = Vec::new();
     let mut rest = text;
@@ -1744,12 +1815,7 @@ pub(crate) fn read_turn_given(dir: &Path) -> Option<Vec<String>> {
             .filter_map(|record| record["addresses"].as_array())
             .flatten()
             .filter_map(JsonValue::as_str)
-            .filter(|address| {
-                address.len() == 32
-                    && address
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
+            .filter(|address| is_given_fingerprint(address))
             .map(str::to_string)
             .collect(),
     )
@@ -1915,12 +1981,7 @@ fn read_given_addresses(approval_dir: &Path, binding: &RunBinding) -> Vec<String
         entries
             .iter()
             .filter_map(JsonValue::as_str)
-            .filter(|address| {
-                address.len() == 32
-                    && address
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
+            .filter(|address| is_given_fingerprint(address))
             .map(str::to_string),
     )
 }

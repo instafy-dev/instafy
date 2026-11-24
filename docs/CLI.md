@@ -894,13 +894,19 @@ inside the same `<untrusted_page_content>` wrapper as the text.
   `INSTAFY_TURN_GIVEN_DIR`, a folder of the job's own, kept as Instafy's browser keeps its runs' (`given.json`,
   [Shared-Browser.md](Shared-Browser.md)): fingerprints of each address's site and path, never an address. It starts
   with what the person's messages, the turn's request, the chat's browser turns and the chat's earlier turns on that
-  runtime gave (a team agent's request, its lead's plan or its agents' reports, gives nothing: the AI wrote it), and
-  with what the installed skills a skill setup's first turn carries name; the AI's own web searches add what they
+  runtime gave (a team agent's request, its lead's plan or its agents' reports, gives nothing: the AI wrote it), with
+  what Octo's earlier replies in the chat carry (each reply carries, as an `agent/given-addresses` artifact the
+  controller keeps with it, the fingerprints of the addresses it names that its turn's record held, so a runtime that
+  started again still has them; a reply's words alone give nothing), with what the installed skills a skill setup's
+  first turn carries name, and, for the person's own turn, with what the text files they attached name (the first
+  256 KB of each `.txt` and `.md`); the AI's own web searches add what they
   found; each page this command reads adds its own address, its links and the addresses its text spells out, and
   `instafy web search` adds its results. An address ends where a sentence's own marks begin, those of Chinese,
   Japanese and Korean too (`。`, `、`, `（`), and the asterisks of emphasis around it don't count. Any other address is `skipped` with `code: "not_given"`: nothing is
   fetched for it, not even robots.txt, no stop is remembered, and the `tell` names the site's home page to read
-  instead, never the plain link. A search address (one with a query) on a site nobody gave names no home page. A stop
+  instead, never the plain link. Not reading it says nothing about the page: the `tell` asks the turn to keep the
+  address's link where the person, a file they attached, or a page or search result in the chat gave it, and never to
+  link, cite or card an address it put together itself. A search address (one with a query) on a site nobody gave names no home page. A stop
   the turn or the workspace already holds for the address or its site answers first, with its own words. A site's
   home page, a link-only site (its own refusal answers) and an address on no public site by its name (the
   private-network rule answers) are never refused so. Without that folder and its

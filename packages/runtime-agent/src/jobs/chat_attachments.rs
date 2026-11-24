@@ -279,6 +279,43 @@ pub(super) fn leased_attachment_names(payload: &JsonValue) -> HashSet<String> {
         .collect()
 }
 
+/// The text of each text attachment (`.txt`, `.md`) this lease signed whose file the pre-turn
+/// download left in the conversation's folder, by name, the first `max_bytes` of each: read
+/// without following a symlink, and only a regular file. No other file of the workspace is read.
+/// A file that can't be read is left out.
+pub(super) fn leased_text_attachments(
+    workspace_dir: &Path,
+    conversation_id: Option<&Uuid>,
+    payload: &JsonValue,
+    max_bytes: u64,
+) -> Vec<String> {
+    let Some(conversation_id) = conversation_id else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = leased_attachment_names(payload)
+        .into_iter()
+        .filter(|name| !is_image_file_name(name))
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    names.sort();
+    let Ok(workspace) = WorkspaceDir::open(workspace_dir) else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter_map(|name| {
+            let file = workspace
+                .open_file(&attachment_workspace_path(conversation_id, name))
+                .ok()?;
+            let mut bytes = Vec::new();
+            file.take(max_bytes).read_to_end(&mut bytes).ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .collect()
+}
+
 /// One signed download. No `Debug`: the URL must not reach a log.
 struct SignedDownload {
     name: String,

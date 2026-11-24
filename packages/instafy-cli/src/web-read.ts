@@ -171,6 +171,15 @@ export const NOTICE =
 const STOP_TELL = "This address only (and where it redirected): don't read it another way. Give the person the plain link.";
 const PAGE_STOP_TELL = `${STOP_TELL} The site's other pages, such as each product's own page, and other sources can still be read.`;
 const OTHER_SOURCES_TELL = "Other sources can still be read.";
+/**
+ * What an address nobody gave the turn leaves of its link (notGivenRefusal). Told never to link, cite or card such an
+ * address, a turn dropped the link to a page the chat had read before its runtime started again, or one a file the
+ * person attached named. Not reading it proves nothing about the page; only an address the turn put together itself is
+ * never passed on.
+ */
+const NOT_GIVEN_LINK_TELL =
+  "Not reading it says nothing about the page: keep its link where the person, a file they attached, or a page or " +
+  "search result in this chat gave it, but never link, cite or card an address you put together yourself.";
 const SIGN_IN_TELL =
   " If the person wants this page, they can open it in their own browser, sign in there themselves and share what " +
   "they need with Octo. Never ask for a password.";
@@ -604,7 +613,7 @@ const TELL: Record<StopCode | SkipCode | FailCode | "robots_site" | "needs_brows
   host_limit: `Not read: this turn has read this site ${LIMITS.loadsPerHost} times. Use another source.`,
   time_limit: "Not read: this call ran out of time. Read it in a later call if it is still needed.",
   // notGivenRefusal says it with the site's home page; this is the words without one.
-  not_given: `Octo reads only addresses it was given. ${OTHER_SOURCES_TELL} Never link, cite or card this address.`,
+  not_given: `Octo reads only addresses it was given. ${OTHER_SOURCES_TELL} ${NOT_GIVEN_LINK_TELL}`,
   not_found: "The page is missing or gone: do not cite it.",
   http_error: "The site answered with an error. Use another source rather than retrying.",
   unreachable: "The site did not answer. Use another source rather than retrying.",
@@ -643,7 +652,7 @@ function notGivenRefusal(url: URL, ctx: ReadContext): { message: string; tell: s
   const home = redaction.redactUrl(`${url.origin}/`).text;
   return {
     message: NOT_GIVEN_MESSAGE,
-    tell: `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. Never link, cite or card this address.`,
+    tell: `Octo reads only addresses it was given, and a site's home page: read this site's, ${home}, instead and find the page from there. ${NOT_GIVEN_LINK_TELL}`,
   };
 }
 
