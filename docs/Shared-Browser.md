@@ -1953,6 +1953,27 @@ and runtime-agent carries them, in memory, into the chat's next runs and into
 no other chat's. A run without the record (one runtime-agent did not start)
 refuses nothing.
 
+**A card gives the browser only what its turn was given.** Every other turn of
+Octo's keeps the same record for `instafy web read` (`INSTAFY_TURN_GIVEN_DIR`,
+[CLI.md](CLI.md)): started with what its request and its chat gave, it holds
+the pages its reader read (their own addresses, links and spelled-out
+addresses) and what its web searches found, and when the turn ends
+runtime-agent carries it, in memory, into the chat's next turns and browser
+runs. A team agent's request, its lead's plan or its agents' reports, gives it
+nothing, as the AI wrote it; a skill setup's first turn is given what its
+installed skills name, so its card opens the sign-in address a skill declares.
+When the turn posts a `request_browser` card, each address of the card's
+task past a site's root that the record doesn't hold is replaced by that
+site's home page, so the card's browser run opens the home page and finds the
+page from there; a card the routing step posts keeps the person's own words,
+and only its line of what the message carries on, which the routing step
+wrote, is held to the record so. A reply's card carried a product address no
+page had given, which the browser would have opened as the shop's own page,
+and a reply that links such an address can reach that line. A turn without the
+record, such as a Claude Code turn, keeps its cards as they are, and so does a
+turn one of whose searches listed none of the pages it found (a provider's own
+search tool): any address may then be one it gave.
+
 **A stop at an address no step tried is no finding.** runtime-agent keeps, for
 each run, the addresses its browser steps tried: each one a `navigate` or
 `open_tab` asked for, whatever the browser answered, each one the browser

@@ -8130,7 +8130,12 @@ function rememberGivenAddresses(rawUrl, interactive, text) {
 // The addresses a text spells out, read as runtime-agent reads a task's
 // (`given_addresses_in_text`): each http(s) address, and each site name with a
 // path written without a scheme ("visitporto.travel/en/lello"), read as https.
-const ADDRESS_WORD_DELIMITERS = /[\s<>"'`[\]{}“”‘’«»]+/u;
+// A word ends at a space, a quote or a bracket, and at a mark no address holds
+// as it is typed: the punctuation of Chinese, Japanese and Korean sentences
+// (。、「」【】…), its full-width forms (，：；！？（）…), an ellipsis and a dash.
+// "營業時間：https://news.example.org/museum/hours。謝謝" names the hours page.
+const ADDRESS_WORD_DELIMITERS =
+  /[\s<>"'`[\]{}“”‘’«»\u2014\u2026\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/u;
 const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
 function addressesInText(text) {
   const addresses = [];
@@ -8139,7 +8144,7 @@ function addressesInText(text) {
     if (start >= 0) {
       addresses.push(addressEnd(word.slice(start)));
     } else if (!word.includes("://")) {
-      const address = addressEnd(word.replace(/^\(+/u, ""));
+      const address = addressEnd(word.replace(/^[(*]+/u, ""));
       const slash = address.indexOf("/");
       const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
       if (
@@ -8157,10 +8162,11 @@ function addressesInText(text) {
 // An address as a sentence holds it, less the sentence's own marks after it
 // and a closing parenthesis it does not open itself: "(see
 // https://example.org/a)", but "https://en.wikipedia.org/wiki/Mercury_(planet)".
+// The asterisks of emphasis around it go too: "**https://example.org/a**".
 function addressEnd(word) {
-  let address = word.replace(/[.,;:!?]+$/u, "");
+  let address = word.replace(/[.,;:!?*]+$/u, "");
   while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
-    address = address.slice(0, -1).replace(/[.,;:!?]+$/u, "");
+    address = address.slice(0, -1).replace(/[.,;:!?*]+$/u, "");
   }
   return address;
 }

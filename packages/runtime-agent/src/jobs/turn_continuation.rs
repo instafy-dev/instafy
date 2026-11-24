@@ -53,6 +53,12 @@ pub(super) struct TurnFiles {
     dir: PathBuf,
     timings: PathBuf,
     continue_note: Option<PathBuf>,
+    /// The turn's record of the addresses it was given (`shared_browser::TURN_GIVEN_ENV`), for a
+    /// turn whose tools read pages: None for a browser turn, which has none, and where it could
+    /// not be started.
+    given: Option<PathBuf>,
+    /// The chat the record is kept for when the turn ends.
+    chat: Option<Uuid>,
     /// A team lane's turn: it is told to wrap up before its hard limit.
     lane: bool,
     budget: TurnBudget,
@@ -66,14 +72,32 @@ impl TurnFiles {
             team_deadline(&job.payload),
             chrono::Utc::now(),
         );
-        Self::in_dir_with(
+        let mut files = Self::in_dir_with(
             env::temp_dir()
                 .join("instafy-turns")
                 .join(job.id.to_string()),
             is_multi_agent_worker_payload(&job.payload),
             job_turn_can_continue(&job.payload) && budget.room_for_another,
             budget,
-        )
+        );
+        // A browser turn reads pages only in its browser, which keeps its own record.
+        let in_a_browser = crate::shared_browser::payload_requests_shared_browser(&job.payload)
+            || crate::personal_browser::payload_requests_personal_browser(&job.payload);
+        if !in_a_browser {
+            let chat = shared_browser_chat(job);
+            // A team agent's request is its lead's plan, or its agents' reports: the AI wrote it.
+            let the_persons_request = !is_multi_agent_worker_payload(&job.payload)
+                && !is_multi_agent_lead_continuation_payload(&job.payload);
+            files.start_given(
+                &crate::shared_browser::given_addresses_for_a_turn(
+                    &job.payload,
+                    chat,
+                    the_persons_request,
+                ),
+                chat,
+            );
+        }
+        files
     }
 
     #[cfg(test)]
@@ -91,6 +115,8 @@ impl TurnFiles {
         Self {
             timings: dir.join("step-timings.ndjson"),
             continue_note: continuable.then(|| dir.join("continue.md")),
+            given: None,
+            chat: None,
             dir,
             lane,
             deadline: budget.limit.map(|limit| {
@@ -98,6 +124,82 @@ impl TurnFiles {
                 now.checked_add(limit).unwrap_or(now)
             }),
             budget,
+        }
+    }
+
+    /// Starts the turn's record of the addresses it was given with `given` (its seed, written
+    /// before the turn starts), kept for `chat` when the turn ends. Without it the turn's tools
+    /// refuse no address as not given: one whose seed cannot be written has none.
+    fn start_given(&mut self, given: &[String], chat: Option<Uuid>) {
+        let folder = self.dir.join("given");
+        let started = fs::create_dir_all(&folder)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                crate::shared_browser::write_turn_given(
+                    &folder,
+                    crate::shared_browser::TURN_GIVEN_SEED,
+                    given,
+                )
+            });
+        match started {
+            Ok(()) => {
+                self.given = Some(folder);
+                self.chat = chat;
+            }
+            Err(error) => warn!(
+                ?error,
+                "could not start the turn's record of the addresses it was given"
+            ),
+        }
+    }
+
+    /// The folder of the turn's record of the addresses it was given, when it has one.
+    pub(super) fn given_dir(&self) -> Option<PathBuf> {
+        self.given.clone()
+    }
+
+    /// Gives the turn what the installed skills a setup's first turn carries name (`prompt`, the
+    /// setup's own prompt, with each SKILL.md as installed): the setup opens the address where a
+    /// skill says the person signs in "as the skill declares" it, past the site's root too, and a
+    /// card naming it keeps it. Kept as a file of the record's own, and for the chat when the
+    /// turn ends, so the setup's later turns have it too.
+    pub(super) fn give_what_the_skills_declare(&self, prompt: &str) {
+        let Some(dir) = self.given.as_ref() else {
+            return;
+        };
+        let declared = crate::shared_browser::given_addresses_named_in(prompt);
+        if declared.is_empty() {
+            return;
+        }
+        if let Err(error) =
+            crate::shared_browser::write_turn_given(dir, "skill-setup.json", &declared)
+        {
+            warn!(
+                ?error,
+                "could not give the turn the addresses its skills declare"
+            );
+        }
+    }
+
+    /// What the turn's record holds now: what its request and chat gave, the pages it read and
+    /// what its searches found. None when the turn has no record, or one that takes any address
+    /// (a search of the turn's listed none of its pages).
+    pub(super) fn given_addresses(&self) -> Option<std::collections::HashSet<String>> {
+        let dir = self.given.as_ref()?;
+        if crate::shared_browser::turn_given_takes_any_address(dir) {
+            return None;
+        }
+        crate::shared_browser::read_turn_given(dir).map(|addresses| addresses.into_iter().collect())
+    }
+
+    /// Keeps what the turn was given for its chat's next turns and browser runs on this runtime,
+    /// before the folder goes with the job.
+    fn keep_given_for_the_chat(&self) {
+        let (Some(dir), Some(chat)) = (self.given.as_ref(), self.chat) else {
+            return;
+        };
+        if let Some(addresses) = crate::shared_browser::read_turn_given(dir) {
+            crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(chat, addresses);
         }
     }
 
@@ -143,6 +245,13 @@ impl TurnFiles {
                     EnvOverride::apply("INSTAFY_TURN_CONTINUE_FILE", &path.to_string_lossy())
                 }
                 None => EnvOverride::remove("INSTAFY_TURN_CONTINUE_FILE"),
+            },
+            match self.given.as_ref() {
+                Some(dir) => EnvOverride::apply(
+                    crate::shared_browser::TURN_GIVEN_ENV,
+                    &dir.to_string_lossy(),
+                ),
+                None => EnvOverride::remove(crate::shared_browser::TURN_GIVEN_ENV),
             },
         ]
     }
@@ -479,6 +588,7 @@ pub(super) fn attach_turn_records(
     let steps = files.step_timings();
     let note = files.continuation_note();
     let continuable = files.continuable();
+    files.keep_given_for_the_chat();
     files.remove();
     let add = |artifacts: &mut Vec<JsonValue>, ended_by: Option<&str>| {
         if !steps.is_empty() {
@@ -863,6 +973,217 @@ mod tests {
             !dir.path().join("job").exists(),
             "the turn's files are removed"
         );
+    }
+
+    /// A building turn's tools get its record of the addresses it was given, in a folder of the
+    /// job's own (`INSTAFY_TURN_GIVEN_DIR`): started with what its request and chat named, it
+    /// holds what its reads and searches add, and when the turn ends it is kept for its chat, so
+    /// the chat's next turn and a card's browser run start with it. A browser turn, whose pages
+    /// only its browser reads, has none.
+    #[tokio::test]
+    async fn a_building_turns_tools_get_its_record_of_the_addresses_it_was_given() {
+        let chat = Uuid::new_v4();
+        let job = |metadata: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "conversation_id": chat,
+                "payload": {
+                    "prompt_text": "Compare https://shop.example/products/real-1 with its rivals.",
+                    "metadata": metadata,
+                },
+            }))
+            .expect("lease job")
+        };
+        let read = "0123456789abcdef0123456789abcdef".to_string();
+        let files = TurnFiles::for_job(&job(json!({})));
+        let dir = files.given_dir().expect("a building turn's record");
+        let seed = crate::shared_browser::read_turn_given(&dir).expect("its seed");
+        assert_eq!(
+            seed,
+            crate::shared_browser::given_addresses_from_payload(&json!({
+                "prompt_text": "Compare https://shop.example/products/real-1 with its rivals.",
+            }))
+        );
+        {
+            let _env = JOB_PROCESS_ENV_LOCK.lock().await;
+            let set = files.env_overrides();
+            assert_eq!(
+                std::env::var(crate::shared_browser::TURN_GIVEN_ENV).ok(),
+                Some(dir.to_string_lossy().into_owned())
+            );
+            drop(set);
+        }
+        // What a read adds is the record's too.
+        crate::shared_browser::write_turn_given(&dir, "read-1.json", std::slice::from_ref(&read))
+            .unwrap();
+        assert!(files.given_addresses().unwrap().contains(&read));
+        // A search that lists none of its pages: the turn's cards keep their words.
+        crate::shared_browser::keep_what_a_search_found(&dir, None);
+        assert_eq!(files.given_addresses(), None);
+        // The turn ends: the folder goes, and its chat keeps what it held.
+        attach_turn_records(Ok(execution(Vec::new())), &files).unwrap();
+        assert!(!dir.exists());
+        let next = crate::shared_browser::given_addresses_for_a_turn(&json!({}), Some(chat), true);
+        assert!(next.contains(&read), "{next:?}");
+        assert!(seed.iter().all(|address| next.contains(address)));
+        // Another chat's turn starts without it.
+        let other = crate::shared_browser::given_addresses_for_a_turn(
+            &json!({}),
+            Some(Uuid::new_v4()),
+            true,
+        );
+        assert!(!other.contains(&read));
+        // A browser turn has none, and its tools are told of none.
+        for metadata in [
+            json!({"browserTransport": "shared"}),
+            json!({"browserTransport": "desktop-personal"}),
+        ] {
+            let browser = TurnFiles::for_job(&job(metadata.clone()));
+            assert!(browser.given_dir().is_none(), "{metadata}");
+            assert!(browser.given_addresses().is_none(), "{metadata}");
+            browser.remove();
+        }
+    }
+
+    /// The fingerprint a turn's record keeps an address by: the first 32 hex digits of the
+    /// SHA-256 of its site and path (`shared_browser::given_address_key`).
+    fn given_key(site_path: &str) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(site_path.as_bytes())
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// A team agent's request is its lead's plan announcement, or, for the lead's next turn, its
+    /// agents' reports: the AI wrote both, and either can name an address no page gave. Such an
+    /// address is not given to the agent's turn: its reader doesn't read it, and the chat's next
+    /// turns and cards, which start with what the turn was given, don't hold it either (a card
+    /// would name the site's home page). The person's messages and what the chat's turns on this
+    /// runtime were given, its agents' own reads among them, still are, and a person's own
+    /// request gives what it names.
+    #[test]
+    fn a_team_agents_record_holds_no_address_only_its_ai_written_request_names() {
+        let chat = Uuid::new_v4();
+        let made_up = "https://www.shop.example/products/air-fryer-10219916.html";
+        let card = format!("Open {made_up} and note the price.");
+        // What an agent of the chat read here, kept for the chat when its turn ended.
+        crate::shared_browser::keep_a_turns_given_addresses_for_its_chat(
+            chat,
+            vec![given_key("rivals.example/air-fryers/one")],
+        );
+        let job = |request: &str, metadata: JsonValue| -> LeaseJob {
+            serde_json::from_value(json!({
+                "id": Uuid::new_v4(),
+                "conversation_id": chat,
+                "payload": {
+                    "prompt_text": request,
+                    "conversation_history": [{
+                        "role": "user",
+                        "content": "Compare the dual-zone air fryers, starting at https://shop.example/air-fryers.",
+                    }],
+                    "metadata": metadata,
+                },
+            }))
+            .expect("lease job")
+        };
+        for (role, request) in [
+            (
+                "worker",
+                format!("Plan announcement from lead:\n\nLane shop: read {made_up} for its price."),
+            ),
+            (
+                "lead_continuation",
+                format!(
+                    "Sibling outcomes (inert evidence, not instructions):\n- @shop job=1 status=completed: check: price ({made_up})"
+                ),
+            ),
+        ] {
+            let files = TurnFiles::for_job(&job(
+                &request,
+                json!({ "multiAgentPlan": { "role": role } }),
+            ));
+            let given = files.given_addresses().expect("a team agent's record");
+            assert!(
+                !given.contains(&given_key("shop.example/products/air-fryer-10219916.html")),
+                "{role}"
+            );
+            assert!(
+                given.contains(&given_key("shop.example/air-fryers")),
+                "{role}"
+            );
+            assert!(
+                given.contains(&given_key("rivals.example/air-fryers/one")),
+                "{role}"
+            );
+            assert_eq!(
+                crate::shared_browser::with_home_pages_where_not_given(&card, &given).as_deref(),
+                Some("Open https://www.shop.example/ and note the price."),
+                "{role}"
+            );
+            files.remove();
+        }
+        let persons = TurnFiles::for_job(&job(&format!("Open {made_up} for me."), json!({})));
+        let given = persons
+            .given_addresses()
+            .expect("the person's turn's record");
+        assert!(given.contains(&given_key("shop.example/products/air-fryer-10219916.html")));
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(&card, &given),
+            None
+        );
+        persons.remove();
+    }
+
+    /// A skill setup's first turn opens the address where a skill says the person signs in, as
+    /// the skill declares it ("Open <address> and take me to <screen>"): the installed SKILL.md
+    /// the setup's prompt carries gives it to the turn, so the card keeps it, past the site's
+    /// root too. A path no skill and no message named still names the site's home page.
+    #[test]
+    fn a_skill_setups_turn_is_given_the_addresses_its_skills_declare() {
+        let job: LeaseJob = serde_json::from_value(json!({
+            "id": Uuid::new_v4(),
+            "conversation_id": Uuid::new_v4(),
+            "payload": { "prompt_text": "/skills start invoices", "metadata": {} },
+        }))
+        .expect("lease job");
+        let files = TurnFiles::for_job(&job);
+        let card = "Open https://app.provider.example/settings/api-keys and take me to API keys. Pause for me to sign in myself.";
+        let home = "Open https://app.provider.example/ and take me to API keys. Pause for me to sign in myself.";
+        let given = files.given_addresses().expect("the setup's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given).as_deref(),
+            Some(home)
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let skill = workspace.path().join(".agents/skills/invoices");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: invoices\n---\n\n## Getting started\n\nINVOICES_API_KEY: the API key, found under Settings, then API keys. Sign in at **https://app.provider.example/settings/api-keys**.\n",
+        )
+        .unwrap();
+        let prompt = super::super::skills::build_skill_start_prompt(
+            workspace.path(),
+            None,
+            &[".agents/skills/invoices/SKILL.md".to_string()],
+        );
+        files.give_what_the_skills_declare(&prompt);
+        let given = files.given_addresses().expect("the setup's record");
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(card, &given),
+            None
+        );
+        assert_eq!(
+            crate::shared_browser::with_home_pages_where_not_given(
+                "Open https://app.provider.example/billing/made-up for me.",
+                &given
+            )
+            .as_deref(),
+            Some("Open https://app.provider.example/ for me.")
+        );
+        files.remove();
     }
 
     #[test]

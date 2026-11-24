@@ -11,9 +11,11 @@
 //   new every turn still finds robots.txt and stop records, and in `~/.cache` on a person's own computer;
 // - the untrusted wrapper every page-written string goes out in;
 // - the address check: every resolved address must be public, and only the checked addresses are dialled;
+// - the turn's record of the addresses it was given (`INSTAFY_TURN_GIVEN_DIR`), kept as the Shared Browser keeps its
+//   runs', so a page is read only at an address a message, a page read or a search result gave;
 // - offline fixtures (`INSTAFY_WEB_FIXTURES`), honoured only by test builds: hand-written answers instead of the
 //   network, labelled `fixture`, so tests and evals never touch a live site.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -458,6 +460,204 @@ export class Cache<Kind extends string = string> {
       writeFileAtomic(file, { key: id, savedAt: now, value });
     } catch {
       // a cache that cannot be written is only slower
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The turn's record of the addresses it was given
+
+/**
+ * The folder the runtime gives each of Octo's turns for the addresses the turn was given, kept as the Shared Browser
+ * keeps them for its runs (`given.json`, runtime-agent `shared_browser.rs`): fingerprints of each address's site and
+ * path, and of each site given alone, never an address. The runtime starts it ({@link TURN_GIVEN_SEED}) with what the
+ * person's messages, the turn's request, the chat's browser turns and the chat's earlier turns gave, and adds the pages
+ * each of the AI's own web searches found; `instafy web read` adds each page it reads (its own address, its links and
+ * the addresses its text spells out) and `instafy web search` its results. Each writer writes files of its own, so
+ * none waits for another. Without the folder and its seed (a person's own computer, a turn the runtime did not start)
+ * there is no record, and nothing is refused. A search of the AI's own that lists none of the pages it found (a
+ * provider's own search tool) leaves a record marked `anyAddress`: any address may then be one it gave, and none is
+ * refused for the rest of the turn.
+ */
+export const TURN_GIVEN_ENV = "INSTAFY_TURN_GIVEN_DIR";
+/** The runtime's file in that folder, written before the turn starts: the record exists only with it. */
+export const TURN_GIVEN_SEED = "seed.json";
+const TURN_GIVEN_MAX_FILES = 1_000;
+const TURN_GIVEN_MAX_FILE_BYTES = 512 * 1024;
+const TURN_GIVEN_MAX_KEYS = 50_000;
+/** The most fingerprints one call writes. */
+const TURN_GIVEN_MAX_ADDED = 8_000;
+const GIVEN_KEY = /^[0-9a-f]{32}$/;
+
+/**
+ * An http(s) address's site (the host in lower case without "www.", and a port other than the scheme's own) and path
+ * (without a trailing slash, "/" for the site's root), as the Shared Browser keeps a given address
+ * (`givenAddressSitePath`): its query and fragment never count.
+ */
+export function givenSitePath(raw: string | URL): { site: string; path: string } | null {
+  let url: URL;
+  try {
+    url = raw instanceof URL ? raw : new URL(String(raw));
+  } catch {
+    return null;
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) return null;
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  return { site: `${host}${url.port ? `:${url.port}` : ""}`, path: url.pathname.replace(/\/+$/, "") || "/" };
+}
+
+/** The fingerprint a given address is kept by: the first 32 hex digits of the SHA-256 of its site and path. */
+export function givenAddressKey(raw: string | URL): string | null {
+  const address = givenSitePath(raw);
+  return address ? sha256(`${address.site}${address.path}`).slice(0, 32) : null;
+}
+
+/** The fingerprint a site is kept by among the given addresses: the SHA-256 of the site alone, as an address's never is. */
+export function givenSiteKey(raw: string | URL): string | null {
+  const address = givenSitePath(raw);
+  return address ? sha256(address.site).slice(0, 32) : null;
+}
+
+/**
+ * Where a word of text ends: a space, a quote or a bracket, and a mark no address holds as it is typed, the punctuation
+ * of Chinese, Japanese and Korean sentences (。、「」【】…) and its full-width forms (，：；！？（）…), an ellipsis and a
+ * dash, as the Shared Browser and runtime-agent read them (`addresses_named_in`). A message's "營業時間：
+ * https://news.example.org/museum/hours。謝謝" named "/museum/hours。謝謝", and its own address was refused.
+ */
+const ADDRESS_WORD_DELIMITERS =
+  /[\s<>"'`[\]{}“”‘’«»\u2014\u2026\u3001-\u3003\u3008-\u3011\u3014-\u301f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+/u;
+const SITE_NAME_LABEL = /^[A-Za-z0-9-]+$/u;
+
+/**
+ * The addresses a text spells out, read as the Shared Browser reads a page's (`addressesInText`): each http(s) address,
+ * and each site name with a path written without a scheme ("visitporto.travel/en/lello"), read as https, in the first
+ * 64 KB of the text.
+ */
+export function addressesInText(text: string): string[] {
+  const addresses: string[] = [];
+  for (const word of text.slice(0, 64 * 1024).split(ADDRESS_WORD_DELIMITERS)) {
+    const start = word.search(/https?:\/\//iu);
+    if (start >= 0) {
+      addresses.push(addressEnd(word.slice(start)));
+    } else if (!word.includes("://")) {
+      const address = addressEnd(word.replace(/^[(*]+/u, ""));
+      const slash = address.indexOf("/");
+      const labels = slash > 0 ? address.slice(0, slash).split(".") : [];
+      if (labels.length >= 2 && labels.every((label) => SITE_NAME_LABEL.test(label)) && /^[A-Za-z]{2,}$/u.test(labels.at(-1)!)) {
+        addresses.push(`https://${address}`);
+      }
+    }
+  }
+  return addresses;
+}
+
+/**
+ * An address as a sentence holds it, less the sentence's own marks after it, a closing parenthesis it doesn't open and
+ * the asterisks of emphasis around it ("**https://example.org/a**").
+ */
+function addressEnd(word: string): string {
+  let address = word.replace(/[.,;:!?*]+$/u, "");
+  while (address.endsWith(")") && address.split(")").length > address.split("(").length) {
+    address = address.slice(0, -1).replace(/[.,;:!?*]+$/u, "");
+  }
+  return address;
+}
+
+/** The turn's record of the addresses it was given ({@link TURN_GIVEN_ENV}), as this process reads and adds to it. */
+export class TurnGiven {
+  private readonly added: string[] = [];
+
+  private constructor(
+    private readonly dir: string,
+    private readonly keys: Set<string>,
+    /** a search of the turn's listed none of the pages it found: any address may be one it gave */
+    private readonly anyAddress: boolean,
+  ) {}
+
+  /**
+   * The turn's record, or null when there is none to keep to: no folder, no seed the runtime wrote, or a folder this
+   * process can't write, where a page it read would give nothing and its links would be refused.
+   */
+  static load(env: NodeJS.ProcessEnv): TurnGiven | null {
+    const dir = env[TURN_GIVEN_ENV]?.trim();
+    if (!dir || !path.isAbsolute(dir)) return null;
+    let names: string[];
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+      names = fs.readdirSync(dir).filter((name) => name.endsWith(".json"));
+    } catch {
+      return null;
+    }
+    if (!names.includes(TURN_GIVEN_SEED)) return null;
+    const keys = new Set<string>();
+    let anyAddress = false;
+    // The seed first, then what this turn's reads and searches added.
+    names = [TURN_GIVEN_SEED, ...names.filter((name) => name !== TURN_GIVEN_SEED).sort()].slice(0, TURN_GIVEN_MAX_FILES);
+    for (const name of names) {
+      const file = path.join(dir, name);
+      let record: { version?: unknown; addresses?: unknown; anyAddress?: unknown } | null = null;
+      try {
+        if (fs.statSync(file).size <= TURN_GIVEN_MAX_FILE_BYTES) record = readJson(file);
+      } catch {
+        record = null;
+      }
+      const valid = record !== null && typeof record === "object" && record.version === 1 && Array.isArray(record.addresses);
+      if (!valid) {
+        if (name === TURN_GIVEN_SEED) return null;
+        continue;
+      }
+      if (record!.anyAddress === true) anyAddress = true;
+      for (const key of record!.addresses as unknown[]) {
+        if (keys.size >= TURN_GIVEN_MAX_KEYS) break;
+        if (typeof key === "string" && GIVEN_KEY.test(key)) keys.add(key);
+      }
+    }
+    return new TurnGiven(dir, keys, anyAddress);
+  }
+
+  /**
+   * Whether `url` was given: a site's root always is (it opens without anyone giving it), any other path when kept, and
+   * every address once a search listed none of the pages it found.
+   */
+  has(url: URL): boolean {
+    const address = givenSitePath(url);
+    if (!address) return false;
+    return this.anyAddress || address.path === "/" || this.keys.has(sha256(`${address.site}${address.path}`).slice(0, 32));
+  }
+
+  /** Whether the turn was given `url`'s site: a message or the request named an address on it or its name, or a page read there past its root. */
+  siteGiven(url: URL): boolean {
+    const key = givenSiteKey(url);
+    return key !== null && this.keys.has(key);
+  }
+
+  /**
+   * Adds what a page read or a search gave: each address of `urls`, and the site of each of `sites` that is past its
+   * site's root (a root opens without anyone giving it, so reading one gives nothing of its site). Kept for this call
+   * at once, and for the turn by {@link save}.
+   */
+  add(urls: readonly string[], sites: readonly string[] = []): void {
+    const keep = (key: string | null) => {
+      if (key && !this.keys.has(key) && this.added.length < TURN_GIVEN_MAX_ADDED) {
+        this.keys.add(key);
+        this.added.push(key);
+      }
+    };
+    for (const url of urls) keep(givenAddressKey(url));
+    for (const url of sites) if (givenSitePath(url)?.path !== "/") keep(givenSiteKey(url));
+  }
+
+  /**
+   * Writes what this call added as a file of its own (`<writer>-<id>.json`). Best effort: an address not kept is
+   * refused later, and found again from its site's home page.
+   */
+  save(writer: "read" | "search"): void {
+    if (!this.added.length) return;
+    try {
+      writeFileAtomic(path.join(this.dir, `${writer}-${randomUUID()}.json`), { version: 1, addresses: this.added });
+      this.added.length = 0;
+    } catch {
+      // kept for this call only
     }
   }
 }

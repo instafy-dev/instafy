@@ -1208,6 +1208,11 @@ pub struct CodexRunOptions {
     /// left is not taken for this one's. A run that has one is not retried here when it times out:
     /// the controller continues it in a new turn instead.
     pub turn_continue_note: Option<PathBuf>,
+    /// The folder of the turn's record of the addresses it was given
+    /// (`shared_browser::TURN_GIVEN_ENV`): the pages each of the AI's own web searches found go
+    /// into it as the search ends, so the turn reads them with `instafy web read`; a search that
+    /// lists none of its pages leaves it taking any address. None for a turn without one.
+    pub turn_given_dir: Option<PathBuf>,
     /// An explicit task limit. With none, only an operator-configured overall limit applies;
     /// model inactivity, cancellation and lease loss remain independently bounded.
     pub run_timeout: Option<Duration>,
@@ -2973,6 +2978,11 @@ impl CodexClient {
             }
 
             collect_events(&mut aggregator, &event, &mut events, on_event, turn_started)?;
+            if let (EventMsg::WebSearchEnd(search), Some(dir)) =
+                (&event.msg, options.turn_given_dir.as_deref())
+            {
+                crate::shared_browser::keep_what_a_search_ended_with(dir, search);
+            }
             if !open_waiting && aggregator.browser_open_waiting() {
                 browser_log_read = crate::shared_browser::action_log_len();
             }
