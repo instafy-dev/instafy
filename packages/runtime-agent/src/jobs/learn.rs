@@ -3961,6 +3961,7 @@ mod tests {
             "- **Whole reads**: Read each skill you pick on its own and whole: one SKILL.md per command, with no output cap below its size; a read cut in its middle misses its rules."
         ));
         assert!(SKILL_READING_TEMPLATE.contains("always_include: true"));
+        assert!(SKILL_READING_TEMPLATE.len() <= super::super::PROJECT_MEMORY_MAX_FILE_BYTES);
     }
 
     /// A page the person wants to share: its reply says in one line who can open it and how to get
