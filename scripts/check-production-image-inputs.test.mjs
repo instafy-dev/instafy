@@ -295,7 +295,7 @@ test("provider service pins the complete Docker CLI toolchain and patched base l
   );
   assert.equal(argumentDefaults(source).get("MUSL_MIN_VERSION"), "1.2.5-r24");
   assert.equal(argumentDefaults(source).get("ZLIB_MIN_VERSION"), "1.3.2-r1");
-  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.9-r0");
+  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.9-r1");
   assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
   assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
