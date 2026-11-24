@@ -14413,7 +14413,7 @@ async fn mcp_wire_offers_the_bounded_operations_and_refuses_any_other_call() {
 /// test, Nov 23). A snapshotId this browser didn't give in the run, malformed or unknown, now says so, names the
 /// latest reading's id and that nothing was done on the page; the step ran nowhere, so it never counts as the page
 /// changing under it, while an earlier reading's id still does, and with no reading given yet the controller's own
-/// "take a fresh snapshot" stands.
+/// "take a fresh snapshot" stands, counting as no page change either.
 #[tokio::test]
 async fn a_snapshot_id_this_browser_never_gave_names_the_latest_and_counts_as_no_page_change() {
     let server = SharedBrowserMcpServer::new();
@@ -14472,11 +14472,16 @@ async fn a_snapshot_id_this_browser_never_gave_names_the_latest_and_counts_as_no
         }
     };
 
-    // With no reading given yet, the controller's own words stand.
-    let first = server
-        .execute_with_failure_latch(&unknown, refused(stale))
-        .await;
-    assert_eq!(words(&first), stale);
+    // With no reading given yet (a run's first steps on an earlier run's reading), the controller's own words
+    // stand, and none of them counts as the page changing: two in a row never end a page as one that "keeps
+    // changing".
+    for _ in 0..3 {
+        let first = server
+            .execute_with_failure_latch(&unknown, refused(stale))
+            .await;
+        assert_eq!(words(&first), stale);
+    }
+    assert_eq!(server.page_changed_streak.load(AtomicOrdering::SeqCst), 0);
 
     // Once readings were given (a step on one starts the page-changed count again), an id that is none of them
     // names the latest.

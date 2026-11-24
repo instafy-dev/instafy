@@ -86,7 +86,8 @@ import { fixtureEnvironment, policyScriptNames } from "./shared-browser-cobrowsi
 //    list its field opens then, sending nothing: its own list whole once it
 //    changed, never another list on the page nor a row turned off. A field
 //    whose list opened and stayed empty says so after the whole wait, with
-//    the page's requests that failed meanwhile by site and reason. A step
+//    the page's requests that failed meanwhile by site and reason; one whose
+//    list shows rows, whatever their words, never does. A step
 //    whose snapshotId the browser never gave runs nowhere. A page that
 //    moves the focus, opens a field of its own or replaces the field as text
 //    goes in keeps the whole text, in order. A click on a plain link the page
@@ -1088,7 +1089,8 @@ stop.addEventListener("keyup", () => {
 // when the answer comes, as a site's own script does. Meanwhile it loads a
 // picture from a site that doesn't answer, and asks its own site for
 // something it drops 0.1 s later. Asked of a site that doesn't answer, its
-// list stays open and empty.
+// list stays open and empty, and 0.3 s on it opens a socket to another site
+// that doesn't answer either.
 const ASKED_LIST = (source) => `<h1>Journey planner</h1>
 <form action="/reading/journey" method="get">
 <div role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-owns="start-stops">
@@ -1109,7 +1111,86 @@ start.addEventListener("keyup", () => {
   fetch("${source}/stops?q=" + encodeURIComponent(start.value))
     .then((answer) => answer.json())
     .then((stops) => { list.innerHTML = stops.map((stop) => '<li role="option">' + stop + '</li>').join(""); })
-    .catch(() => {});
+    .catch(() => setTimeout(() => new WebSocket("ws://live.dead.test/stops"), 300));
+});
+</script>`;
+// Lists a field opened that show rows, which a step said opened with no
+// suggestion: a combobox's own list of plain rows that share no word with
+// the postcode typed; a time field that opens, from its focus, times drawn
+// under it as links it doesn't name; a day field that says only that it
+// opens something and draws its days as buttons under it; and a combobox
+// that names an empty list while its stops are drawn under it in a list it
+// doesn't name.
+const ROW_LIST = `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<div role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-owns="start-rows">
+<input id="start" name="start" aria-label="Start" aria-autocomplete="list" aria-controls="start-rows" autocomplete="off">
+</div>
+<ul id="start-rows" role="listbox" style="list-style:none;margin:0;padding:0"></ul>
+<p><button>Plan journey</button></p></form>
+<script>
+const box = document.querySelector("[role=combobox]");
+const start = document.getElementById("start");
+start.addEventListener("keyup", () => {
+  box.setAttribute("aria-expanded", "true");
+  document.getElementById("start-rows").innerHTML = ["12345 Old Town", "12346 Harbour"]
+    .filter((row) => row.startsWith(start.value)).map((row) => "<li>" + row + "</li>").join("");
+});
+</script>`;
+const TIME_LINKS = `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<p><input id="time" name="time" aria-label="Time" aria-haspopup="true" aria-expanded="false" autocomplete="off"></p>
+<p><button>Plan journey</button></p></form>
+<div id="times" style="position:absolute;display:none;background:#fff">${["09:30", "09:45", "10:00", "10:15"]
+  .map((time) => `<a href="#t${time.replace(":", "")}">${time}</a>`).join(" ")}</div>
+<script>
+const time = document.getElementById("time");
+const times = document.getElementById("times");
+time.addEventListener("focus", () => {
+  const box = time.getBoundingClientRect();
+  times.style.top = (box.bottom + scrollY) + "px";
+  times.style.left = (box.left + scrollX) + "px";
+  times.style.display = "block";
+  time.setAttribute("aria-expanded", "true");
+});
+times.addEventListener("mousedown", (event) => event.preventDefault());
+</script>`;
+const DAY_BUTTONS = `<h1>Journey planner</h1>
+<p><input id="day" aria-label="Day" aria-haspopup="true" aria-expanded="false" autocomplete="off"></p>
+<p><button type="button">Plan journey</button></p>
+<div id="days" style="position:absolute;display:none;grid-template-columns:repeat(7,2.5em);background:#fff">${
+  Array.from({ length: 28 }, (_, day) => `<button type="button">${day + 1}</button>`).join("")}</div>
+<script>
+const day = document.getElementById("day");
+const days = document.getElementById("days");
+day.addEventListener("input", () => {
+  const box = day.getBoundingClientRect();
+  days.style.top = (box.bottom + scrollY) + "px";
+  days.style.left = (box.left + scrollX) + "px";
+  days.style.display = "grid";
+  day.setAttribute("aria-expanded", "true");
+});
+days.addEventListener("mousedown", (event) => event.preventDefault());
+</script>`;
+const UNNAMED_STOPS = `<h1>Journey planner</h1>
+<form action="/reading/journey" method="get">
+<div role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-owns="start-stops">
+<input id="start" name="start" aria-label="Start" aria-autocomplete="list" aria-controls="start-stops" autocomplete="off">
+</div>
+<ul id="start-stops" role="listbox"></ul>
+<p><button>Plan journey</button></p></form>
+<div id="drawn" role="listbox" style="position:absolute;display:none;background:#fff"></div>
+<script>
+const box = document.querySelector("[role=combobox]");
+const start = document.getElementById("start");
+const drawn = document.getElementById("drawn");
+start.addEventListener("keyup", () => {
+  box.setAttribute("aria-expanded", "true");
+  const rect = start.getBoundingClientRect();
+  drawn.style.top = (rect.bottom + scrollY) + "px";
+  drawn.style.left = (rect.left + scrollX) + "px";
+  drawn.style.display = "block";
+  drawn.innerHTML = ["Central Station", "Central Square"].map((stop) => '<div role="option">' + stop + "</div>").join("");
 });
 </script>`;
 // A search that says it opens a list and never does, beside a list of its
@@ -1276,6 +1357,10 @@ export async function runSharedBrowserPageReadingFixture() {
       "site.test /reading/asked-list": page("Journey planner", ASKED_LIST("/reading")),
       "site.test /reading/stops": { type: "application/json; charset=utf-8", body: JSON.stringify(["Central Station", "Central Square"]) },
       "site.test /reading/slow-stops": { type: "application/json; charset=utf-8", body: "[]", lateOnceMs: 5_000 },
+      "site.test /reading/row-list": page("Journey planner", ROW_LIST),
+      "site.test /reading/time-links": page("Journey planner", TIME_LINKS),
+      "site.test /reading/day-buttons": page("Journey planner", DAY_BUTTONS),
+      "site.test /reading/unnamed-stops": page("Journey planner", UNNAMED_STOPS),
       "site.test /reading/moving-fields": page("Find a place", MOVING_FIELDS),
       "site.test /reading/presentation-cover": page("Timetable", PRESENTATION_COVER),
       "site.test /reading/blur-list": page("Journey planner", SUGGESTION_LIST('field.addEventListener("blur", () => draw([]));')),
@@ -2184,10 +2269,10 @@ export async function runSharedBrowserPageReadingFixture() {
     // stops never come because the site the page asks for them doesn't
     // answer, is looked at for the whole 3 s, and the step says the list
     // opened with no suggestion, then what failed meanwhile by its site and
-    // the browser's reason, which its result keeps too: never a picture that
-    // failed, nor what the page dropped itself. A planner's list opened so and
-    // the step said only that nothing was sent (a local test, Nov 23). Typing
-    // still sends nothing.
+    // the browser's reason, which its result keeps too: a socket that never
+    // opened among them, never a picture that failed, nor what the page
+    // dropped itself. A planner's list opened so and the step said only that
+    // nothing was sent (a local test, Nov 23). Typing still sends nothing.
     reading = await read("/reading/asked-list-empty");
     requests.length = 0;
     started = Date.now();
@@ -2196,9 +2281,12 @@ export async function runSharedBrowserPageReadingFixture() {
     assert.ok(measurements.typeEmptyListMs >= 3_000, `the step looked for ${measurements.typeEmptyListMs} ms`);
     assert.equal(
       typedAsked.done,
-      `Typed 7 characters into "Start". A page's reading never shows typed text. Its list opened, but no suggestion came within 3 s. Meanwhile, these failed: a request to cdn.dead.test (net::ERR_NAME_NOT_RESOLVED). Nothing was sent yet.`,
+      `Typed 7 characters into "Start". A page's reading never shows typed text. Its list opened, but no suggestion came within 3 s. Meanwhile, these failed: a request to cdn.dead.test (net::ERR_NAME_NOT_RESOLVED), a request to live.dead.test (net::ERR_NAME_NOT_RESOLVED). Nothing was sent yet.`,
     );
-    assert.deepEqual(typedAsked.emptyList, { notLoaded: [{ kind: "fetch", site: "cdn.dead.test", error: "net::ERR_NAME_NOT_RESOLVED" }] });
+    assert.deepEqual(typedAsked.emptyList, { notLoaded: [
+      { kind: "fetch", site: "cdn.dead.test", error: "net::ERR_NAME_NOT_RESOLVED" },
+      { kind: "websocket", site: "live.dead.test", error: "net::ERR_NAME_NOT_RESOLVED" },
+    ] });
     assert.equal(new URL(runPage.url()).pathname, "/reading/asked-list-empty", "typing sent the planner's form");
     assert.ok(!requests.some((entry) => entry.includes("/reading/journey")), `typing sent something: ${requests.join(", ")}`);
     // The same planner whose stops come names them as before, and nothing of
@@ -2212,6 +2300,33 @@ export async function runSharedBrowserPageReadingFixture() {
       `Typed 7 characters into "Start". A page's reading never shows typed text. 2 suggestions under "Start": ${askedStops.map((entry) => `"${entry.label}" (index ${entry.index})`).join(", ")}. Click one. Nothing was sent yet.`,
     );
     assert.equal(typedFilled.emptyList, undefined);
+    // A list that opened and shows rows never reads as one that stayed empty,
+    // though its rows share no word with what was typed (a postcode), the
+    // field doesn't name them (times drawn under it as links, stops drawn
+    // under a combobox that names another list) or they are a calendar's
+    // days: those steps said that no suggestion came while the rows showed,
+    // which a route turn reads as a planner to leave. Each says what it said
+    // before.
+    for (const [pathname, name, text, rows] of [
+      ["/reading/row-list", "Start", "12345", "#start-rows li"],
+      ["/reading/time-links", "Time", "10:00", "#times a"],
+      ["/reading/day-buttons", "Day", "20.11.2026", "#days button"],
+      ["/reading/unnamed-stops", "Start", "Central", "#drawn [role=option]"],
+    ]) {
+      reading = await read(pathname);
+      const typedShown = await ok("POST", "/v1/type", { index: control(reading, name).index, snapshotId: reading.snapshotId, text });
+      assert.ok(
+        await runPage.evaluate((selector) => document.querySelector("[aria-expanded=true]") !== null &&
+          Array.from(document.querySelectorAll(selector)).some((row) => row.getBoundingClientRect().height > 0), rows),
+        `${pathname}: its list never opened with rows`,
+      );
+      assert.equal(
+        typedShown.done,
+        `Typed ${text.length} characters into "${name}". A page's reading never shows typed text. Nothing was sent yet.`,
+        `${pathname}: a list that shows rows was said to have stayed empty`,
+      );
+      assert.equal(typedShown.emptyList, undefined, `${pathname}: a list that shows rows was said to have stayed empty`);
+    }
     // A step whose snapshotId this browser never gave runs nowhere: one cut
     // short (a turn mis-copied a reading's 64 characters as 61) is refused in
     // words that say so and that nothing was done on the page, and one of the
@@ -3033,7 +3148,7 @@ export async function runSharedBrowserPageReadingFixture() {
         "once a page settles the browser presses a cookie banner's own reject button itself, in a banner that speaks of cookies in its names or its text, never its accept or settings, and the step says so once the banner is gone; never a banner with no reject button, one in a frame, one on a page with a sign-in field or a frame holding card fields, or a dialog about a privacy policy that never speaks of cookies; a click a cookie notice or another cover keeps from its control is refused at once in words with no call log, while a plain link under a cookie notice opens its address in the same tab and says so (a link to the page itself is refused as a button is), a cover with no role, or one that says it has none, named by the first words a person sees on it, and a cover that goes within a moment is waited for",
         "a cookie notice is never Octo's step: its accept is never listed, as a button, a link, an Allow all or an Agree and close, and is counted among the controls left out, while its settings, a limited accept, a refusal no list knows and a button dressed up beside it stay listed, and the policy's refusal of an accept keeps its words; a click under a notice the browser could not decline never pauses on it: a plain link's address opens instead; a pause on a notice's settings or limited accept is a cookie notice's pause, while one on a refusal no list knows or a booking's button in small print that speaks of cookies is a step of the person's, the booking's button scrolled into view, each outlined and published with fixed labels and nothing pressed; a pause on an account's deletion dressed up as a notice is refused, outlining and publishing nothing, as is any pause in Octo's own tab; under a bar whose only button accepts the planner's own button works with no prompt",
         "a click whose result the page draws in place 1.5 s later reads it, after a hidden field, a tip on hover, a suggestion a field drops as it loses focus or the address changed first, and one whose result comes 5 s later reads it too; one whose page still reads as before 6 s on says so and that its reading is the page as it is now, leaving no snapshot to take; a click that changes the page, scrolls it, shows a section, menu, drawer or carousel item in place, turns a switch or toggle on, opens another page or loads the same one again, a type step, a choice and a choice of the option already chosen answer at once, while a link to a part of the page already in view is read with the words the page draws for it 1.2 s later; a search typed and not sent says nothing was searched yet, and another field that nothing was sent yet",
-        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field whose list opened and stayed empty says so after the whole 3 s, with the page's requests that failed meanwhile by site and reason (never a picture, nor a request the page dropped itself), while the same field whose stops came names them as before; a step whose snapshotId the browser never gave, cut short or made up, types, clicks, sends and asks nothing; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
+        "a type step types as a person does, ending on a key press, so a field whose list opens only as keys are pressed opens it, for a text ending on a letter a US keyboard has no key for too, and names its first options with their indices, for a combobox the site fills 1.2 s on, a list the text narrowed (whole) and a field that names no list, sending nothing; it names no other field's list, no list a field that opens none sits beside and no row turned off, waiting past a \"Searching…\" row for the stops; a field whose list opened and stayed empty says so after the whole 3 s, with the page's requests that failed meanwhile by site and reason, a socket that never opened too (never a picture, nor a request the page dropped itself), while the same field whose stops came names them as before, and a list that shows rows the text shares no word with, that the field doesn't name or that are a calendar's days never reads as empty; a step whose snapshotId the browser never gave, cut short or made up, types, clicks, sends and asks nothing; a field the page moves the focus from, opens a field of its own for or replaces keeps the whole text, in order; on a page with more controls than a reading holds, the options a field opened, and the plain rows of a list drawn under a field that names none (marked against autofill alone), are listed first and named with the indices a click then takes to choose one, a row that holds two controls by the one that draws the stop, while a calendar under a day field, one the field names, a list a ticked box names and a list of the page's own a search box filters are no list of its stops; a click on a plain link that keeps moving opens the link's address in the tab, once",
         "a field's own suggestion is chosen by a click that leaves the focus in the field, from a list that closes as the field loses it and from one that draws its stops anew under the pointer, found again by the reading's record and clicked once; a stop the list no longer shows is not clicked, and the step answers with the field's suggestions as they read now",
         "a ticket shop's controls with no name of their own are named by their row or card (\"+ beside “Adult”\"), listed and highlighted by that name, while the same rows in a frame are named by the frame's site and none is listed or counted",
         "a row's words only tell its controls apart where they are named: reading steps in rows that speak of deleting, booking or saving go without a prompt, in Octo's own tab too, a pause on a booking's icon button under a line about cookies is the person's step, a key beside an icon button names no control, whole or in part, a withheld page's controls are named without their rows' words in its reading and a step's words, and a stop drawn anew for a field that names no list of its own names no other list's options",

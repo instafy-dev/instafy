@@ -2341,15 +2341,7 @@ fields changed under it before anyone was asked, or whose snapshot with no
 record no longer reads as the page), and runtime-agent counts such steps until
 a step on a fresh snapshot's control, or one that moves to another page or
 tab, goes through (a look at the page or a scroll between them does not
-count). A step whose snapshotId this browser never gave in the run is no
-page change: runtime-agent keeps the ids it gave the turn, and answers such a
-step, which the controller can't tell from an earlier reading's, with "This
-snapshotId isn't one this browser gave in this run; the latest reading's is
-<id>. Nothing was done on the page.", as it answers an id that is no reading's
-at all (missing, or not 64 hex characters) before the controller runs; with
-none given yet, the controller's "take a fresh snapshot" stands. A turn
-mis-copied a reading's id twice and wrote that the planner did not accept its
-step. The second answers that the page keeps changing, which ends that
+count). The second answers that the page keeps changing, which ends that
 page, not the run, so a control that never holds still (a live count, a
 ticker in a link) sends the turn on instead of a loop of snapshots: to the
 site's own page for the task, from a link on the page (its menu: a planner, a
@@ -2357,7 +2349,17 @@ search page), else to the next source. A home page's planner form that kept
 changing had sent a turn back to a site that had not answered, while the
 planner's own page, linked from that home page, held still; and a planner
 under a carousel was refused twice while none of its controls had changed,
-which ended the page.
+which ended the page. A step whose snapshotId this browser never gave in the
+run is no page change: runtime-agent keeps the ids it gave the turn, and
+answers such a step, which the controller can't tell from an earlier
+reading's, with "This snapshotId isn't one this browser gave in this run; the
+latest reading's is <id>. Nothing was done on the page.", as it answers an id
+that is no reading's at all (missing, or not 64 hex characters) before the
+controller runs; with none given yet (a run's first step on an earlier run's
+reading), the controller's "take a fresh snapshot" stands, and such a step
+counts as no page change either. A turn mis-copied a reading's id twice, was
+told only that its step needed a valid id, and wrote that the planner did not
+accept its step.
 Once the person has answered the step's prompt, the page
 elsewhere may have changed by itself while they read it (a carousel's slide, a
 clock, a live count), so the step checks the control they were asked about
@@ -2677,17 +2679,24 @@ answers with: "Typed 7 characters into
 stayed empty (the field, or the combobox it sits in, still says
 `aria-expanded="true"` after the whole 3 seconds, for a popup that is no dialog
 or grid and no list it names that is one or holds a grid or a table, as a day
-field's calendar does, and no row of its list shows) says so, then the page's
+field's calendar does, and nothing a person could pick shows, whatever its
+words: no option, row, link, button or cell with words in a list it names or
+one drawn against it, nor an option anywhere that wasn't there before the
+step, after the look and as the step answers) says so, then the page's
 requests that failed from the first key to the end of the look, by site and the
 browser's reason: what its own code asks for (fetch, XHR, an event stream, a
-socket), its scripts and frames, never a picture, a style or a font, nor a
-request the page dropped itself (`net::ERR_ABORTED`). The result keeps them too
-(`emptyList.notLoaded`, each by kind, site and reason, never a path or query):
-"… Its list opened, but no suggestion came within 3 s. Meanwhile, these
-failed: a request to api.example (net::ERR_TUNNEL_CONNECTION_FAILED). Nothing
-was sent yet." A planner's start field opened its list so and the step said
-only that nothing was sent, which left the failed answer unseen and the turn
-blaming the planner. On a page that may show a
+socket that never opened), its scripts and frames, never a picture, a style or
+a font, nor a request the page dropped itself (`net::ERR_ABORTED`). The result
+keeps them too (`emptyList.notLoaded`, each by kind, site and reason, never a
+path or query): "… Its list opened, but no suggestion came within 3 s.
+Meanwhile, these failed: a request to api.example
+(net::ERR_TUNNEL_CONNECTION_FAILED). Nothing was sent yet." A planner's start
+field opened its list so and the step said only that nothing was sent, which
+left the failed answer unseen and the turn blaming the planner. Plain rows or
+links that share no word with what was typed (a time, a postcode, a line such
+as "U2"), a list beside the one the field names and a calendar's days are not
+named as its suggestions, and don't make it a list that stayed empty either:
+steps said so while such rows showed. On a page that may show a
 secret it names none. A
 click on a checkbox, a radio button or a switch says whether it is checked now.
 A `choose` step's `done` names the option and the list by its own name

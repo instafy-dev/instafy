@@ -3635,7 +3635,9 @@ impl SharedBrowserMcpServer {
     /// controller can't tell such an id from an earlier reading's, so it counted the step as one
     /// the page changed under, and two of them ended a page that held still as one that "keeps
     /// changing". The step didn't run, so it counts as no page change; what the controller said
-    /// of the step stays. With none given yet, the controller's "take a fresh snapshot" stands.
+    /// of the step stays. With none given yet (a run's first step on an earlier run's reading),
+    /// the controller's "take a fresh snapshot" stands, and the step counts as no page change
+    /// either.
     fn with_given_snapshots(
         &self,
         request: &SharedBrowserRequest,
@@ -3660,16 +3662,16 @@ impl SharedBrowserMcpServer {
         let Some(failure) = error.downcast_ref::<ControllerFailure>() else {
             return Err(error);
         };
-        let Some(latest) = given.latest() else {
-            return Err(error);
-        };
         if !STALE_SNAPSHOT_WORDS.contains(&failure.message.as_str())
             || named.is_none_or(|id| given.gave(id))
         {
             return Err(error);
         }
         Err(ControllerFailure {
-            message: snapshot_not_given_words(Some(latest)),
+            message: match given.latest() {
+                Some(latest) => snapshot_not_given_words(Some(latest)),
+                None => failure.message.clone(),
+            },
             step: failure.step,
             approval: failure.approval,
             refused: failure.refused,
