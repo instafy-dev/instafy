@@ -77,15 +77,17 @@ check      Does the site show every item the request named (each product, stop o
            command that gives it its own files. Items: --expect, plus an "expect" array in data.json. Run it
            before telling anyone the page is done. In a space, while no preview shows the site, a check that
            passes on a new page (one whose card was never opened) serves it and posts its card itself, and any
-           other check ends with the command that does: a failing check never holds the card back, except for a
-           page that loads files from outside its folder and one with typed "checked <date>" or "seen <date>"
-           words, whose card waits until they are deleted (rewording never passes; the card's own command names
-           them too, and posts no card). An item whose words a script holds where the check
+           other check names the command that does as its next step: a failing check never holds the card back,
+           except for a page that loads files from outside its folder and one with typed "checked <date>" or
+           "seen <date>" words, whose card waits until they are deleted (rewording never passes; the card's own
+           command names them too, and posts no card). An item whose words a script holds where the check
            cannot place them (or fetches from another site) is looked for on the page as drawn, in the same step:
            where the page is served (a new page's card is posted first, as a passing check posts it), the page
            check (\`instafy preview check\`) loads it, and the check answers with what it drew, failing (1) for
            an item it doesn't draw or an error on it, and saying it cannot tell (2) when nothing could look at it.
-           It names each line that sets HTML from a string (innerHTML), which never fails the page.
+           It names each line that sets HTML from a string (innerHTML), which never fails the page. A
+           comparison's check ends with one line for the reply ("The page shows 1 of 9 values: …"; --json:
+           for_the_reply): how many of its values the page shows, in all and per column.
 card       The card step a check that passes takes, without the check: in a space, for a page whose card was
            never opened, while no preview shows it, it serves the page and posts its card, titled from the page.
            As for a check, none for a page that loads files from outside its folder, or that says "checked
