@@ -19,7 +19,7 @@ With the AI's own web search, search, then read what it found. Its text is what 
 
 - When each search costs the person credits (this run's instructions say so), search only for what is fresh (news, today's prices or events, live status) or to find a page no source names; read a known official page with `instafy web read` instead. At most 2 searches a message, more only when the person asks for deeper research.
 - Search never proves live stock or prices.
-- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) before saying it doesn't show or you couldn't check. Each item's article and event dates; "today" and "last night" in the person's time zone; a status page "as of <time>"; a paywalled source says so.
+- News or a score: read the subject's own news or results page (a score the schedule lacks: the team's home or news page) first; search only for what it doesn't show. Each item's article and event dates; "today" and "last night" in the person's time zone; a status page "as of <time>"; a paywalled source says so.
 
 ## Readers
 
