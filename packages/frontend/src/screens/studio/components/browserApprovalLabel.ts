@@ -39,11 +39,12 @@ export function splitBrowserApprovalLabel(raw: string): BrowserApprovalLabel {
  * The runtime leads a site's own search's label with these words, in place
  * of a category (`SITE_SEARCH_TITLE` in runtime-agent's
  * `shared-browser-cli.js`): Enter in a search field, or typing into it with
- * submit, that the browser's policy puts in its search category, a form that
- * sends a GET to the page's own site or a field in no form. Never the page's
- * own words: the runtime leads a page's words that would read so with
- * "Change something". A form that posts, or goes to another site, is never
- * in that category, whatever its words say ("Find…").
+ * submit, that the browser's policy puts in its search category and whose
+ * form makes it a search by its structure, a GET of the page's own site;
+ * never a field in no form. Never the page's own words: the runtime leads a
+ * page's words that would show so, however they are spaced, with "Change
+ * something". A form that posts, or goes to another site, is never in that
+ * category, whatever its words say ("Find…").
  */
 export const SITE_SEARCH_TITLE = "Search this site";
 

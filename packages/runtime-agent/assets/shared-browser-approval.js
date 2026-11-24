@@ -196,6 +196,16 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
     return bounded.trimEnd();
   }
 
+  // The label a step's request shows (`display.label`), exactly as the origin
+  // and Studio get it: the step's category leads the label, so the person
+  // sees what kind of step this is ("Download or export: Export CSV")
+  // without a protocol change.
+  function displayLabel(details) {
+    const categoryTitle = boundedText(details.categoryTitle, MAX_LABEL_BYTES);
+    const label = boundedText(details.label, MAX_LABEL_BYTES);
+    return boundedText(categoryTitle && label ? `${categoryTitle}: ${label}` : label || categoryTitle, MAX_LABEL_BYTES);
+  }
+
   function sha256(value) {
     return crypto.createHash("sha256").update(String(value)).digest("hex");
   }
@@ -787,13 +797,9 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       if (!operation) {
         fail("approval_protocol_invalid", "Shared Browser approval operation is missing");
       }
-      // The step's category leads the label, so the person sees what kind of
-      // step this is ("Download or export: Export CSV") without a protocol
-      // change. Callers pass labels that are already masked.
-      const categoryTitle = boundedText(details.categoryTitle, MAX_LABEL_BYTES);
-      const label = boundedText(details.label, MAX_LABEL_BYTES);
+      // Callers pass labels that are already masked.
       const display = {
-        label: boundedText(categoryTitle && label ? `${categoryTitle}: ${label}` : label || categoryTitle, MAX_LABEL_BYTES),
+        label: displayLabel(details),
         destinationOrigin: details.destinationOrigin || null,
       };
       const requestCore = {
@@ -1544,6 +1550,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       ensureOriginApproved,
       routineBrowsingAllowed,
       allowOnce,
+      displayLabel,
       withholdNextDocumentAfter,
       withholdNextDocument,
       clearWithholdNextDocument,

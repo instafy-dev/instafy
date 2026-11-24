@@ -774,8 +774,9 @@ runs, then "Searched visitlisboa.com, read 2 pages" in the turn's line.
   so Details still read "Tried opening {host}". Typing with submit, or Enter, reads as browsing
   when it starts, since only the browser knows whether it sends the site's own search: as the
   step acts (after the person's yes, when it asked) the controller marks its action in the log
-  `"step": "search"` when its policy judged it one, and the step then sends one update that
-  reads "Searching {host}" on its own site. The browser on the person's device says
+  `"step": "search"` when its prompt asked as a search, or when it went without a prompt as the
+  site's own search, and the step then sends one update that reads "Searching {host}" on its
+  own site. The browser on the person's device says
   nothing before its answer, so there the step takes the host from the address Octo asked for
   when it starts. Any other step, and a step
   whose result names no page, uses the last host the turn's browser steps named. A step the
@@ -879,15 +880,17 @@ activity line, to the person who started the run only, and the line says `Waitin
   site: a link, or a choice in a form (Space on a toggle, a click on a box), which the runtime binds
   to the form's address though only the page's own script would send it. A step that stays on the
   site says nothing of where it goes. `to search {host}.` is a site's own search: typing with
-  submit, or Enter, in a field the browser's policy puts in its search category (a search field
-  whose form sends a GET to the page's own site, or that has no form), whose label the runtime
-  leads with `Search this site` in place of a category. It names no field, and a form with
-  another field still says what it sends. A search whose form, once read, sends a key-like
-  value or makes an address a navigation would ask for (an export, a sign-out) asks as the form
-  it is. A form that posts, or goes to another site, is never in that category, whatever its
-  words say ("Find…"), and the runtime leads a form step's label of the page's own words that
-  would read so with `Change something`. Only the words change: such a search asks exactly
-  when it did. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
+  submit, or Enter, in a field the browser's policy puts in its search category, whose form makes
+  it a search by its structure (a GET of the page's own origin that the browser sends on Enter,
+  everything else it sends read in full, none of it key-like, and no export or sign-out address),
+  whose label the runtime leads with `Search this site` in place of a category. It names no
+  field, and a form that sends anything else of the person's (another field, a ticked box) still
+  says what it sends. A box with no form, a form that cannot be read in full, one that sends a
+  key-like value or makes an export or sign-out address, and a form that posts or goes to another
+  site, whatever its words say ("Find…"), ask as before, by their own names. The runtime leads a
+  form step's label of the page's own words that would show as that title, however they are
+  spaced, with `Change something`. Only the words change: such a search asks exactly when it
+  did. The browser view's sheet asks in this same sentence. `{label}` is the runtime's
   already-masked name of the control, cut at 40 characters: the page's own words appear only
   here, where the person needs them to decide, never in the line. The runtime leads its label
   with the step's category (`Delete, cancel or sign out: Delete account`); the row quotes only

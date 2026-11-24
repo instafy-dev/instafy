@@ -5324,8 +5324,8 @@ pub struct LoggedSteps {
     /// has passed and before the page loads.
     pub went_to: Vec<String>,
     /// The pages it sent the site's own search from: an action it marks `"step": "search"`,
-    /// written as it types into, or presses Enter in, a field its policy judged a search of the
-    /// page's own site, after the person's yes when it asked.
+    /// written as it types into, or presses Enter in, the page's own search box, when the step
+    /// went without a prompt or its prompt asked as a search, after the person's yes then.
     pub searched_on: Vec<String>,
 }
 
