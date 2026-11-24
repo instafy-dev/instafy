@@ -395,6 +395,13 @@ unrelated package does not refresh every vulnerable base package. Bookworm
 services enforce the PCRE2 and Perl-base floors; Trixie services additionally
 enforce gzip and SQLite floors. `node --test scripts/check-production-image-inputs.test.mjs`
 checks every Debian publisher cell plus the standalone speech-host image.
+The Alpine provider-service image installs musl, zlib, OpenSSL and the Docker CLI
+toolchain at minimum versions (`"name>=${*_MIN_VERSION}"`), never exact pins:
+Alpine drops a package's previous `-rN` build from its index when it rebuilds
+the package, so an exact pin stops resolving and fails every publish. The same
+test requires a floor for every package that stage installs, rejects exact and
+fuzzy pins, and holds each floor at the last known-fixed version, so lowering
+one fails too.
 These source checks do not replace the unchanged scan-before-publication gate.
 
 Self-hosted amd64 image cells select the digest-pinned **amd64** BuildKit
@@ -949,9 +956,12 @@ When it fails:
    `docker/runtime/Dockerfile`. Make the fix in a pull request; the path filter
    runs these same cells on it before merge.
 3. A **build failure** often means an upstream repository stopped serving a
-   pinned package version, as when Alpine dropped an OpenSSL release. Update the
-   pin (and `scripts/check-production-image-inputs.test.mjs`) to a version the
-   repository serves.
+   pinned package version, as when Alpine rebuilt OpenSSL and dropped the exact
+   build the provider image used to pin. Install the package at a
+   `*_MIN_VERSION` floor rather than an exact version, so a rebuild still
+   resolves; where an exact version is unavoidable, update it (and
+   `scripts/check-production-image-inputs.test.mjs`) to one the repository
+   serves.
 4. A failure on **one architecture only**, such as a Debian security update
    that reached amd64 hours before arm64, usually clears on its own. Dispatch
    the workflow again later, or re-run its failed jobs; the issue then lists

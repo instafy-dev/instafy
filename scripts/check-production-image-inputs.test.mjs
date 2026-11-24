@@ -285,7 +285,54 @@ test("affected runtime images refresh every util-linux security binary", () => {
   }
 });
 
-test("provider service pins the complete Docker CLI toolchain and patched base libraries", () => {
+// Alpine drops a package's previous -rN build from its index when it rebuilds
+// the package, so an exact "name=version" pin in apk add stops resolving and
+// fails every publish until someone bumps it (OpenSSL 3.5.8-r0 in #448, zlib in
+// #1006, OpenSSL 3.5.9-r0 in #1241). The provider image therefore installs each
+// package at a floor: "name>=${*_MIN_VERSION}", with the floor held at the last
+// version known to fix its CVEs or to have passed the publishers' scan. The
+// digest-pinned alpine:3.23 base keeps apk on that stable branch.
+const providerServiceFloors = [
+  ["musl", "MUSL_MIN_VERSION", "1.2.5-r24"],
+  ["musl-utils", "MUSL_MIN_VERSION", "1.2.5-r24"],
+  ["zlib", "ZLIB_MIN_VERSION", "1.3.2-r1"],
+  ["libcrypto3", "OPENSSL_MIN_VERSION", "3.5.9-r1"],
+  ["libssl3", "OPENSSL_MIN_VERSION", "3.5.9-r1"],
+  ["docker-cli", "DOCKER_CLI_MIN_VERSION", "29.5.2-r0"],
+  ["docker-cli-buildx", "DOCKER_BUILDX_MIN_VERSION", "0.30.1-r6"],
+  ["docker-cli-compose", "DOCKER_COMPOSE_MIN_VERSION", "2.40.3-r6"],
+];
+
+// Every package the final stage's apk add installs, as written.
+function finalStageApkPackages(source) {
+  const finalStage = source.slice([...source.matchAll(/^FROM /gmu)].at(-1).index)
+    .replace(/\\\n/gu, " ");
+  return [...finalStage.matchAll(/^RUN apk add (.*)$/gmu)]
+    .flatMap((match) => match[1].trim().split(/\s+/u))
+    .filter((word) => !word.startsWith("--"))
+    .map((word) => word.replace(/^"(.*)"$/u, "$1"));
+}
+
+function assertProviderServiceFloors(source, relativePath) {
+  const finalStage = source.slice([...source.matchAll(/^FROM /gmu)].at(-1).index);
+  for (const [, argument, minimum] of providerServiceFloors) {
+    assert.equal(argumentDefaults(source).get(argument), minimum,
+      `${relativePath}: ${argument} must stay at the last known-fixed version`);
+    assert.ok(finalStage.includes(`ARG ${argument}=${minimum}\n`),
+      `${relativePath}: ${argument} must be declared in the final stage`);
+  }
+  const packages = finalStageApkPackages(source);
+  for (const entry of packages) {
+    assert.match(entry, /^[a-z0-9][a-z0-9.+_-]*>=\$\{[A-Z0-9_]+_MIN_VERSION\}$/u,
+      `${relativePath}: apk add ${entry} must be a floor ("name>=\${*_MIN_VERSION}"), ` +
+        "not an exact pin Alpine's next rebuild stops serving");
+  }
+  assert.deepEqual(packages,
+    providerServiceFloors.map(([name, argument]) => `${name}>=\${${argument}}`),
+    `${relativePath} installs an unreviewed package set`);
+}
+
+test("provider service installs the complete Docker CLI toolchain and patched base libraries at floors", () => {
   const relativePath = "docker/provider-service/Dockerfile";
   const source = read(relativePath);
 
@@ -293,25 +340,23 @@ test("provider service pins the complete Docker CLI toolchain and patched base l
     source,
     /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
   );
-  assert.equal(argumentDefaults(source).get("MUSL_MIN_VERSION"), "1.2.5-r24");
-  assert.equal(argumentDefaults(source).get("ZLIB_MIN_VERSION"), "1.3.2-r1");
-  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.9-r1");
-  assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
-  assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
-  assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
-  assertOrdered(
-    source,
-    relativePath,
-    '"musl>=${MUSL_MIN_VERSION}"',
-    '"musl-utils>=${MUSL_MIN_VERSION}"',
-    '"zlib>=${ZLIB_MIN_VERSION}"',
-    '"libcrypto3=${OPENSSL_VERSION}"',
-    '"libssl3=${OPENSSL_VERSION}"',
-    '"docker-cli=${DOCKER_CLI_VERSION}"',
-    '"docker-cli-buildx=${DOCKER_BUILDX_VERSION}"',
-    '"docker-cli-compose=${DOCKER_COMPOSE_VERSION}"',
-  );
+  assertProviderServiceFloors(source, relativePath);
   assert.doesNotMatch(source, /^FROM docker:/mu);
+
+  const rejected = [
+    ["an exact pin", source.replace('"libcrypto3>=${', '"libcrypto3=${')],
+    ["a fuzzy pin", source.replace('"docker-cli>=${', '"docker-cli~${')],
+    ["a floor below the last known-fixed version",
+      source.replace("ARG OPENSSL_MIN_VERSION=3.5.9-r1\n", "ARG OPENSSL_MIN_VERSION=3.5.8-r0\n")],
+    ["an unbounded package", source.replace('"zlib>=${ZLIB_MIN_VERSION}"', "zlib")],
+    ["a dropped package", source.replace('    "docker-cli-compose>=${DOCKER_COMPOSE_MIN_VERSION}"', "")
+      .replace('"docker-cli-buildx>=${DOCKER_BUILDX_MIN_VERSION}" \\', '"docker-cli-buildx>=${DOCKER_BUILDX_MIN_VERSION}"')],
+  ];
+  for (const [label, mutated] of rejected) {
+    assert.notEqual(mutated, source, `the ${label} fixture must change the Dockerfile`);
+    assert.throws(() => assertProviderServiceFloors(mutated, relativePath),
+      assert.AssertionError, `the provider floor check must reject ${label}`);
+  }
 });
 
 test("runtime downloads verify architecture-bound checksums before extraction", () => {
