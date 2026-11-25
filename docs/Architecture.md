@@ -383,6 +383,17 @@ any user id goes into it.
   after the stop, 32 a tick, and reads `agent_jobs_stopped_browser_turn_recovery_idx`
   (`20261114112320_agent_jobs_stopped_browser_turn_recovery_idx.sql`): apply that migration
   before deploying the controller that reads it, or the step scans every failed job each tick.
+- **Computers.** A person's computers where Instafy Desktop runs (`user_computers`, RC/computers.rs,
+  [Local-engine turns](Local-Engine-Turns.md) 11.23) poll `/me/computers/poll` with the person's
+  own session. The poll is their heartbeat and a held wait, woken by a per-person
+  `computers.wanted` event that dispatch publishes after it queues a Claude Code turn and the bus
+  carries across nodes. It answers with the spaces where that person's own waiting turns could run
+  on the computer's logins, ids only. A computer claims a space before it starts it, so the
+  person's other computers leave it alone. The rows hold login ids, never a folder or sign-in, are
+  shown only to their person, and never make a runtime eligible to lease: the lease clause above
+  is unchanged. Apply `20261125120000_user_computers.sql` and
+  `20261125120002_agent_jobs_waiting_claude_code_turn_idx.sql` before deploying the controller
+  that reads them.
 - Apply the migrations that add `agent_jobs.engine` and its indexes before deploying the
   controller that reads them. Keep `CLAUDE_CODE_LANE_USER_IDS` empty until the previous controller
   pool is retired and no load balancer still sends it requests: an older controller would unpin

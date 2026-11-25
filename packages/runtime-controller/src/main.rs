@@ -33,6 +33,7 @@ mod chat_attachments;
 mod claude_code_lane;
 mod claude_code_logins;
 mod claude_material;
+mod computers;
 mod config;
 mod connection_limit;
 mod conversation_goals;
@@ -579,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(agent_contexts::router())
         .merge(ai_agents::router())
         .merge(claude_code_logins::router())
+        .merge(computers::router())
         .merge(origins::router())
         .merge(speech_proxy::router())
         .merge(credits::router())

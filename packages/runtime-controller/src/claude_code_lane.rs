@@ -44,6 +44,8 @@
 //!   ([`stamp_failure`]);
 //! - its next turn resumes only its own session ([`load_session`]).
 
+use std::collections::HashSet;
+
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::Utc;
@@ -488,13 +490,10 @@ fn check_prompt_text(prompt_text: &str) -> Result<(), Refusal> {
 }
 
 /// Whether one of `person`'s own runtimes in `project_id` could take a lane
-/// turn on `login` now, by the lease clause's runtime conditions: private
-/// self-hosted, attested as theirs, without a Personal Browser,
-/// dispatch-ready, and with an attested `claudeCode` capability of version 2
-/// whose entry for `login` is ready. `login` is the one the turn's job would
-/// take, the login dispatch chose for it (11.19, 11.20): a person with none
-/// has no computer that could. An ambient evaluation that none could take is
-/// never queued (11.7).
+/// turn on `login` now: `login` is one of [`ready_logins_in`]. `login` is the
+/// one the turn's job would take, the login dispatch chose for it (11.19,
+/// 11.20): a person with none has no computer that could. An ambient
+/// evaluation that none could take is never queued (11.7).
 pub(crate) async fn a_computer_is_ready(
     state: &AppState,
     transaction: &Transaction<'_>,
@@ -505,7 +504,25 @@ pub(crate) async fn a_computer_is_ready(
     let Some(login) = login else {
         return Ok(false);
     };
-    let rows = transaction
+    Ok(ready_logins_in(state, transaction, project_id, person)
+        .await?
+        .contains(&login))
+}
+
+/// The Claude Code logins of `person`'s on which one of their own runtimes in
+/// `project_id` could take a lane turn now, by the lease clause's runtime
+/// conditions: private self-hosted, attested as theirs, without a Personal
+/// Browser, dispatch-ready, and with an attested `claudeCode` capability of
+/// version 2 whose entry for the login is ready ([`lane_logins_ready_on`]).
+/// Evaluations ([`a_computer_is_ready`]) and the person's computers
+/// (crate::computers) read this one rule.
+pub(crate) async fn ready_logins_in(
+    state: &AppState,
+    client: &impl tokio_postgres::GenericClient,
+    project_id: &Uuid,
+    person: Uuid,
+) -> Result<HashSet<Uuid>, Refusal> {
+    let rows = client
         .query(
             "select id, project_id, provider, status, idle_ttl_seconds, last_seen_at,
                     endpoint_url, capabilities, display_name, active_lease_id
@@ -513,8 +530,8 @@ pub(crate) async fn a_computer_is_ready(
               where project_id = $1
                 and capabilities #>> '{_instafySelfHostedAccess,mode}' = 'private'
                 and capabilities #>> '{_instafySelfHostedAccess,ownerUserId}' = $2
-                and capabilities #> array['claudeCode', 'logins', $3, 'ready'] = 'true'::jsonb",
-            &[project_id, &person.to_string(), &login.to_string()],
+                and capabilities #> '{claudeCode,ready}' = 'true'::jsonb",
+            &[project_id, &person.to_string()],
         )
         .await
         .map_err(|error| {
@@ -523,48 +540,56 @@ pub(crate) async fn a_computer_is_ready(
             ))
         })?;
     let now = Utc::now();
-    Ok(rows.iter().any(|row| {
-        let record = runtime::RuntimeRecord {
-            id: row.get("id"),
-            project_id: row.get("project_id"),
-            provider: row.get("provider"),
-            status: row.get("status"),
-            idle_ttl_seconds: row.get("idle_ttl_seconds"),
-            capabilities: row.get("capabilities"),
-            display_name: row.get("display_name"),
-            active_lease_id: row.get("active_lease_id"),
-        };
-        let candidate = workspace::RuntimeCandidate {
-            id: record.id,
-            provider: record.provider.clone(),
-            capabilities: record.capabilities.clone(),
-            status: record.status.clone(),
-            endpoint_url: row.get("endpoint_url"),
-            last_seen_at: row.get("last_seen_at"),
-            idle_ttl_seconds: record.idle_ttl_seconds,
-            display_name: record.display_name.clone(),
-        };
-        runtime_takes_lane_turns(state, &record, person, login)
-            && crate::dispatch::runtime_not_dispatch_ready_detail(&record, Some(&candidate), now)
-                .is_none()
-    }))
+    Ok(rows
+        .iter()
+        .flat_map(|row| {
+            let record = runtime::RuntimeRecord {
+                id: row.get("id"),
+                project_id: row.get("project_id"),
+                provider: row.get("provider"),
+                status: row.get("status"),
+                idle_ttl_seconds: row.get("idle_ttl_seconds"),
+                capabilities: row.get("capabilities"),
+                display_name: row.get("display_name"),
+                active_lease_id: row.get("active_lease_id"),
+            };
+            let candidate = workspace::RuntimeCandidate {
+                id: record.id,
+                provider: record.provider.clone(),
+                capabilities: record.capabilities.clone(),
+                status: record.status.clone(),
+                endpoint_url: row.get("endpoint_url"),
+                last_seen_at: row.get("last_seen_at"),
+                idle_ttl_seconds: record.idle_ttl_seconds,
+                display_name: record.display_name.clone(),
+            };
+            let dispatch_ready =
+                crate::dispatch::runtime_not_dispatch_ready_detail(&record, Some(&candidate), now)
+                    .is_none();
+            if dispatch_ready {
+                lane_logins_ready_on(state, &record, person)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect())
 }
 
-/// The lease clause's runtime conditions over a runtime row, apart from
-/// readiness to take jobs: private self-hosted, its attested owner `person`
-/// and never the service runtime user, no Personal Browser, and an attested
-/// `claudeCode` capability of version 2, ready, whose entry for `login` is
+/// The logins on which a runtime row takes lane turns, by the lease clause's
+/// runtime conditions apart from readiness to take jobs: none unless it is
+/// private self-hosted, its attested owner is `person` and never the service
+/// runtime user, it has no Personal Browser, and its attested `claudeCode`
+/// capability is of version 2 and ready; then each login whose entry is
 /// ready (11.19). Registration never attests a login ready while the program
 /// is not, so the program's `ready` only repeats what the login's says.
-fn runtime_takes_lane_turns(
+fn lane_logins_ready_on(
     state: &AppState,
     record: &runtime::RuntimeRecord,
     person: Uuid,
-    login: Uuid,
-) -> bool {
+) -> Vec<Uuid> {
     let capabilities = &record.capabilities;
     if !runtime::runtime_is_private_self_hosted(state, &record.provider, capabilities) {
-        return false;
+        return Vec::new();
     }
     let person_text = person.to_string();
     let attested_owner = capabilities
@@ -576,30 +601,33 @@ fn runtime_takes_lane_turns(
         || runtime::self_hosted_owner_user_id(capabilities) != Some(person)
         || state.config.service_runtime_user_id == Some(person)
     {
-        return false;
+        return Vec::new();
     }
     if capabilities.get("personalBrowser").is_some()
         || capabilities.get("personal_browser").is_some()
     {
-        return false;
+        return Vec::new();
     }
     let Some(capability) = capabilities.get(CAPABILITY_KEY) else {
-        return false;
+        return Vec::new();
     };
-    let ready = |value: Option<&JsonValue>| {
-        value.and_then(|value| value.get("ready")) == Some(&JsonValue::Bool(true))
-    };
+    let ready = |value: &JsonValue| value.get("ready") == Some(&JsonValue::Bool(true));
     // As the lease reads it: a JSON number equal to 2, as `'2'::jsonb` is.
-    capability
+    let current = capability
         .get("version")
         .and_then(JsonValue::as_f64)
-        .is_some_and(|version| version == CAPABILITY_VERSION as f64)
-        && ready(Some(capability))
-        && ready(
-            capability
-                .get(CAPABILITY_LOGINS_KEY)
-                .and_then(|logins| logins.get(login.to_string())),
-        )
+        .is_some_and(|version| version == CAPABILITY_VERSION as f64);
+    if !current || !ready(capability) {
+        return Vec::new();
+    }
+    capability
+        .get(CAPABILITY_LOGINS_KEY)
+        .and_then(JsonValue::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(_, entry)| ready(entry))
+        .filter_map(|(login, _)| Uuid::parse_str(login).ok())
+        .collect()
 }
 
 /// Stamps a lane turn's metadata as only the controller does:

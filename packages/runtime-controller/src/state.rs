@@ -327,6 +327,9 @@ pub(crate) struct EventHub {
     /// Lease polls waiting on this node for work, per project. Held weakly:
     /// an entry lives as long as one of its waiting polls.
     lease_wakers: Arc<StdMutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Notify>>>>,
+    /// Computer polls waiting on this node for a person's waiting Claude Code
+    /// turns, per person (crate::computers). Held weakly, as `lease_wakers`.
+    computer_wakers: Arc<StdMutex<HashMap<Uuid, std::sync::Weak<tokio::sync::Notify>>>>,
     /// Per-org spacing of `credits.updated`.
     pub(crate) credit_signals: SignalCoalescer,
 }
@@ -534,6 +537,7 @@ impl EventHub {
             outbound,
             project_watchers: Arc::new(StdMutex::new(HashMap::new())),
             lease_wakers: Arc::new(StdMutex::new(HashMap::new())),
+            computer_wakers: Arc::new(StdMutex::new(HashMap::new())),
             credit_signals: SignalCoalescer::new(CREDITS_UPDATED_INTERVAL),
         }
     }
@@ -570,6 +574,21 @@ impl EventHub {
         waker
     }
 
+    /// Wakes when a `computers.wanted` event for `user_id` reaches this node,
+    /// from here or over the bus: dispatch queued a Claude Code turn of
+    /// theirs, or one of their computers changed. Their computers' held
+    /// polls wait on it (crate::computers).
+    pub(crate) fn computer_waker(&self, user_id: Uuid) -> Arc<tokio::sync::Notify> {
+        let mut wakers = lock_unpoisoned(&self.computer_wakers);
+        if let Some(waker) = wakers.get(&user_id).and_then(std::sync::Weak::upgrade) {
+            return waker;
+        }
+        wakers.retain(|_, waker| waker.strong_count() > 0);
+        let waker = Arc::new(tokio::sync::Notify::new());
+        wakers.insert(user_id, Arc::downgrade(&waker));
+        waker
+    }
+
     pub(crate) fn publish(&self, event: ControllerEvent) {
         if let Some(outbound) = &self.outbound {
             let _ = outbound.try_send(event.clone());
@@ -588,6 +607,15 @@ impl EventHub {
     /// broadcast. The bus still carries them: other nodes apply the same check
     /// to their own streams in `publish_local`.
     fn send_local(&self, event: ControllerEvent) {
+        if event.kind == crate::computers::COMPUTERS_WANTED_EVENT {
+            if let Some(waker) = event.target_user_id.and_then(|user_id| {
+                lock_unpoisoned(&self.computer_wakers)
+                    .get(&user_id)
+                    .and_then(std::sync::Weak::upgrade)
+            }) {
+                waker.notify_waiters();
+            }
+        }
         if event.kind.starts_with("run.") && event.kind != REPLY_DRAFT_EVENT {
             if let Some(waker) = event.project_id.and_then(|project_id| {
                 lock_unpoisoned(&self.lease_wakers)
@@ -1024,6 +1052,75 @@ mod tests {
         assert!(Arc::ptr_eq(&waker, &hub.lease_waker(project_id)));
         drop(waker);
         assert!(lock_unpoisoned(&hub.lease_wakers)[&project_id]
+            .upgrade()
+            .is_none());
+    }
+
+    /// A person's computer waker wakes only on `computers.wanted` for that
+    /// person, published here or arriving over the bus.
+    #[tokio::test]
+    async fn a_computer_waker_wakes_only_for_its_person() {
+        let hub = EventHub::new();
+        let person = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let waker = hub.computer_waker(person);
+        {
+            let notified = waker.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let quick = std::time::Duration::from_millis(50);
+
+            crate::computers::announce(&hub, Some(project_id), Uuid::new_v4());
+            publish_controller_event_to_user(
+                &hub,
+                "conversation.updated",
+                Some(project_id),
+                person,
+                JsonValue::Null,
+            );
+            publish_controller_event(
+                &hub,
+                crate::computers::COMPUTERS_WANTED_EVENT,
+                Some(project_id),
+                None,
+                None,
+                None,
+                JsonValue::Null,
+            );
+            assert!(tokio::time::timeout(quick, notified.as_mut())
+                .await
+                .is_err());
+
+            crate::computers::announce(&hub, Some(project_id), person);
+            assert!(tokio::time::timeout(quick, notified.as_mut()).await.is_ok());
+        }
+        {
+            let notified = waker.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            // From another node, with no space.
+            hub.publish_local(ControllerEvent {
+                kind: crate::computers::COMPUTERS_WANTED_EVENT.to_string(),
+                project_id: None,
+                session_id: None,
+                conversation_id: None,
+                run_id: None,
+                job_id: None,
+                channel: None,
+                channels: Vec::new(),
+                target_user_id: Some(person),
+                data: JsonValue::Null,
+                timestamp: Utc::now(),
+            });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), notified)
+                    .await
+                    .is_ok()
+            );
+        }
+        assert!(Arc::ptr_eq(&waker, &hub.computer_waker(person)));
+        drop(waker);
+        assert!(lock_unpoisoned(&hub.computer_wakers)[&person]
             .upgrade()
             .is_none());
     }
