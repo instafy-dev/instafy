@@ -1577,6 +1577,9 @@ struct LaneState {
     program: Option<Result<ProgramFacts, NotReadyReason>>,
     /// Every granted login, in the grant's order.
     logins: Vec<LoginState>,
+    /// How many turns this runtime runs at once, each in a folder of its own (11.23, D54): 1
+    /// until the job pipeline says it can give each turn one ([`Lane::set_turns_at_once`]).
+    turns_at_once: u64,
 }
 
 impl LaneState {
@@ -1586,7 +1589,9 @@ impl LaneState {
 
     /// The version 2 `claudeCode` capability at `now` (2.10, 3.2, 11.19), or `None` before the
     /// program's first probe:
-    /// `{"version": 2, "ready", "reason"?, "cli"?, "verified"?, "partialMessages"?, "logins"}`.
+    /// `{"version": 2, "ready", "reason"?, "cli"?, "verified"?, "partialMessages"?,
+    /// "turnsAtOnce"?, "logins"}`. `turnsAtOnce` is there while the program is ready and the
+    /// runtime runs more than one turn at once (11.23); without it the controller reads 1.
     /// The top level is the program's: `cli`, `verified` and `partialMessages` while it is ready
     /// (the lane always streams partial messages, `--include-partial-messages`, 3.3), and its
     /// `reason` while it is not. Every granted login is listed under its id, lowercase and
@@ -1609,13 +1614,19 @@ impl LaneState {
             })
             .collect();
         let mut capability = match program {
-            Ok(facts) => json!({
-                "version": CAPABILITY_VERSION,
-                "ready": true,
-                "cli": facts.cli.to_string(),
-                "verified": facts.verified,
-                "partialMessages": true,
-            }),
+            Ok(facts) => {
+                let mut capability = json!({
+                    "version": CAPABILITY_VERSION,
+                    "ready": true,
+                    "cli": facts.cli.to_string(),
+                    "verified": facts.verified,
+                    "partialMessages": true,
+                });
+                if self.turns_at_once > 1 {
+                    capability["turnsAtOnce"] = json!(self.turns_at_once);
+                }
+                capability
+            }
             Err(reason) => json!({
                 "version": CAPABILITY_VERSION,
                 "ready": false,
@@ -1726,6 +1737,7 @@ impl Lane {
             state: parking_lot::Mutex::new(LaneState {
                 program: None,
                 logins,
+                turns_at_once: 1,
             }),
             capability: watch::channel(None).0,
             hold_started: tokio::sync::Notify::new(),
@@ -2105,6 +2117,22 @@ impl Lane {
             info!(%capability, "the Claude Code capability changed");
         }
         changed
+    }
+
+    /// Says how many turns this runtime runs at once, each in a folder of its own (11.23, D54):
+    /// 1 to `MAX_TURNS_AT_ONCE`, 1 for a computer that cannot give each turn one. A change is
+    /// published, and the registration loop registers again with it.
+    pub fn set_turns_at_once(&self, turns: u64) {
+        let turns = turns.clamp(1, runtime_contracts::claude_code_lane::MAX_TURNS_AT_ONCE);
+        let changed = {
+            let mut state = self.state.lock();
+            let changed = state.turns_at_once != turns;
+            state.turns_at_once = turns;
+            changed
+        };
+        if changed {
+            self.publish();
+        }
     }
 
     /// The published capability, `None` before the first probe.
@@ -3088,6 +3116,43 @@ mod tests {
         }
     }
 
+    /// A runtime that runs turns at once says how many while its program is ready (11.23), and a
+    /// runtime that runs one at a time, or whose program is not ready, says nothing of it.
+    #[test]
+    fn the_capability_says_how_many_turns_run_at_once() {
+        let login = Uuid::new_v4();
+        let state = |program, turns_at_once| LaneState {
+            program,
+            logins: vec![LoginState {
+                id: login,
+                folder: Ok(()),
+                sign_in: SignIn::default(),
+                hold: None,
+            }],
+            turns_at_once,
+        };
+        let now = chrono::Utc::now();
+        let ready = || Some(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
+        assert_eq!(
+            state(ready(), 3).capability_at(now).unwrap()["turnsAtOnce"],
+            json!(3)
+        );
+        assert!(
+            state(ready(), 1)
+                .capability_at(now)
+                .unwrap()
+                .get("turnsAtOnce")
+                .is_none()
+        );
+        assert!(
+            state(Some(Err(NotReadyReason::BinaryMissing)), 3)
+                .capability_at(now)
+                .unwrap()
+                .get("turnsAtOnce")
+                .is_none()
+        );
+    }
+
     /// The capability a runtime with two logins reports is runtime-contracts' `capability`
     /// fixture, which the controller's attestation keeps unchanged and Studio reads (11.19): the
     /// program ready on 2.1.325, one login ready and signed in with a Claude plan, and one that a
@@ -3125,6 +3190,7 @@ mod tests {
                     hold: PlanLimitHold::after(Some(resets_at.timestamp()), now),
                 },
             ],
+            turns_at_once: 1,
         };
         assert_eq!(state.capability_at(now), Some(fixture));
         assert_eq!(
@@ -3177,6 +3243,7 @@ mod tests {
         let state = |program| LaneState {
             program,
             logins: logins.clone(),
+            turns_at_once: 1,
         };
         assert_eq!(
             state(None).capability_at(now),
@@ -3354,6 +3421,7 @@ mod tests {
                     hold: None,
                 },
             ],
+            turns_at_once: 1,
         };
         let ready = Some(Ok(ProgramFacts::of(MIN_SUPPORTED_VERSION)));
         let unsafe_folder = Err(NotReadyReason::BinaryUnsafe);

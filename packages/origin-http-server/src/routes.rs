@@ -3910,6 +3910,208 @@ pub(crate) async fn put_back_unsaved(
     Ok(summary)
 }
 
+/// Whether a path a turn folder names may reach the working folder or a
+/// recovery ref at all: never the origin's own `.instafy/`, nor a reserved,
+/// unpublishable or unsafe path, as a put-back leaves them out.
+fn turn_folder_path(path: &str) -> Option<String> {
+    let path = normalize_relative_path(path)?;
+    if path == ".instafy"
+        || path.starts_with(".instafy/")
+        || is_reserved_path(&path)
+        || crate::publish_policy::is_unpublishable(&path)
+        || crate::publish_policy::is_unsafe_path(&path)
+    {
+        return None;
+    }
+    Some(path)
+}
+
+/// A Claude Code turn's folder of its own (docs/Local-Engine-Turns.md
+/// 11.23): its copies of `paths`, which the working folder changed meanwhile
+/// and could not take, kept on a `conflict` recovery ref of this origin's
+/// repository, as a publish keeps the version that conflicted with `main`.
+/// The ref's tree is HEAD's with those copies, a path gone from the turn
+/// folder kept as removed, so History lists them. The working folder, its
+/// index and HEAD are not touched. `None` when the copies are HEAD's, or the
+/// repository has no commit yet.
+pub(crate) async fn keep_turn_folder_copies(
+    state: &AppState,
+    turn_folder: PathBuf,
+    paths: Vec<String>,
+) -> Result<Option<crate::recovery::RecoveryRefReport>, OriginError> {
+    let mut kept: Vec<String> = paths
+        .iter()
+        .filter_map(|path| turn_folder_path(path))
+        .collect();
+    kept.sort();
+    kept.dedup();
+    if kept.is_empty() || !turn_folder.is_absolute() {
+        return Ok(None);
+    }
+    let apply_lock = project_apply_lock(state, state.config.project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let git_dir = checkout_root(state).join(".instafy").join(".git");
+    let config = state.config.clone();
+    tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let git = WorkspaceGit::bare(&git_dir, None).with_work_tree(&turn_folder);
+        let internal = |error: anyhow::Error| OriginError::internal(format!("{error:#}"));
+        let Some(head) = git.commit_id("HEAD").map_err(internal)? else {
+            return Ok(None);
+        };
+        crate::recovery::park_worktree_paths(
+            &git,
+            &head,
+            &kept,
+            crate::recovery::RecoveryKind::Conflict,
+            GitIdentity::new(&config.git_author_name, &config.git_author_email),
+            config.origin_id,
+        )
+        .map_err(internal)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("keep task failed: {error}")))?
+}
+
+/// What [`put_turn_changes_unsaved`] did: the paths it put into the working
+/// folder, and those the folder changed since the turn began, which it left
+/// as they are.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TurnChangesPut {
+    pub put: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+/// Puts a Claude Code turn's changes from its folder of its own into the
+/// working folder, unsaved, as a turn that ran in the working folder leaves
+/// them (docs/Local-Engine-Turns.md 11.23): each of `files`, its bytes or
+/// `None` to remove it, only while the working folder still holds
+/// `expected[path]` there (its blob id, or `None` for nothing), under the
+/// locks an apply takes. Nothing is committed. A path the folder changed
+/// since is left alone and named in [`TurnChangesPut::changed`].
+pub(crate) async fn put_turn_changes_unsaved(
+    state: &AppState,
+    files: Vec<(String, Option<Vec<u8>>)>,
+    expected: std::collections::BTreeMap<String, Option<String>>,
+) -> Result<TurnChangesPut, OriginError> {
+    let mut wanted: Vec<(String, Option<Vec<u8>>, Option<String>)> = Vec::new();
+    for (path, bytes) in files {
+        let Some(path) = turn_folder_path(&path) else {
+            continue;
+        };
+        let oid = match expected
+            .get(&path)
+            .cloned()
+            .flatten()
+            .map(|oid| oid.trim().to_ascii_lowercase())
+        {
+            Some(oid) if git::is_safe_git_rev(&oid) => Some(oid),
+            Some(_) => {
+                return Err(OriginError::bad_request(
+                    "expected blob ids must be hexadecimal",
+                ))
+            }
+            None => None,
+        };
+        wanted.push((path, bytes, oid));
+    }
+    if wanted.is_empty() {
+        return Ok(TurnChangesPut::default());
+    }
+    let apply_lock = project_apply_lock(state, state.config.project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let root = checkout_root(state);
+    let config = state.config.clone();
+    tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        // Another process's apply holds the folder for a moment: wait for it, as `/apply` does.
+        let _workspace_apply_guard =
+            acquire_workspace_apply_lock_within(&root, std::time::Duration::from_secs(30))?
+                .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let workspace = WorkspaceDir::open(&root)
+            .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
+        let mut done = TurnChangesPut::default();
+        let mut writes: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut deletes: Vec<String> = Vec::new();
+        for (path, bytes, oid) in wanted {
+            let current = match workspace.entry_kind(&path) {
+                Ok(WorkspaceEntryKind::Directory) => Some("directory".to_string()),
+                _ => workspace_file_blob_oid(&workspace, &path, u64::MAX)
+                    .unwrap_or_else(|_| Some("unreadable".to_string())),
+            };
+            if current != oid {
+                done.changed.push(path);
+                continue;
+            }
+            match bytes {
+                Some(bytes) => writes.push((path.clone(), bytes)),
+                None => deletes.push(path.clone()),
+            }
+            done.put.push(path);
+        }
+        if writes.is_empty() && deletes.is_empty() {
+            return Ok(done);
+        }
+        let archive = turn_changes_archive(&writes)?;
+        let manifest = ApplyManifest {
+            project_id: Some(config.project_id.to_string()),
+            lease_id: None,
+            files: writes
+                .iter()
+                .map(|(path, bytes)| crate::apply::ManifestFileEntry {
+                    path: path.clone(),
+                    size: Some(bytes.len() as u64),
+                    encoding: Some(
+                        if std::str::from_utf8(bytes).is_ok() {
+                            "utf8"
+                        } else {
+                            "binary"
+                        }
+                        .to_string(),
+                    ),
+                })
+                .collect(),
+            deletes,
+            generated_at: None,
+            source_device_id: None,
+            auto_commit_after_apply: false,
+            commit_message: None,
+            idempotency_key: None,
+            request_fingerprint: None,
+            expected: None,
+            base_rev: None,
+        };
+        let (_summary, transaction) =
+            apply_changes_transactional(&config, root.as_path(), manifest, &archive)?;
+        transaction.finish();
+        Ok(done)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("put task failed: {error}")))?
+}
+
+/// A zip archive of `files` for an apply in this process.
+fn turn_changes_archive(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, OriginError> {
+    use std::io::Write as _;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let options = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (path, bytes) in files {
+            zip.start_file(path.as_str(), options)
+                .and_then(|()| zip.write_all(bytes).map_err(Into::into))
+                .map_err(|error| {
+                    OriginError::internal(format!("failed to package {path}: {error}"))
+                })?;
+        }
+        zip.finish().map_err(|error| {
+            OriginError::internal(format!("failed to package changes: {error}"))
+        })?;
+    }
+    Ok(cursor.into_inner())
+}
+
 async fn post_commit_receipt(
     client: reqwest::Client,
     url: reqwest::Url,

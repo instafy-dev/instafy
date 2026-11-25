@@ -130,7 +130,32 @@ struct ApplyManifest {
     files: Vec<ApplyManifestFile>,
     deletes: Vec<String>,
     generated_at: String,
+    /// What each path must hold before the apply (its blob id, or `None` for
+    /// nothing): the origin refuses the whole apply with 409 on any mismatch.
+    /// Only a turn folder's save sends it (docs/Local-Engine-Turns.md 11.23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<BTreeMap<String, Option<String>>>,
 }
+
+/// The origin's refusal of an apply, with its status: a 409 says a path no
+/// longer holds what the save expected there.
+#[derive(Debug)]
+pub(crate) struct OriginApplyRefused {
+    pub(crate) status: StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for OriginApplyRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "origin apply failed ({}): {}",
+            self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for OriginApplyRefused {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1014,6 +1039,53 @@ async fn acquire_workspace_lease(
     }
 }
 
+/// How long a turn folder's save waits for the workspace lease
+/// (docs/Local-Engine-Turns.md 11.23): another Claude Code turn of this
+/// computer is often saving at the same moment, and a save that publishes
+/// holds the lease for seconds, longer than [`LEASE_CONFLICT_RETRY_DELAYS`]
+/// wait.
+const TURN_FOLDER_LEASE_WAIT: Duration = Duration::from_secs(120);
+
+/// [`acquire_workspace_lease`], trying again while another writer holds the
+/// lease, for at most `wait`, every 250 ms at first and every 2 s at most.
+#[allow(clippy::too_many_arguments)]
+async fn acquire_workspace_lease_within(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    job_id: Uuid,
+    run_id: Option<Uuid>,
+    wait: Duration,
+) -> Result<Uuid> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut delay = Duration::from_millis(250);
+    loop {
+        match acquire_workspace_lease_once(
+            client,
+            controller_base_url,
+            controller_token,
+            project_id,
+            runtime_id,
+            job_id,
+            run_id,
+        )
+        .await
+        {
+            Ok(lease_id) => return Ok(lease_id),
+            Err(error @ LeaseAcquireError::Conflict(_)) => {
+                if tokio::time::Instant::now() + delay > deadline {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum LeaseAcquireError {
     #[error("workspace lease conflict: {0}")]
@@ -1323,6 +1395,7 @@ async fn commit_with_lease(
             .collect(),
         deletes: deletes.to_vec(),
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        expected: None,
     };
 
     let apply_url = format!("{}/apply", endpoint);
@@ -1389,6 +1462,282 @@ async fn commit_with_lease(
         save,
         paths: Vec::new(),
     })
+}
+
+/// How many times a turn folder's save reads the space's folder again after
+/// the origin refused its apply because a path changed meanwhile (409).
+const TURN_FOLDER_SAVE_ATTEMPTS: usize = 3;
+
+/// A Claude Code turn's folder of its own and the space's folder it saves to
+/// (`turn_folder`, docs/Local-Engine-Turns.md 11.23).
+pub(crate) struct TurnFolderSave<'a> {
+    pub(crate) turn_folder: &'a super::turn_folder::TurnFolder,
+    pub(crate) space_folder: &'a Path,
+    /// What the turn found at each path it changed, from its first tree.
+    pub(crate) found: &'a BTreeMap<String, super::turn_folder::BaseEntry>,
+    /// The turn's agent, which a merge names.
+    pub(crate) agent: &'a str,
+}
+
+/// What a turn folder's save did.
+#[derive(Debug, Default)]
+pub(crate) struct TurnFolderSaved {
+    /// The save's result, when it applied anything.
+    pub(crate) result: Option<CommitToOriginResult>,
+    /// The paths it saved (written or removed), merged ones included.
+    pub(crate) saved: Vec<String>,
+    /// The paths whose content is the turn's change merged with the space's.
+    pub(crate) merged: Vec<String>,
+    /// The paths the space changed too, which it keeps: the turn's version is
+    /// kept aside.
+    pub(crate) kept: Vec<String>,
+}
+
+/// The save of a turn that worked in a folder of its own (11.23): under the
+/// workspace lease, as every save, it sends what `turn_folder::plan_merge`
+/// plans, each path with the blob id the space's folder holds there as
+/// `expected`. When the space's folder changes between the read and the
+/// apply, the origin refuses with 409 and the save plans again, up to
+/// [`TURN_FOLDER_SAVE_ATTEMPTS`] times. `/git/sync` then publishes what was
+/// applied, as for every save.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn save_turn_folder(
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    job_id: Uuid,
+    run_id: Option<Uuid>,
+    folders: TurnFolderSave<'_>,
+    files: &[CodexFileDescriptor],
+    progress_sender: Option<JobMessageSender>,
+    local_origin: Option<LocalOriginSync>,
+    title: &str,
+) -> Result<TurnFolderSaved> {
+    if files.is_empty() {
+        return Ok(TurnFolderSaved::default());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .context("failed to build workspace commit http client")?;
+    let lease_id = acquire_workspace_lease_within(
+        &client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        job_id,
+        run_id,
+        TURN_FOLDER_LEASE_WAIT,
+    )
+    .await?;
+    let saved = save_turn_folder_with_lease(
+        &client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+        &folders,
+        files,
+        progress_sender,
+        local_origin.as_ref(),
+        title,
+    )
+    .await;
+    if let Err(error) = release_workspace_lease(
+        &client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+    )
+    .await
+    {
+        warn!(?error, lease_id = %lease_id, "failed to release workspace lease after a turn folder's save");
+    }
+    let mut saved = saved?;
+    if let Some(result) = saved.result.as_mut() {
+        result.lease_id = lease_id;
+    }
+    Ok(saved)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_turn_folder_with_lease(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+    folders: &TurnFolderSave<'_>,
+    files: &[CodexFileDescriptor],
+    progress_sender: Option<JobMessageSender>,
+    local_origin: Option<&LocalOriginSync>,
+    title: &str,
+) -> Result<TurnFolderSaved> {
+    let OriginWriteAccess { token, endpoint } = origin_write_access(
+        client,
+        controller_base_url,
+        controller_token,
+        project_id,
+        runtime_id,
+        lease_id,
+        local_origin,
+        "a turn folder's save",
+    )
+    .await?;
+    if let Some(sender) = progress_sender.as_ref() {
+        let _ = sender.send(JobMessage {
+            content: "Applying changes to workspace…".to_string(),
+            message_type: Some("status".to_string()),
+            metadata: Some(json!({
+              "kind": "workspace_commit",
+              "status": "applying",
+              "endpoint": endpoint,
+            })),
+        });
+    }
+    let apply_url = format!("{}/apply", endpoint);
+    let mut attempt = 0;
+    let (plan, apply_response) = loop {
+        attempt += 1;
+        let plan = super::turn_folder::plan_merge(
+            folders.turn_folder,
+            folders.space_folder,
+            files,
+            folders.found,
+            folders.agent,
+        )
+        .await?;
+        if plan.writes.is_empty() && plan.deletes.is_empty() {
+            break (plan, None);
+        }
+        let uploads: Vec<UploadEntry> = plan
+            .writes
+            .iter()
+            .map(|(path, bytes)| UploadEntry {
+                path: path.clone(),
+                encoding: if std::str::from_utf8(bytes).is_ok() {
+                    "utf8"
+                } else {
+                    "binary"
+                }
+                .to_string(),
+                bytes: bytes.clone(),
+            })
+            .collect();
+        let archive_bytes = build_zip_archive(&uploads)?;
+        let manifest = ApplyManifest {
+            project_id: project_id.to_string(),
+            lease_id: token
+                .lease_id
+                .clone()
+                .or_else(|| Some(lease_id.to_string())),
+            files: uploads
+                .iter()
+                .map(|entry| ApplyManifestFile {
+                    path: entry.path.clone(),
+                    size: entry.bytes.len() as u64,
+                    encoding: entry.encoding.clone(),
+                })
+                .collect(),
+            deletes: plan.deletes.clone(),
+            generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            expected: Some(plan.expected.clone()),
+        };
+        let manifest_json =
+            serde_json::to_vec(&manifest).context("failed to encode apply manifest")?;
+        match send_origin_apply_with_retry(
+            client,
+            &apply_url,
+            &token.token,
+            &manifest_json,
+            &archive_bytes,
+        )
+        .await
+        {
+            Ok(text) => break (plan, Some(text)),
+            Err(error)
+                if attempt < TURN_FOLDER_SAVE_ATTEMPTS
+                    && error
+                        .downcast_ref::<OriginApplyRefused>()
+                        .is_some_and(|refused| refused.status == StatusCode::CONFLICT) =>
+            {
+                info!(
+                    attempt,
+                    "the space's folder changed while a turn folder's save was planned; it reads again"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let mut saved: Vec<String> = plan
+        .writes
+        .iter()
+        .map(|(path, _)| path.clone())
+        .chain(plan.deletes.iter().cloned())
+        .collect();
+    saved.sort();
+    let mut outcome = TurnFolderSaved {
+        result: None,
+        saved: saved.clone(),
+        merged: plan.merged,
+        kept: plan.kept,
+    };
+    let Some(text) = apply_response else {
+        return Ok(outcome);
+    };
+    let apply_response: OriginApplyResponse =
+        serde_json::from_str(&text).unwrap_or(OriginApplyResponse {
+            rev: None,
+            base_rev: None,
+        });
+    let mut result = CommitToOriginResult {
+        origin_id: token.origin_id,
+        origin_endpoint: endpoint.clone(),
+        origin_mode: token.mode.clone(),
+        lease_id,
+        apply_rev: apply_response.rev,
+        apply_base_rev: apply_response.base_rev,
+        git_rev: None,
+        git_base_rev: None,
+        git_sync_attempted: false,
+        git_sync_error: None,
+        save: SaveReport::default(),
+        paths: saved.clone(),
+    };
+    if git_sync_enabled() {
+        result.git_sync_attempted = true;
+        match try_git_sync(client, &endpoint, &token.token, title, &saved).await {
+            Ok(synced) if synced.is_not_saved() => {
+                result.git_base_rev = synced.base_rev.clone();
+                result.save = synced.save_report();
+                let error = synced
+                    .error
+                    .clone()
+                    .or_else(|| synced.failure.clone())
+                    .unwrap_or_else(|| "Not saved".to_string());
+                warn!(error = %error, project_id = %project_id, "git sync after a turn folder's apply saved nothing");
+                result.git_sync_error = Some(error);
+            }
+            Ok(synced) => {
+                result.save = synced.save_report();
+                result.git_rev = synced.rev;
+                result.git_base_rev = synced.base_rev;
+            }
+            Err(error) => {
+                warn!(?error, project_id = %project_id, "git sync after a turn folder's apply failed");
+                result.git_sync_error = Some(error.to_string());
+            }
+        }
+    }
+    outcome.result = Some(result);
+    Ok(outcome)
 }
 
 /// Where the refresh before a turn goes and with what credential.
@@ -1669,7 +2018,10 @@ async fn send_origin_apply_with_retry(
             return Ok(text);
         }
         if attempt == ORIGIN_APPLY_MAX_ATTEMPTS || !should_retry_origin_apply(status, &text) {
-            bail!("origin apply failed ({}): {}", status, text);
+            return Err(anyhow::Error::new(OriginApplyRefused {
+                status,
+                body: text,
+            }));
         }
 
         warn!(
@@ -3146,6 +3498,179 @@ mod tests {
             "{not_saved:?}"
         );
         Ok(())
+    }
+
+    /// A turn that worked in a folder of its own saves by merging into the space's folder
+    /// (docs/Local-Engine-Turns.md 11.23), through a real origin that checks `expected`: a file
+    /// the space still holds as the turn found it takes the turn's version, a new file goes in,
+    /// a text file both changed merges three ways and keeps the space's own line, and a file
+    /// whose line both changed keeps the space's version, with the turn's kept on a `conflict`
+    /// recovery ref. The save publishes what it applied.
+    #[tokio::test]
+    async fn a_turn_folders_save_merges_into_the_space_through_its_origin() -> Result<()> {
+        use super::super::turn_folder;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed)?;
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-q", "-b", "main"]);
+        let readme = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        std::fs::write(seed.join("README.md"), readme)?;
+        std::fs::write(seed.join("plain.md"), "plain\n")?;
+        std::fs::write(seed.join("clash.md"), "first\n")?;
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        let origin_id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = listener.local_addr()?.port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{origin_port}");
+        let project_id = Uuid::new_v4();
+        let controller_address =
+            spawn_controller_for_real_origin(project_id, origin_id, endpoint.clone()).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let config = origin_http_server::config::ServerConfig {
+            project_id,
+            origin_id,
+            workspace_root: workspace.clone(),
+            git_remote_url: Some(format!("file://{}", remote.display())),
+            git_remote_base_url: None,
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "Instafy Origin".into(),
+            git_author_email: "origin@instafy.dev".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: origin_port,
+            controller_base_url: controller.clone(),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: controller.join("/.well-known/jwks.json")?,
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            max_archive_bytes: 1024 * 1024,
+            staging_base: None,
+            multi_tenant: false,
+            hosted_checkout: true,
+        };
+        origin_http_server::git::ensure_git_checkout(&config, None)?;
+        let mut server = origin_http_server::server::OriginHttpServer::new(config)?;
+        server.start().await?;
+        let result = async {
+            // The turn's folder: a copy of the space's, its repository included.
+            let turn = root.join("turn");
+            let copied = std::process::Command::new("cp")
+                .args(["-R", workspace.to_str().unwrap(), turn.to_str().unwrap()])
+                .status()?;
+            ensure!(copied.success(), "the copy");
+            let turn_folder = turn_folder::TurnFolder::at(&turn);
+            let started = turn_folder.begin().await?;
+            // The turn's changes.
+            std::fs::write(turn.join("plain.md"), "plain, by the turn\n")?;
+            std::fs::write(turn.join("README.md"), readme.replace("two\n", "TWO\n"))?;
+            std::fs::write(turn.join("clash.md"), "the turn's\n")?;
+            std::fs::write(turn.join("new.md"), "new\n")?;
+            // Meanwhile in the space's folder.
+            std::fs::write(
+                workspace.join("README.md"),
+                readme.replace("six\n", "SIX\n"),
+            )?;
+            std::fs::write(workspace.join("clash.md"), "the space's\n")?;
+            let changes = turn_folder.changes(&started).await.context("changes")?;
+            let files = changes.files;
+            let found = changes.found;
+            let paths: Vec<String> = files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect();
+            ensure!(
+                paths == ["README.md", "clash.md", "new.md", "plain.md"],
+                "{paths:?}"
+            );
+            let saved = super::save_turn_folder(
+                &controller,
+                "workspace-token",
+                project_id,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                None,
+                super::TurnFolderSave {
+                    turn_folder: &turn_folder,
+                    space_folder: &workspace,
+                    found: &found,
+                    agent: "alpha",
+                },
+                &files,
+                None,
+                Some(LocalOriginSync {
+                    origin_id,
+                    endpoint: endpoint.clone(),
+                    read_only_refresh: None,
+                    working_state: None,
+                }),
+                "Change the docs",
+            )
+            .await?;
+            ensure!(
+                saved.saved == ["README.md", "new.md", "plain.md"],
+                "{saved:?}"
+            );
+            ensure!(saved.merged == ["README.md"], "{saved:?}");
+            ensure!(saved.kept == ["clash.md"], "{saved:?}");
+            let result = saved.result.as_ref().context("an apply")?;
+            ensure!(
+                result.git_sync_error.is_none(),
+                "{:?}",
+                result.git_sync_error
+            );
+            ensure!(
+                std::fs::read_to_string(workspace.join("README.md"))?
+                    == readme.replace("two\n", "TWO\n").replace("six\n", "SIX\n")
+            );
+            ensure!(std::fs::read_to_string(workspace.join("plain.md"))? == "plain, by the turn\n");
+            ensure!(std::fs::read_to_string(workspace.join("new.md"))? == "new\n");
+            ensure!(std::fs::read_to_string(workspace.join("clash.md"))? == "the space's\n");
+            ensure!(git(&remote, &["show", "main:plain.md"]) == "plain, by the turn");
+            ensure!(git(&remote, &["show", "main:new.md"]) == "new");
+            // The turn's version of the clash, kept from its folder.
+            turn_folder.done();
+            let kept = server
+                .turn_folders()
+                .context("the origin's turn folders")?
+                .keep(turn.clone(), saved.kept.clone())
+                .await?
+                .context("something kept")?;
+            ensure!(
+                git(
+                    &workspace,
+                    &[
+                        "--git-dir=.instafy/.git",
+                        "show",
+                        &format!("{}:clash.md", kept.reference)
+                    ]
+                ) == "the turn's",
+                "{kept:?}"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        server.stop().await?;
+        result
     }
 
     /// Controller stand-in for a real origin: publishes a JWKS, grants

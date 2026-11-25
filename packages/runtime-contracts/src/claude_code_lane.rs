@@ -46,6 +46,12 @@ pub const CAPABILITY_VERSION: u64 = 2;
 /// The most Claude Code logins a person has, a grant carries and a capability lists (11.19).
 pub const MAX_LOGINS: usize = 10;
 
+/// The most Claude Code turns a runtime runs at once, each in a folder of its
+/// own (docs/Local-Engine-Turns.md 11.23, D54): the capability's
+/// `turnsAtOnce` is 1 to this, and 1 when the runtime cannot give each turn a
+/// folder of its own. The controller's lease clause reads the same bound.
+pub const MAX_TURNS_AT_ONCE: u64 = 3;
+
 /// The codes of a lane turn's `claude-code/failure` artifact that the controller copies onto
 /// its failure message as `claudeCodeFailure` (2.6): the rows of 5.5's table above
 /// `claude_code_turn_not_allowed`, in its order. The controller leaves any other code off, and

@@ -1235,12 +1235,12 @@ test("the consent dialog names the host context's account and the folder Desktop
 test("the consent texts are the design's, and a login's dialog adds 4.5's note for a second account", async () => {
   assert.equal(
     consent.CLAUDE_CODE_LOGIN_CONSENT_TEXT,
-    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself in this login's folder, for the turns of your agents whose AI is this login: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time on each login, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in to this login is yours.",
+    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself in this login's folder, for the turns of your agents whose AI is this login: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, several at a time on each login, each in its own copy of this space's folder whose changes are saved to the folder, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder or its copy and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for the folder it works in, which your later Claude Code sessions there load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in to this login is yours.",
   );
   // 11.13's text, which also confirms another program while the lane is on.
   assert.equal(
     consent.CLAUDE_CODE_CONSENT_TEXT,
-    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, one at a time, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for this folder, which your later Claude Code sessions here load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.",
+    "Instafy Desktop will start the claude program on this computer, signed in the way you signed in to it yourself, for the turns of your agents whose AI you set to Claude Code: your messages to them, and the turns they take while you're away, such as their automations and their next steps toward a goal, whenever this computer runs the space. It runs under Anthropic's current terms, and that sign-in may bill your Claude plan or your own API or cloud account. Only your own agents' turns run here, several at a time, each in its own copy of this space's folder whose changes are saved to the folder, never anyone else's. Instafy gives Claude Code the words of each turn: your message, or what Instafy wrote for that turn, such as an automation's prompt. Everyone in the space can read the steps it takes and its replies. Claude Code uses your own Claude Code settings, including what you've allowed it to run without asking, except that it changes files without asking, whatever your own setting says, in this space's folder or its copy and in any other folder your Claude Code settings let it work in, and skips anything else that would need your OK. It can also write to Claude Code's memory for the folder it works in, which your later Claude Code sessions there load, in Instafy or in a terminal. What others wrote in this space's files can steer it within those settings, also in turns nobody watches: it may copy files kept only on this computer, such as .env, into its reply or into files saved to the space, run the space's code through commands or hooks you've allowed, and put their words into that memory, where your later sessions read them. Instafy never reads, stores or sends your Claude sign-in. Only turn this on if the Claude account signed in on this computer account is yours.",
   );
   // A login's text is 11.13's with only 11.19's three changes, so every
   // other sentence stays as it is.
@@ -1249,11 +1249,11 @@ test("the consent texts are the design's, and a login's dialog adds 4.5's note f
       "yourself in this login's folder, for the turns of your agents whose AI is this login:",
       "yourself, for the turns of your agents whose AI you set to Claude Code:",
     )
-      .replace("one at a time on each login, never", "one at a time, never")
+      .replace("several at a time on each login, each", "several at a time, each")
       .replace("signed in to this login is yours.", "signed in on this computer account is yours."),
     consent.CLAUDE_CODE_CONSENT_TEXT,
   );
-  assert.equal(consent.CLAUDE_CODE_CONSENT_VERSION, 3);
+  assert.equal(consent.CLAUDE_CODE_CONSENT_VERSION, 4);
   assert.equal(
     consent.CLAUDE_CODE_OTHER_ACCOUNT_TEXT,
     "Another Instafy account on this computer account also uses Claude Code. Claude Code turns run on whichever Claude sign-in this computer account has. Only continue if it is yours.",
@@ -1426,7 +1426,7 @@ test("a record from another OS account, of consent version 2 or malformed grants
         consentVersion: 2,
       },
     ],
-    ["no login given consent for version 3's words", { ...record, logins: [recordLogin(LOGIN_1, configDir, 2)] }],
+    ["no login given consent for version 4's words", { ...record, logins: [recordLogin(LOGIN_1, configDir, 3)] }],
     ["a login without a version", { ...record, logins: [{ id: LOGIN_1, configDir, consentedAt: NOW.toISOString() }] }],
     ["no login", { ...record, logins: [] }],
     ["logins that are not a list", { ...record, logins: { [LOGIN_1]: recordLogin(LOGIN_1) } }],
@@ -1994,7 +1994,7 @@ test("Use Claude Code on this computer sets up the first login in the login shel
     pathEntries: [binDir, "/usr/bin", "/bin"],
     env: FOUR_SHELL_VALUES(context.fixture),
     osUser: "fixture-user",
-    logins: [{ id: LOGIN_1, configDir, consentedAt: NOW.toISOString(), consentVersion: 3 }],
+    logins: [{ id: LOGIN_1, configDir, consentedAt: NOW.toISOString(), consentVersion: 4 }],
   });
 
   // A login shell that sets no CLAUDE_CONFIG_DIR: the usual folder, which
@@ -2056,7 +2056,7 @@ test("while the lane is on, Use Claude Code on this computer confirms the progra
   // Each login keeps the consent it was given.
   assert.deepEqual(
     readConsentRecord(context).logins.map((login) => login.consentVersion),
-    [3, 3],
+    [4, 4],
   );
 });
 
@@ -2372,7 +2372,7 @@ test("Add a login needs the lane on, opens a native folder picker for another fo
     id: LOGIN_2,
     configDir: secondConfigDir,
     consentedAt: NOW.toISOString(),
-    consentVersion: 3,
+    consentVersion: 4,
   });
 
   // The usual folder needs no picker.

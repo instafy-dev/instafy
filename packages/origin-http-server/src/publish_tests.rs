@@ -2687,6 +2687,127 @@ async fn the_hosting_process_puts_a_stopped_turns_unsaved_change_back() {
     );
 }
 
+/// A Claude Code turn that worked in a folder of its own
+/// (docs/Local-Engine-Turns.md 11.23). The process hosting the origin keeps
+/// the turn's copies of files the working folder changed meanwhile on a
+/// `conflict` recovery ref, from the turn's folder, leaving the working
+/// folder as it is; and it puts a turn's changes into the working folder
+/// unsaved, each only while the folder still holds what the turn began from.
+/// The origin's own `.instafy/` and a secret file never reach either.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosting_process_keeps_and_puts_a_turn_folders_changes() {
+    let sc = Scenario::new(Options::default());
+    let client = reqwest::Client::new();
+    let config = std::sync::Arc::new(sc.config.clone());
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let state = crate::routes::AppState::new(config, validator, client, sc.ws.clone(), None)
+        .expect("app state");
+    let blob = crate::workspace_git::blob_oid;
+    let turn = tempfile::tempdir().expect("turn folder");
+    write(turn.path(), "README.md", b"one\nTHE TURN'S\nthree\n");
+    write(turn.path(), "notes/new.md", b"made by the turn\n");
+    write(turn.path(), "site/.env", b"TOKEN=from-the-turn\n");
+
+    // Kept from the turn's folder: the working folder stays as it is.
+    let kept = crate::routes::keep_turn_folder_copies(
+        &state,
+        turn.path().to_path_buf(),
+        vec![
+            "README.md".to_string(),
+            "notes/new.md".to_string(),
+            ".instafy/agent/x".to_string(),
+            "site/.env".to_string(),
+        ],
+    )
+    .await
+    .expect("keep")
+    .expect("something to keep");
+    assert_eq!(kept.kind, crate::recovery::RecoveryKind::Conflict);
+    assert!(kept.reference.contains("-conflict-"), "{kept:?}");
+    assert_eq!(sc.disk("README.md").as_deref(), Some(README));
+    assert_eq!(sc.disk("notes/new.md"), None);
+    assert_eq!(
+        ig(&sc.ws, &["show", &format!("{}:README.md", kept.reference)]),
+        "one\nTHE TURN'S\nthree"
+    );
+    assert_eq!(
+        ig(
+            &sc.ws,
+            &["show", &format!("{}:notes/new.md", kept.reference)]
+        ),
+        "made by the turn"
+    );
+    let kept_paths = ig(&sc.ws, &["ls-tree", "-r", "--name-only", &kept.reference]);
+    assert!(kept_paths.contains("notes/new.md"), "{kept_paths}");
+    assert!(
+        !kept_paths.contains("site/.env"),
+        "a secret file is never kept: {kept_paths}"
+    );
+    assert!(!kept_paths.contains(".instafy"), "{kept_paths}");
+    // Tracked files and HEAD stay as they were; older git also lists the untracked `.instafy/`.
+    assert_eq!(
+        ig(&sc.ws, &["status", "--porcelain", "--untracked-files=no"]),
+        "",
+        "nothing moved"
+    );
+
+    // Put in unsaved, while the folder holds what the turn began from.
+    let put = crate::routes::put_turn_changes_unsaved(
+        &state,
+        vec![
+            (
+                "README.md".to_string(),
+                Some(b"one\nTHE TURN'S\nthree\n".to_vec()),
+            ),
+            (
+                "notes/new.md".to_string(),
+                Some(b"made by the turn\n".to_vec()),
+            ),
+            (".instafy/agent/x".to_string(), Some(b"no\n".to_vec())),
+        ],
+        std::collections::BTreeMap::from([
+            ("README.md".to_string(), Some(blob(README.as_bytes()))),
+            ("notes/new.md".to_string(), None),
+        ]),
+    )
+    .await
+    .expect("put");
+    assert_eq!(put.put, ["README.md", "notes/new.md"]);
+    assert!(put.changed.is_empty(), "{put:?}");
+    assert_eq!(
+        sc.disk("README.md").as_deref(),
+        Some("one\nTHE TURN'S\nthree\n")
+    );
+    assert_eq!(
+        sc.disk("notes/new.md").as_deref(),
+        Some("made by the turn\n")
+    );
+    assert_eq!(sc.disk(".instafy/agent/x"), None);
+
+    // A file the folder changed since is left alone; a removal goes in.
+    sc.write("README.md", b"the person's own\n");
+    let put = crate::routes::put_turn_changes_unsaved(
+        &state,
+        vec![
+            ("README.md".to_string(), Some(b"again\n".to_vec())),
+            ("notes/new.md".to_string(), None),
+        ],
+        std::collections::BTreeMap::from([
+            ("README.md".to_string(), Some(blob(README.as_bytes()))),
+            (
+                "notes/new.md".to_string(),
+                Some(blob(b"made by the turn\n")),
+            ),
+        ]),
+    )
+    .await
+    .expect("put");
+    assert_eq!(put.put, ["notes/new.md"]);
+    assert_eq!(put.changed, ["README.md"]);
+    assert_eq!(sc.disk("README.md").as_deref(), Some("the person's own\n"));
+    assert_eq!(sc.disk("notes/new.md"), None);
+}
+
 /// Undo of a saved change: the saved revert lands on canonical `main` from
 /// another origin, and `/git/revert {saved}` brings this checkout to it, so
 /// the page this machine serves loses the change at once. The checkout

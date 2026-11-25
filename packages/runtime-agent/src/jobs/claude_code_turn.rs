@@ -1,13 +1,16 @@
-//! A local-engine turn (docs/Local-Engine-Turns.md 3.1, 11.12, 11.19): the person's own Claude
-//! Code, signed in on this computer in the folder of the login the turn's lease took, carries out
-//! one turn of their agent, in the space's folder, and the turn saves what it changed, unless it
-//! only plans (`plan_only`). In order:
+//! A local-engine turn (docs/Local-Engine-Turns.md 3.1, 11.12, 11.19, 11.23): the person's own
+//! Claude Code, signed in on this computer in the folder of the login the turn's lease took,
+//! carries out one turn of their agent, in the space's folder or, on a computer that runs turns at
+//! once, in a folder of its own cloned from it (`turn_folder`), and the turn saves what it
+//! changed, unless it only plans (`plan_only`). In order:
 //!
-//! 1. The job's process-environment lock, then whether its lease still holds.
+//! 1. Without a folder of its own, the job's process-environment lock, as for every turn; then
+//!    whether its lease still holds.
 //! 2. The workspace token, verified: the end-of-turn save needs it, and a lane job has no
 //!    controller token to fall back on.
 //! 3. The folder: made if missing, brought up to date, its scaffold, the controller's pages. A
-//!    pre-turn refresh that refuses saves ends the turn before anything starts.
+//!    pre-turn refresh that refuses saves ends the turn before anything starts. A turn of its own
+//!    folder is cloned from the space's folder then, and runs there from here on.
 //! 4. The pre-flight of 3.9 (`claude_code::preflight`), which a Stop ends.
 //! 5. The starting point: the folder's `git status` (without one the turn ends here), the record a
 //!    Stop reports from, and the pages of other chats the turn holds.
@@ -22,6 +25,11 @@
 //!    (`claude_code::saves`), and the turn's [`JobExecution`]: provider `claude-code`, the lane's
 //!    conversation state, `apply/files`, `origin/apply`, `claude-code/usage` and
 //!    `claude-code/run-log`, never a `codex/run-log`. A `plan_only` turn saves nothing.
+//!
+//! A turn of its own folder saves by merging into the space's folder
+//! (`workspace_commit::save_turn_folder`), and what the space changed meanwhile is kept aside, on
+//! a recovery ref. When it saves nothing (it failed, was stopped, or its save failed), its changes
+//! are put into the space's folder unsaved, so they stay there as after a turn that ran there.
 //!
 //! However `claude` ended, what it changed under another chat's page is put back first. A failure
 //! saves nothing and fails the job with its `claude-code/failure` code; one at the Claude plan's
@@ -133,8 +141,22 @@ impl JobProcessor {
         let mode = lane_job.mode();
         let login = lane_job.login();
 
-        // 1. One turn's process environment at a time, as for every turn.
-        let _job_process_env_guard = JOB_PROCESS_ENV_LOCK.lock().await;
+        // 1. A turn that works in a folder of its own (11.23) runs beside this runtime's other
+        // Claude Code turns: its `claude` gets an environment of its own (3.4). Without one, one
+        // turn's process environment at a time, as for every turn.
+        let project_id = self.project_id_for_job(job)?;
+        let turn_folders = (project_id == self.config.project_id)
+            .then(|| self.turn_folder_place().cloned().zip(self.turn_folders()))
+            .flatten()
+            .and_then(|(place, hold)| {
+                turn_folder::TurnRepo::of(&self.config.project_workspace_dir(&project_id))
+                    .map(|repo| (place, hold, repo))
+            });
+        let _job_process_env_guard = if turn_folders.is_some() {
+            None
+        } else {
+            Some(JOB_PROCESS_ENV_LOCK.lock().await)
+        };
         ensure_lease_held(
             cancel_signal.as_ref(),
             "before the folder was brought up to date",
@@ -162,8 +184,7 @@ impl JobProcessor {
         };
 
         // 3. The folder, up to date, with its scaffold and the controller's pages.
-        let project_id = self.project_id_for_job(job)?;
-        let folder = self.prepare_workspace_dir(&project_id)?;
+        let space_folder = self.prepare_workspace_dir(&project_id)?;
         let pre_turn_refresh = if commit_to_workspace {
             Some(
                 Box::pin(self.refresh_workspace_before_turn(
@@ -197,8 +218,32 @@ impl JobProcessor {
             );
             return Err(failure.into());
         }
-        learn::ensure_project_memory_scaffold_in(&folder, self.scaffold_scope());
-        space_pages::take_the_controllers_pages(&folder, &job.payload);
+        learn::ensure_project_memory_scaffold_in(&space_folder, self.scaffold_scope());
+        space_pages::take_the_controllers_pages(&space_folder, &job.payload);
+        // A turn of its own folder runs in a clone of the space's folder as it is now (11.23).
+        let turn_folder = match turn_folders.as_ref() {
+            Some((place, _, repo)) => Some(
+                turn_folder::TurnFolder::clone_of(place, repo, &turn_folder_name(job))
+                    .await
+                    .map_err(|error| {
+                        lane_error(
+                            uncoded(
+                                Redactor::new(&space_folder, lane.grant().snapshot().home()).text(
+                                    &format!(
+                                        "Instafy couldn't make a folder of its own for this turn, so Claude Code didn't start: {error:#}"
+                                    ),
+                                ),
+                            ),
+                            Vec::new(),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+        let folder: PathBuf = turn_folder
+            .as_ref()
+            .map(|turn_folder| turn_folder.path().to_path_buf())
+            .unwrap_or_else(|| space_folder.clone());
 
         // 4. The pre-flight: no project configuration, unsafe import or link (3.9). It refuses a
         // folder it cannot check within its own deadline, and a Stop ends it as a Stop ends the
@@ -229,7 +274,34 @@ impl JobProcessor {
                 Vec::new(),
             ));
         };
-        turn_start.record_local_engine_turn(&folder, &git_status_before);
+        // A turn of its own folder reads how it began, and writes it beside the folder, so what
+        // the turn changed reaches the space's folder whatever happens to this process
+        // (`turn_folder::TurnFolder::begin`).
+        let started = match turn_folder.as_ref() {
+            Some(turn_folder) => match turn_folder.begin().await {
+                Ok(started) => Some(started),
+                Err(error) => {
+                    warn!(job_id = %job.id, ?error, "a turn folder's start could not be read");
+                    return Err(lane_error(
+                        LaneFailure::new(
+                            FailureCode::PreflightFailed,
+                            "Instafy couldn't read the state of this space's folder, so Claude Code didn't start.",
+                        ),
+                        Vec::new(),
+                    ));
+                }
+            },
+            None => None,
+        };
+        match turn_folder.as_ref() {
+            Some(turn_folder) => turn_start.record_local_engine_turn_in(
+                turn_folder.clone(),
+                &git_status_before,
+                &space_folder,
+            ),
+            None => turn_start.record_local_engine_turn(&folder, &git_status_before),
+        }
+        let isolated = turn_folder.zip(started);
         let mut held_pages = space_pages::HeldPages::of_turn(
             &folder,
             job.conversation_id.as_ref(),
@@ -346,6 +418,15 @@ impl JobProcessor {
                 space_pages::TurnSteps::of_events(&folder, &events),
             )
             .await;
+        // A turn of its own folder that will not save puts what it changed into the space's
+        // folder, unsaved, where a turn that ran there would have left it (11.23).
+        let saves = commit_to_workspace && mode.saves();
+        if let Some((turn_folder, started)) = isolated.as_ref()
+            && !(saves && matches!(outcome.end, TurnEnd::Succeeded))
+        {
+            self.put_turn_folder_changes(turn_folder, started, &space_folder, &held_pages, job)
+                .await;
+        }
         if matches!(outcome.end, TurnEnd::Shutdown) {
             return Err(anyhow::Error::new(stopped_turn::ShutdownReportsNothing));
         }
@@ -385,7 +466,30 @@ impl JobProcessor {
             .unwrap_or_default();
         let mut files: Vec<CodexFileDescriptor> = Vec::new();
         let mut saved = false;
-        if commit_to_workspace && mode.saves() {
+        if let Some((turn_folder, started)) = isolated.as_ref()
+            && saves
+        {
+            let saving = self
+                .save_turn_folder(TurnFolderTurn {
+                    registration,
+                    job,
+                    project_id,
+                    turn_folder,
+                    space_folder: &space_folder,
+                    started,
+                    workspace_token: &workspace_token,
+                    progress_sender: progress_sender.clone(),
+                    cancel_signal: cancel_signal.as_ref(),
+                    held_pages: &held_pages,
+                    redactor: adapter.redactor(),
+                })
+                .await?;
+            files = saving.files;
+            saved = saving.saved;
+            artifacts.extend(saving.artifacts);
+            not_saved.extend(saving.not_saved);
+            status_steps.extend(saving.status_steps);
+        } else if saves {
             match collect_git_status_porcelain(&folder).await {
                 Some(after) => {
                     files = status_delta_files_for_checkpoint(&git_status_before, &after, &[]);
@@ -503,7 +607,7 @@ impl JobProcessor {
         // The open views of the sites the save changed reload, and their previews are pictured
         // again; the reply waits for neither. There are no page cards in v1 (3.8, step 5).
         preview_pictures::reload_and_picture_turn_sites(
-            &folder,
+            &space_folder,
             project_id,
             false,
             &files,
@@ -555,4 +659,457 @@ impl JobProcessor {
             final_messages: with_runtime_metadata_vec(status_steps, &runtime_id),
         })
     }
+}
+
+/// What a turn that works in a folder of its own needs for its save (docs/Local-Engine-Turns.md
+/// 11.23).
+struct TurnFolderTurn<'a> {
+    registration: &'a Registration,
+    job: &'a LeaseJob,
+    project_id: Uuid,
+    turn_folder: &'a turn_folder::TurnFolder,
+    /// The space's folder, which the save merges into.
+    space_folder: &'a Path,
+    /// How the turn folder began (`turn_folder::TurnFolder::begin`).
+    started: &'a turn_folder::Started,
+    workspace_token: &'a str,
+    progress_sender: Option<JobMessageSender>,
+    cancel_signal: Option<&'a JobCancelSignal>,
+    held_pages: &'a space_pages::HeldPages,
+    redactor: &'a Redactor,
+}
+
+/// What the save of a turn of its own folder gives its reply.
+#[derive(Default)]
+struct TurnFolderSaving {
+    /// The files it saved, as `apply/files` lists them.
+    files: Vec<CodexFileDescriptor>,
+    saved: bool,
+    artifacts: Vec<JsonValue>,
+    /// "Not saved: …" sentences.
+    not_saved: Vec<String>,
+    status_steps: Vec<JobMessage>,
+}
+
+/// The name of a turn's folder: its agent's id, so the agent's Claude Code sessions stay in one
+/// place, else its handle, else the job's id (11.23).
+fn turn_folder_name(job: &LeaseJob) -> String {
+    let agent = job.payload.pointer("/metadata/agent");
+    agent
+        .and_then(|agent| agent.get("id"))
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            agent
+                .and_then(|agent| agent.get("handle"))
+                .and_then(JsonValue::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| job.id.to_string())
+}
+
+/// The turn's agent's handle, which a merged file's conflict labels would name.
+fn turn_agent_handle(job: &LeaseJob) -> String {
+    job.payload
+        .pointer("/metadata/agent/handle")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("agent")
+        .to_string()
+}
+
+/// The note of a save that merged the turn's changes with the space's (11.23).
+fn merged_sentence(paths: &[String]) -> String {
+    format!(
+        "Claude Code's changes to {} were merged with changes made in the space while it worked.",
+        paths.join(", ")
+    )
+}
+
+/// The note of a turn's other changes (its ignored files, Claude Code's own files) that stayed out
+/// of the space's folder, since the space's folder changed them too while the turn worked.
+fn not_brought_back_sentence(paths: &[String]) -> Option<String> {
+    const NAMED: usize = 10;
+    if paths.is_empty() {
+        return None;
+    }
+    let mut named = paths
+        .iter()
+        .take(NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > NAMED {
+        named.push_str(&format!(" and {} more", paths.len() - NAMED));
+    }
+    Some(format!(
+        "Claude Code's changes to {named} stayed out of the space's folder, which changed them too while it worked."
+    ))
+}
+
+/// Where a turn's versions of files the space changed too were kept.
+pub(super) enum KeptAt {
+    /// A recovery ref of the space's repository, which History lists.
+    Ref(String),
+    /// Copies beside the files, in the space's folder, for a space whose origin keeps no history.
+    Copies(Vec<String>),
+    Nowhere,
+}
+
+impl JobProcessor {
+    /// The turn's versions of `paths`, which the space's folder changed too, kept from its folder
+    /// (11.23): on a `conflict` recovery ref of the space's repository, else, when the origin
+    /// keeps no history, as copies beside the files, unsaved
+    /// (`turn_folder::kept_copy_name`).
+    pub(super) async fn keep_turn_folder_versions(
+        &self,
+        folder: &Path,
+        paths: &[String],
+    ) -> KeptAt {
+        let Some(hold) = self.turn_folders() else {
+            return KeptAt::Nowhere;
+        };
+        match hold.keep(folder.to_path_buf(), paths.to_vec()).await {
+            Ok(Some(kept)) => return KeptAt::Ref(kept.reference),
+            Ok(None) => return KeptAt::Nowhere,
+            Err(error) => warn!(
+                %error,
+                "a turn folder's versions could not go onto a recovery ref; they go beside the files"
+            ),
+        }
+        let space_folder = self.config.project_workspace_dir(&self.config.project_id);
+        let mut copies = Vec::new();
+        let mut expected = std::collections::BTreeMap::new();
+        let mut names = Vec::new();
+        for path in paths {
+            let Ok(bytes) = std::fs::read(folder.join(path)) else {
+                continue;
+            };
+            let name = turn_folder::kept_copy_name(&space_folder, path);
+            expected.insert(name.clone(), None);
+            copies.push((name.clone(), Some(bytes)));
+            names.push(name);
+        }
+        match hold.put_unsaved(copies, expected).await {
+            Ok(put) if !put.put.is_empty() => KeptAt::Copies(put.put),
+            Ok(_) => KeptAt::Nowhere,
+            Err(error) => {
+                warn!(%error, "a turn folder's versions could not be kept beside the files");
+                KeptAt::Nowhere
+            }
+        }
+    }
+
+    /// The "Not saved: …" sentence of the turn's versions of `paths` and where they are kept.
+    fn kept_sentences(paths: &[String], kept_at: &KeptAt) -> Vec<String> {
+        match kept_at {
+            KeptAt::Copies(copies) => vec![format!(
+                "Not saved: {} (Claude Code's version is beside it, as {})",
+                paths.join(", "),
+                copies.join(", ")
+            )],
+            KeptAt::Ref(reference) => save_report::SaveReport {
+                recovery_ref: Some(reference.clone()),
+                conflicted_paths: paths.iter().map(|path| redact_tokens(path)).collect(),
+                ..save_report::SaveReport::default()
+            }
+            .not_saved_sentences(&[], None),
+            KeptAt::Nowhere => save_report::SaveReport {
+                conflicted_paths: paths.iter().map(|path| redact_tokens(path)).collect(),
+                ..save_report::SaveReport::default()
+            }
+            .not_saved_sentences(&[], None),
+        }
+    }
+
+    /// Puts what a turn of its own folder changed into the space's folder, unsaved, where a turn
+    /// that ran there would have left it (11.23): when it failed, was stopped, saves nothing, or
+    /// its save failed. The files a save sends go through the origin, each only while the space's
+    /// folder still holds what the turn found there, and the turn's versions of those the space
+    /// changed too are kept; the rest goes in as it is ([`turn_folder::bring_back`]). Once that is
+    /// done the folder is too; otherwise it stays for the runtime's next start. Returns the paths
+    /// put in.
+    async fn put_turn_folder_changes(
+        &self,
+        turn_folder: &turn_folder::TurnFolder,
+        started: &turn_folder::Started,
+        space_folder: &Path,
+        held_pages: &space_pages::HeldPages,
+        job: &LeaseJob,
+    ) -> Vec<String> {
+        let Some(hold) = self.turn_folders() else {
+            warn!(job_id = %job.id, "a turn folder's changes have no origin to go to");
+            return Vec::new();
+        };
+        let Some(mut changes) = turn_folder.changes(started).await else {
+            warn!(job_id = %job.id, "a turn folder's changes could not be read");
+            return Vec::new();
+        };
+        let held = leave_out_held(held_pages, &mut changes);
+        // Claude Code's own files, and files that hold a Claude key, go in with the rest, as
+        // they are (3.8).
+        let reasons = kept_off_all(
+            turn_folder.path(),
+            changes
+                .files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect(),
+        )
+        .await;
+        let mut reasons = reasons.into_iter();
+        let mut kept_off_paths = Vec::new();
+        changes.files.retain(|file| match reasons.next().flatten() {
+            Some(_) => {
+                kept_off_paths.push(file.workspace_path.clone());
+                false
+            }
+            None => true,
+        });
+        let (files, expected) =
+            turn_folder::unsaved_changes(turn_folder.path(), &changes.files, &changes.found);
+        let mut put_paths = Vec::new();
+        if !files.is_empty() {
+            match hold.put_unsaved(files, expected).await {
+                Ok(put) => {
+                    if !put.changed.is_empty() {
+                        self.keep_turn_folder_versions(turn_folder.path(), &put.changed)
+                            .await;
+                    }
+                    put_paths = put.put;
+                }
+                Err(error) => {
+                    warn!(job_id = %job.id, %error, "a turn folder's changes could not be put into the space's folder");
+                    return Vec::new();
+                }
+            }
+        }
+        let mut rest: Vec<_> = changes
+            .rest
+            .into_iter()
+            .filter(|change| !held.contains(&change.path))
+            .collect();
+        rest.extend(turn_folder::rest_of_files(
+            turn_folder.path(),
+            &kept_off_paths,
+            started,
+        ));
+        turn_folder::bring_back(turn_folder.path(), space_folder, &rest).await;
+        turn_folder.done();
+        put_paths
+    }
+
+    /// The save of a turn of its own folder (11.23): what it changed merges into the space's
+    /// folder (`workspace_commit::save_turn_folder`), the turn's versions of files the space
+    /// changed too are kept, and the rest of its changes (Claude Code's own files, ignored files)
+    /// goes into the space's folder as it is. A save that fails puts the changes into the space's
+    /// folder unsaved, with a note, as a failed save of a turn there leaves them (3.8).
+    async fn save_turn_folder(&self, turn: TurnFolderTurn<'_>) -> Result<TurnFolderSaving> {
+        let mut saving = TurnFolderSaving::default();
+        let Some(mut changes) = turn.turn_folder.changes(turn.started).await else {
+            saving.status_steps.push(status_step(
+                "Claude Code's changes weren't saved to the space: Instafy couldn't read what changed in this turn's folder. They stay in it until Instafy starts again on this computer.".to_string(),
+                "claude_code_changes_not_saved",
+                json!({ "reason": "status_unreadable" }),
+            ));
+            return Ok(saving);
+        };
+        let held = leave_out_held(turn.held_pages, &mut changes);
+        // Claude Code's own files, and files that hold a Claude key, never reach the save: they
+        // go into the space's folder with the rest, and stay on this computer (3.8).
+        let reasons = kept_off_all(
+            turn.turn_folder.path(),
+            changes
+                .files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect(),
+        )
+        .await;
+        let mut kept_off: Vec<(String, KeptOff)> = Vec::new();
+        let mut reasons = reasons.into_iter();
+        let mut files = std::mem::take(&mut changes.files);
+        files.retain(|file| match reasons.next().flatten() {
+            Some(reason) => {
+                kept_off.push((file.workspace_path.clone(), reason));
+                false
+            }
+            None => true,
+        });
+        if let Some(sentence) = kept_off_sentence(&kept_off) {
+            saving.status_steps.push(status_step(
+                turn.redactor.text(&sentence),
+                "claude_code_not_saved",
+                json!({
+                    "paths": kept_off
+                        .iter()
+                        .map(|(path, _)| redact_tokens(path))
+                        .collect::<Vec<_>>(),
+                }),
+            ));
+        }
+        let kept_off_paths: Vec<String> = kept_off.iter().map(|(path, _)| path.clone()).collect();
+        if !files.is_empty()
+            && let Some(sender) = turn.progress_sender.as_ref()
+        {
+            let _ = sender.send(JobMessage {
+                content: "Syncing workspace changes…".to_string(),
+                message_type: Some("status".to_string()),
+                metadata: Some(json!({
+                    "kind": "workspace_commit",
+                    "status": "started",
+                    "activity": activity_labels::runtime_status_activity("workspace_commit"),
+                })),
+            });
+        }
+        let agent = turn_agent_handle(turn.job);
+        let saved = workspace_commit::save_turn_folder(
+            &self.config.controller_base_url,
+            turn.workspace_token,
+            turn.project_id,
+            turn.registration.runtime_id,
+            turn.job.id,
+            turn.job.run_id,
+            workspace_commit::TurnFolderSave {
+                turn_folder: turn.turn_folder,
+                space_folder: turn.space_folder,
+                found: &changes.found,
+                agent: &agent,
+            },
+            &files,
+            turn.progress_sender.clone(),
+            self.local_origin_sync(),
+            &workspace_commit::version_title(turn.job),
+        )
+        .await;
+        match saved {
+            Ok(outcome) => {
+                if let Some(result) = outcome.result.as_ref() {
+                    saving.artifacts.push(origin_apply_artifact(result, None));
+                    saving.saved = true;
+                    saving.not_saved.extend(result.not_saved_sentences());
+                    if let Some(sender) = turn.progress_sender.as_ref() {
+                        let _ = sender.send(workspace_commit_progress_message(result));
+                    }
+                }
+                if !outcome.kept.is_empty() {
+                    let kept_at = self
+                        .keep_turn_folder_versions(turn.turn_folder.path(), &outcome.kept)
+                        .await;
+                    saving
+                        .not_saved
+                        .extend(Self::kept_sentences(&outcome.kept, &kept_at));
+                }
+                if !outcome.merged.is_empty() {
+                    saving.status_steps.push(status_step(
+                        turn.redactor.text(&merged_sentence(&outcome.merged)),
+                        "claude_code_merged",
+                        json!({
+                            "paths": outcome
+                                .merged
+                                .iter()
+                                .map(|path| redact_tokens(path))
+                                .collect::<Vec<_>>(),
+                        }),
+                    ));
+                }
+                // The rest of the turn's changes, the kept-off files among them, goes into the
+                // space's folder as it is; the files the save sent are there already.
+                let sent: HashSet<&str> = files
+                    .iter()
+                    .map(|file| file.workspace_path.as_str())
+                    .collect();
+                let mut rest: Vec<turn_folder::RestChange> = changes
+                    .rest
+                    .into_iter()
+                    .filter(|change| !held.contains(&change.path))
+                    .collect();
+                rest.extend(turn_folder::rest_of_files(
+                    turn.turn_folder.path(),
+                    &kept_off_paths,
+                    turn.started,
+                ));
+                rest.retain(|change| !sent.contains(change.path.as_str()));
+                let brought =
+                    turn_folder::bring_back(turn.turn_folder.path(), turn.space_folder, &rest)
+                        .await;
+                if let Some(sentence) = not_brought_back_sentence(&brought.changed_meanwhile) {
+                    saving.status_steps.push(status_step(
+                        turn.redactor.text(&sentence),
+                        "claude_code_not_brought_back",
+                        json!({ "count": brought.changed_meanwhile.len() }),
+                    ));
+                }
+                turn.turn_folder.done();
+                files.retain(|file| outcome.saved.contains(&file.workspace_path));
+                saving.files = files;
+            }
+            Err(error) => {
+                // A Stop that came before the save was let in: the turn ends as a stopped one,
+                // with its change kept in the space's folder.
+                if stopped_turn::a_stop_refused_the_save(turn.cancel_signal).await {
+                    self.put_turn_folder_changes(
+                        turn.turn_folder,
+                        turn.started,
+                        turn.space_folder,
+                        turn.held_pages,
+                        turn.job,
+                    )
+                    .await;
+                    return Err(error.context("job lease lost before its changes were saved"));
+                }
+                // The run went well, so its reply is delivered: the turn is not failed. Its
+                // changes go into the space's folder unsaved, a note says so, and Details has
+                // the error (D-C/D-V).
+                let error = turn.redactor.text(&format!("{error:#}"));
+                warn!(
+                    job_id = %turn.job.id,
+                    %error,
+                    "a turn folder's changes couldn't be saved to the space; they go into its folder unsaved"
+                );
+                self.put_turn_folder_changes(
+                    turn.turn_folder,
+                    turn.started,
+                    turn.space_folder,
+                    turn.held_pages,
+                    turn.job,
+                )
+                .await;
+                saving.artifacts.push(json!({
+                    "kind": "origin/apply-error",
+                    "metadata": { "error": error },
+                }));
+                saving.status_steps.push(status_step(
+                    CHANGES_NOT_SAVED.to_string(),
+                    "claude_code_changes_not_saved",
+                    json!({
+                        "reason": "save_failed",
+                        "paths": files
+                            .iter()
+                            .map(|file| redact_tokens(&file.workspace_path))
+                            .collect::<Vec<_>>(),
+                    }),
+                ));
+            }
+        }
+        Ok(saving)
+    }
+}
+
+/// `changes` without the files under another chat's page, which the turn put back in its folder
+/// (3.8, step 2): the paths it left out, which go back nowhere.
+fn leave_out_held(
+    held_pages: &space_pages::HeldPages,
+    changes: &mut turn_folder::TurnChanges,
+) -> HashSet<String> {
+    let before: HashSet<String> = changes
+        .files
+        .iter()
+        .map(|file| file.workspace_path.clone())
+        .collect();
+    held_pages.leave_out_held(&mut changes.files);
+    let after: HashSet<String> = changes
+        .files
+        .iter()
+        .map(|file| file.workspace_path.clone())
+        .collect();
+    before.difference(&after).cloned().collect()
 }

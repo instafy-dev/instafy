@@ -164,6 +164,9 @@ pub struct OriginService {
     presence_metadata: Option<Arc<RwLock<Value>>>,
     local_sync: Option<LocalOriginSync>,
     unsaved_put_back: Option<UnsavedPutBack>,
+    /// Brings a Claude Code turn's folder of its own into this origin's folder
+    /// (docs/Local-Engine-Turns.md 11.23).
+    turn_folders: Option<origin_http_server::server::TurnFolders>,
 }
 
 impl OriginService {
@@ -335,6 +338,8 @@ impl OriginService {
             })
         });
 
+        let turn_folders = server.turn_folders();
+
         let endpoint = settings
             .tunnel_url
             .clone()
@@ -418,7 +423,14 @@ impl OriginService {
                 working_state,
             }),
             unsaved_put_back,
+            turn_folders,
         }))
+    }
+
+    /// The locally hosted origin's [`origin_http_server::server::TurnFolders`], or None once the
+    /// server has been shut down.
+    pub fn turn_folders(&self) -> Option<origin_http_server::server::TurnFolders> {
+        self.turn_folders.clone()
     }
 
     /// The locally hosted origin's put-back of a stopped turn's unsaved
@@ -462,6 +474,7 @@ impl OriginService {
         self.presence_metadata = None;
         self.local_sync = None;
         self.unsaved_put_back = None;
+        self.turn_folders = None;
     }
 
     pub fn presence_metadata_handle(&self) -> Option<Arc<RwLock<Value>>> {

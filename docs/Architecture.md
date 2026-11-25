@@ -364,8 +364,10 @@ any user id goes into it.
   `engine = 'claude-code'`.
 - The job holds no credential, device grant, plan role or runtime pin. It waits, queued, with no
   start window, until a private runtime its person owns in the space, with the attested
-  `claudeCode` capability ready, leases it; one such turn runs at a time for each person. It is
-  leased once, and gets no proxy token, model-facing controller token, project secret or history.
+  `claudeCode` capability ready, leases it. A computer runs as many such turns at once as its
+  capability attests, and no other work beside them. A computer that runs several gives each a
+  copy-on-write clone of the space's folder whose save merges into the folder
+  ([Local-Engine-Turns.md](Local-Engine-Turns.md) 11.23). It is leased once, and gets no proxy token, model-facing controller token, project secret or history.
   Only the runtime that leased it can complete it or post its steps, as only the runtime that
   leased any job can, while the job is leased
   ([Self-hosted runtime security](Self-Hosted-Runtime-Security.md)). It costs no credits. Nobody

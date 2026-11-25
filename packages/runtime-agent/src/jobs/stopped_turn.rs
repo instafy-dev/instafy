@@ -103,6 +103,11 @@ struct RecordedStart {
     status: HashMap<String, GitStatusEntry>,
     /// A local-engine turn's: its report goes through the lane filter.
     local_engine: bool,
+    /// A turn that worked in a folder of its own (docs/Local-Engine-Turns.md
+    /// 11.23): the space's folder, which the report names and into which the
+    /// turn put its changes, and the turn folder, which `workspace_dir` is and
+    /// which stays until this record goes.
+    turn_folder: Option<(PathBuf, super::turn_folder::TurnFolder)>,
 }
 
 /// The error of a local-engine turn that the runtime's shutdown ended: it
@@ -133,6 +138,24 @@ impl TurnStart {
         self.record_turn(workspace_dir, status, true);
     }
 
+    /// [`Self::record_local_engine_turn`] for a turn that works in `turn_folder`, a folder of
+    /// its own (11.23). A stop's report reads what the turn changed there and names
+    /// `space_folder`, into which the turn put those changes before it stopped. The turn folder
+    /// is removed once the report is read, or once this record goes.
+    pub(super) fn record_local_engine_turn_in(
+        &self,
+        turn_folder: super::turn_folder::TurnFolder,
+        status: &HashMap<String, GitStatusEntry>,
+        space_folder: &Path,
+    ) {
+        *self.0.lock() = Some(RecordedStart {
+            workspace_dir: turn_folder.path().to_path_buf(),
+            status: status.clone(),
+            local_engine: true,
+            turn_folder: Some((space_folder.to_path_buf(), turn_folder)),
+        });
+    }
+
     fn record_turn(
         &self,
         workspace_dir: &Path,
@@ -143,6 +166,7 @@ impl TurnStart {
             workspace_dir: workspace_dir.to_path_buf(),
             status: status.clone(),
             local_engine,
+            turn_folder: None,
         });
     }
 
@@ -166,6 +190,7 @@ impl TurnStart {
             workspace_dir,
             status: before,
             local_engine,
+            turn_folder,
         } = start;
         let Some(after) = super::collect_git_status_porcelain(&workspace_dir).await else {
             return Err(error);
@@ -184,6 +209,11 @@ impl TurnStart {
             return Err(error);
         }
         let undo = FolderUndo::read(&workspace_dir, &files, &before).await;
+        // A turn folder's changes are in the space's folder now, which the report names.
+        let workspace_dir = match turn_folder {
+            Some((space_folder, _turn_folder)) => space_folder,
+            None => workspace_dir,
+        };
         Err(error.context(StoppedTurnChanges {
             workspace_dir,
             files,

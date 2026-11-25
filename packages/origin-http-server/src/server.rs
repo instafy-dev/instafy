@@ -216,6 +216,39 @@ impl UnsavedPutBack {
     }
 }
 
+/// Lets the process hosting a single-tenant origin bring a Claude Code
+/// turn's folder of its own into its working folder
+/// (docs/Local-Engine-Turns.md 11.23): keep the turn's copies of files the
+/// working folder changed meanwhile on a recovery ref, and put a stopped
+/// turn's changes into the working folder unsaved (see
+/// [`routes::keep_turn_folder_copies`], [`routes::put_turn_changes_unsaved`]).
+#[derive(Clone)]
+pub struct TurnFolders {
+    state: AppState,
+}
+
+impl TurnFolders {
+    /// The copies of `paths` in `turn_folder`, an absolute path, kept on a
+    /// `conflict` recovery ref; `None` when there was nothing to keep.
+    pub async fn keep(
+        &self,
+        turn_folder: std::path::PathBuf,
+        paths: Vec<String>,
+    ) -> Result<Option<crate::recovery::RecoveryRefReport>, crate::error::OriginError> {
+        routes::keep_turn_folder_copies(&self.state, turn_folder, paths).await
+    }
+
+    /// `files` (bytes, or `None` to remove) put into the working folder
+    /// unsaved, each only while it still holds `expected` there.
+    pub async fn put_unsaved(
+        &self,
+        files: Vec<(String, Option<Vec<u8>>)>,
+        expected: std::collections::BTreeMap<String, Option<String>>,
+    ) -> Result<routes::TurnChangesPut, crate::error::OriginError> {
+        routes::put_turn_changes_unsaved(&self.state, files, expected).await
+    }
+}
+
 impl OriginHttpServer {
     /// An origin for `config`. A multi-tenant gateway gets the default
     /// gateway settings; use [`Self::new_hosted`] to choose them.
@@ -286,6 +319,16 @@ impl OriginHttpServer {
             return None;
         }
         self.state.clone().map(|state| UnsavedPutBack { state })
+    }
+
+    /// The in-process [`TurnFolders`] of a single-tenant origin, once it has
+    /// started. `None` for the multi-tenant gateway, which hosts no working
+    /// folder.
+    pub fn turn_folders(&self) -> Option<TurnFolders> {
+        if self.config.multi_tenant {
+            return None;
+        }
+        self.state.clone().map(|state| TurnFolders { state })
     }
 
     /// The in-process [`WorkingStateReader`] of a hosted checkout with a

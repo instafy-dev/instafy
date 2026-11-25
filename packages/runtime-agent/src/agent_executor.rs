@@ -208,6 +208,17 @@ impl AgentExecutor {
         self.processor.set_unsaved_put_back(value);
     }
 
+    /// Publish (or clear, with None) the locally hosted origin's hold on a Claude Code turn's
+    /// folder of its own (`jobs::turn_folder`): with it, this runtime runs Claude Code turns at
+    /// once, each in a folder of its own (docs/Local-Engine-Turns.md 11.23), and says so in its
+    /// capability.
+    pub fn set_turn_folders(&self, value: Option<origin_http_server::server::TurnFolders>) {
+        self.processor.set_turn_folders(value);
+        if let Some(lane) = crate::claude_code::lane() {
+            lane.set_turns_at_once(self.processor.turns_at_once());
+        }
+    }
+
     /// A turn that changed an open preview's site sends the preview's new
     /// picture with `client`, this runtime's own, after its reply.
     pub fn send_card_pictures_with(&self, client: Arc<ControllerClient>) {
