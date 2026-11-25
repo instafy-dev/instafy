@@ -410,16 +410,16 @@ fn strip_leading_agent_mentions(input: &str) -> String {
     rest.trim().to_string()
 }
 
-fn build_prompt_segments_by_handle(
-    prompt: &str,
-    explicit_handles: &[String],
-) -> HashMap<String, String> {
+/// The first mention of each of `explicit_handles` in `prompt`, in order, with
+/// where it starts and ends; none unless the message starts with a mention, as
+/// only such a message is split into each agent's part.
+fn agent_mentions_in(prompt: &str, explicit_handles: &[String]) -> Vec<(String, usize, usize)> {
     let allowed_handles = explicit_handles
         .iter()
         .filter_map(|handle| normalize_agent_handle(handle))
         .collect::<HashSet<_>>();
     if allowed_handles.is_empty() {
-        return HashMap::new();
+        return Vec::new();
     }
 
     let leading_text_start = prompt
@@ -429,12 +429,12 @@ fn build_prompt_segments_by_handle(
         .unwrap_or(prompt.len());
     let mut first_any_mention_start: Option<usize> = None;
     let mut seen = HashSet::<String>::new();
-    let mut mentions: Vec<(String, usize)> = Vec::new();
+    let mut mentions: Vec<(String, usize, usize)> = Vec::new();
     for (index, ch) in prompt.char_indices() {
         if ch != '@' {
             continue;
         }
-        let Some((handle, _end)) = parse_agent_mention_at(prompt, index) else {
+        let Some((handle, end)) = parse_agent_mention_at(prompt, index) else {
             continue;
         };
         first_any_mention_start.get_or_insert(index);
@@ -442,7 +442,7 @@ fn build_prompt_segments_by_handle(
             continue;
         }
         if seen.insert(handle.clone()) {
-            mentions.push((handle, index));
+            mentions.push((handle, index, end));
         }
     }
 
@@ -450,17 +450,34 @@ fn build_prompt_segments_by_handle(
         .map(|start| start != leading_text_start)
         .unwrap_or(false)
     {
-        return HashMap::new();
+        return Vec::new();
     }
+    mentions
+}
 
+fn build_prompt_segments_by_handle(
+    prompt: &str,
+    explicit_handles: &[String],
+) -> HashMap<String, String> {
+    let mentions = agent_mentions_in(prompt, explicit_handles);
     let mut segments = HashMap::new();
     for index in 0..mentions.len() {
-        let (handle, start) = &mentions[index];
+        let (handle, start, _end) = &mentions[index];
         let next_start = mentions
             .get(index + 1)
-            .map(|(_handle, next_start)| *next_start)
+            .map(|(_handle, next_start, _end)| *next_start)
             .unwrap_or(prompt.len());
         let raw_segment = prompt[*start..next_start].trim();
+        // A "then" that ends the part is the next agent's (11.23, D58), and
+        // the comma or semicolon before the next agent's mention is neither's:
+        // an agent handed "do x," asks what else was meant.
+        let raw_segment = if index + 1 < mentions.len() {
+            crate::message_turns::without_follow_on_ending(raw_segment)
+                .trim_end_matches([',', ';'])
+                .trim_end()
+        } else {
+            raw_segment
+        };
         if raw_segment.is_empty() {
             continue;
         }
@@ -477,6 +494,35 @@ fn build_prompt_segments_by_handle(
     }
 
     segments
+}
+
+/// Whether `handle`'s turn is one the person asked for after the earlier
+/// agents' ([`follow_on_handles`]).
+fn follows_on_earlier(follow_on: &HashSet<String>, handle: &str) -> bool {
+    normalize_agent_handle(handle).is_some_and(|handle| follow_on.contains(&handle))
+}
+
+/// The agents of a message split into parts whose turns the person asked for
+/// after the earlier agents' ("@alpha write a poem, then @beta translate it",
+/// `message_turns::follows_on`, 11.23, D58), by handle.
+fn follow_on_handles(prompt: &str, explicit_handles: &[String]) -> HashSet<String> {
+    let mentions = agent_mentions_in(prompt, explicit_handles);
+    let mut follow_on = HashSet::new();
+    for index in 1..mentions.len() {
+        let (_, earlier_start, _) = &mentions[index - 1];
+        let (handle, start, end) = &mentions[index];
+        let next_start = mentions
+            .get(index + 1)
+            .map(|(_handle, next_start, _end)| *next_start)
+            .unwrap_or(prompt.len());
+        if crate::message_turns::follows_on(
+            &prompt[*earlier_start..*start],
+            &prompt[*end..next_start],
+        ) {
+            follow_on.insert(handle.clone());
+        }
+    }
+    follow_on
 }
 
 fn extract_agent_selection_prompt_segments(
@@ -2133,11 +2179,15 @@ pub(crate) async fn process_dispatch_prompt_timed(
     }
     let mut prompt_segments =
         extract_agent_selection_prompt_segments(&request.metadata, &agent_handles);
+    // The agents whose turns the person asked for after the earlier agents'
+    // ("…, then @beta …"), which wait for them whatever their AI (11.23).
+    let mut follow_on = HashSet::new();
     if has_explicit_agent_mentions(&request.metadata) {
         prompt_segments.extend(build_prompt_segments_by_handle(
             &request.prompt_text,
             &agent_handles,
         ));
+        follow_on = follow_on_handles(&request.prompt_text, &agent_handles);
     }
     // A person's own message that names its agents, which no team plan,
     // evaluation or agent's job made: when it names several and may change
@@ -2422,8 +2472,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
         apply_agent_prompt_segment(&mut run_request, &prompt_segments, target, &message_handles);
         inject_agent_target_metadata(&mut run_request.metadata, target);
         if takes_turns {
-            let waited_for =
-                crate::message_turns::waited_for(&earlier_turn_runs, target.claude_code);
+            let waited_for = crate::message_turns::waited_for(
+                &earlier_turn_runs,
+                target.claude_code && !follows_on_earlier(&follow_on, &target.handle),
+            );
             if !waited_for.is_empty() {
                 crate::message_turns::stamp_run(
                     ensure_object(&mut run_request.metadata),
@@ -3343,8 +3395,10 @@ pub(crate) async fn process_dispatch_prompt_timed(
             // agent's until those of the agents on other AIs have
             // (crate::message_turns).
             if takes_turns {
-                let waited_for =
-                    crate::message_turns::waited_for(&earlier_turn_jobs, target.claude_code);
+                let waited_for = crate::message_turns::waited_for(
+                    &earlier_turn_jobs,
+                    target.claude_code && !follows_on_earlier(&follow_on, &target.handle),
+                );
                 if !waited_for.is_empty() {
                     crate::message_turns::wait_for(
                         &transaction,

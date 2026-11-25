@@ -1840,6 +1840,7 @@ Phase 8 (section 9) still turns it on, with its gates as they stand. Its live su
 - **D55. A turn folder.** On such a computer each Claude Code turn works in a copy-on-write clone of the space's folder. Its save merges into the space's folder: a path the folder still holds as the turn found it takes the turn's version, and a text file both changed merges three ways. Anything else keeps the folder's version, with the turn's on a recovery ref. Whatever else the turn changed goes in as it is, wherever the folder still holds what the turn found, even after a crash (11.23).
 - **D56. Concurrency, version 4.** Instafy sets no limit per login: a login runs as many turns at once as the computers running them allow. Consent version 4 says so. Replaces D46 (11.23).
 - **D57. A message's Claude Code turns at once.** A Claude Code agent's turn waits only for the earlier turns of the message's agents on other AIs, and every other turn still waits for every earlier one (11.23).
+- **D58. "Then" keeps them in turns.** A message that asks for an agent's turn after the earlier agents', as "@alpha write a poem, then @beta translate it" does, keeps that agent's turn waiting for theirs, whatever its AI (11.23).
 
 ### 11.19 Several Claude Code logins
 
@@ -1992,7 +1993,7 @@ The first runs used its first cut, whose `after_job_id` named only the job befor
 
 ### 11.23 Turns at once
 
-The owner's definition of done for 11.22 (2026-11-24) goes on: the Claude Code agents a message names run at the same time, several on one computer and on one login, since the person reuses the Claude account already signed in on their computer for many agents, and each turn works in a folder of its own whose changes reach the space's folder without overwriting anyone's. This section is D54-D57.
+The owner's definition of done for 11.22 (2026-11-24) goes on: the Claude Code agents a message names run at the same time, several on one computer and on one login, since the person reuses the Claude account already signed in on their computer for many agents, and each turn works in a folder of its own whose changes reach the space's folder without overwriting anyone's. This section is D54-D58.
 
 **What kept them apart.** D47 held a computer to one Claude Code turn: the lease's clause refused a runtime that held a leased lane job, and runtime-agent waited for each leased batch before it leased again, refused a lane job that came with other work, and gave every job the process-environment lock. D46 held a login to one running turn, by the lease's clause and a unique index. D53 ran a message's turns one after another. Consent version 3 said "one at a time on each login". And all of a computer's turns shared the space's folder, where a turn's save is its git-status delta: two turns there would save each other's half-done edits (11.19).
 
@@ -2035,6 +2036,12 @@ The owner's definition of done for 11.22 (2026-11-24) goes on: the Claude Code a
 
 **A message's Claude Code turns at once (D57, D53 version 2).** Dispatch records on a Claude Code agent's job only the earlier turns of the message whose agents are not on Claude Code, and stamps its run with those. So a message's Claude Code agents run at once, as far as their computers allow, while every other agent's turn still waits for every turn named before it, and a Claude Code agent's turn still waits for an earlier agent on another AI. On a computer that attests 1, they run one after another, each waiting for the computer.
 
+**"Then" keeps them in turns (D58).** A person writes "@alpha write a poem into poem.txt, then @beta translate it into French" expecting @beta to start from @alpha's poem. At once, @beta's turn would start from the folder before @alpha wrote it. In the first such run, it found no `poem.txt` and stopped, while @alpha, handed "… poem.txt, then", asked what it should do next.
+- So an agent's turn waits for the turns of the agents named before it, whatever its AI, when the part before its mention ends with "then", "and then", "after that", "afterwards", "once that's done", "when it's done" and the like, or its own part opens with "then", "next" or "afterwards".
+- Its run is stamped with the turns it waits for, so Studio reads "Waiting for @alpha to finish…", and it starts from what they left.
+- The words that asked for the wait leave the earlier agent's part, comma and all: @alpha gets "write a poem into poem.txt".
+- Only whole words count, so "lengthen" or "add a next button" never does.
+
 **What still holds.**
 - A Claude Code turn runs once (11.7).
 - The owner rule (11.5), L1-L3 (11.6), the credential guard (6) and the environment allowlist (3.4).
@@ -2064,6 +2071,16 @@ The owner's definition of done for 11.22 (2026-11-24) goes on: the Claude Code a
   - The turns ran at once, from 09:40:10.1 to 41.5 and from 10.5 to 22.1.
   - `beta2.txt` was saved. `.env`, which no save sends, went into the space's folder as the turn left it.
 - After each run, both turn folders were gone, with their records.
+
+**More runs** (2026-11-25, as people use it, on the same stack):
+- **One agent alone, then a follow-up** in the same chat. The turn worked in its folder and saved `hello.txt`. The follow-up, "which file did you create just now?", resumed the session there and answered rightly.
+- **Three agents at once,** two of them on one login. All three were leased within 0.26 s, and all three files were saved.
+- **"…, then @beta translate it"**, before D58. @beta's turn started beside @alpha's, found no `poem.txt` and stopped, and @alpha, handed "…, then", asked what it should do next. With D58, @beta's turn waited for @alpha's and translated the poem. @alpha's part also ended with the comma before @beta's mention, and @alpha asked whether more was meant, so the comma now leaves the part too.
+- **One line changed by two agents at once.** The first save kept its version. The second's went beside the file, as `shared (Claude Code's version).md`, since that space's origin keeps no history, and its note said so.
+- **The person's edit while an agent worked** on the same file. Both edits stayed, merged, with the merge note.
+- **A Stop mid-turn.** The turn's file went into the space's folder unsaved, and the stopped turn's report named it.
+- **A second message to a busy agent.** It was queued, and ran 0.2 s after the first turn ended.
+- **The runtime killed mid-turn,** as a crash or a forced quit kills it. The next start brought the turn's 300-line file and the file it made after it into the space's folder, unsaved, and removed the turn folder.
 
 **This change.**
 - The migration that drops `agent_jobs_one_running_claude_code_login_turn_idx`.

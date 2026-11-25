@@ -54,6 +54,103 @@ macro_rules! waits_for_an_earlier_turn {
 }
 pub(crate) use waits_for_an_earlier_turn;
 
+/// The words that, ending an agent's part of a message or opening the next
+/// agent's, ask for the next agent's turn after the earlier ones: "@alpha
+/// write a poem, then @beta translate it" (11.23, D58). Lowercase, each a
+/// whole word or words.
+const FOLLOW_ON_WORDS: [&str; 20] = [
+    "then",
+    "and then",
+    "afterwards",
+    "and afterwards",
+    "afterward",
+    "after that",
+    "and after that",
+    "after this",
+    "once done",
+    "once that's done",
+    "once that is done",
+    "once it's done",
+    "once it is done",
+    "once finished",
+    "when done",
+    "when that's done",
+    "when that is done",
+    "when it's done",
+    "when it is done",
+    "when finished",
+];
+
+/// Whether `text` ends with one of [`FOLLOW_ON_WORDS`] as whole words,
+/// ignoring case and the commas, colons and spaces after it; the length of
+/// `text` before them when it does.
+fn follow_on_ending(text: &str) -> Option<usize> {
+    let trimmed = text.trim_end_matches(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | ':' | ';')
+    });
+    let lower = trimmed.to_lowercase();
+    // Lowercasing an ASCII word keeps its length, so a match's start in
+    // `lower` is its start in `trimmed`.
+    FOLLOW_ON_WORDS
+        .iter()
+        .filter(|words| lower.ends_with(**words) && trimmed.len() >= words.len())
+        .map(|words| (trimmed.len() - words.len(), *words))
+        .filter(|(start, words)| {
+            trimmed.is_char_boundary(*start) && trimmed[*start..].eq_ignore_ascii_case(words)
+        })
+        .map(|(start, _)| start)
+        .filter(|start| {
+            trimmed[..*start]
+                .chars()
+                .next_back()
+                .is_none_or(|before| !before.is_alphanumeric() && before != '\'')
+        })
+        .min()
+}
+
+/// Whether the person's words ask for an agent's turn after the turns of the
+/// agents named before it (11.23, D58): the part before its mention ends
+/// with "then", "after that", "once that's done" and the like, or its own
+/// part opens with "then", "next" or "afterwards", as in "@alpha write a
+/// poem, then @beta translate it" or "@beta then translate it". Such a turn
+/// waits for the earlier ones whatever its AI, so it starts from what they
+/// left.
+pub(crate) fn follows_on(words_before: &str, own_words: &str) -> bool {
+    if follow_on_ending(words_before).is_some() {
+        return true;
+    }
+    let opening = own_words.trim_start().to_lowercase();
+    [
+        "then",
+        "next",
+        "afterwards",
+        "afterward",
+        "after that",
+        "after this",
+    ]
+    .iter()
+    .any(|words| {
+        opening.starts_with(words)
+            && opening[words.len()..]
+                .chars()
+                .next()
+                .is_none_or(|after| !after.is_alphanumeric())
+    })
+}
+
+/// `part`, an agent's part of a message, without the "then" or "after that"
+/// that ends it and asks for the next agent's turn after it ([`follows_on`]),
+/// and the comma before it: those words are the next agent's, and an agent
+/// handed "write a poem, then" asks what it should do next.
+pub(crate) fn without_follow_on_ending(part: &str) -> &str {
+    match follow_on_ending(part) {
+        Some(end) => part[..end].trim_end_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | ';' | '-')
+        }),
+        None => part,
+    }
+}
+
 /// Of a message's earlier turns, each with whether it is a Claude Code
 /// turn, the ones a turn waits for (11.22, 11.23): every one, unless the turn
 /// is a Claude Code turn, which waits only for the turns of agents on other
@@ -121,6 +218,69 @@ pub(crate) fn strip_client_marks(metadata: &mut JsonValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn then_asks_for_a_turn_after_the_earlier_ones() {
+        for (before, own) in [
+            (
+                "@alpha write a poem into poem.txt, then",
+                "translate poem.txt",
+            ),
+            ("@alpha write a poem. Then", "translate it"),
+            ("@alpha write a poem and then", "translate it"),
+            ("@alpha write a poem; after that,", "translate it"),
+            ("@alpha write a poem, once that's done", "translate it"),
+            ("@alpha write a poem. When it is done:", "translate it"),
+            ("@alpha write a poem,", "then translate it"),
+            ("@alpha write a poem,", "Next, translate it"),
+            ("@alpha write a poem,", "afterwards translate it"),
+        ] {
+            assert!(follows_on(before, own), "{before:?} {own:?}");
+        }
+        for (before, own) in [
+            ("@alpha write a poem,", "translate the README"),
+            (
+                "@alpha refactor it and then run the tests,",
+                "update the docs",
+            ),
+            ("@alpha fix the strength of the bridge,", "write the docs"),
+            ("@alpha lengthen the intro,", "write the docs"),
+            ("@alpha lengthen", "write the docs"),
+            ("@alpha add a next button,", "add a back button"),
+            ("@alpha write a poem,", "thenceforth do nothing"),
+            ("@alpha read what's next,", "summarize it"),
+        ] {
+            assert!(!follows_on(before, own), "{before:?} {own:?}");
+        }
+    }
+
+    #[test]
+    fn an_agents_part_loses_the_then_that_was_the_next_agents() {
+        assert_eq!(
+            without_follow_on_ending("@alpha write a poem into poem.txt, then"),
+            "@alpha write a poem into poem.txt"
+        );
+        assert_eq!(
+            without_follow_on_ending("@alpha write a poem. Then"),
+            "@alpha write a poem."
+        );
+        assert_eq!(
+            without_follow_on_ending("@alpha write a poem and after that,"),
+            "@alpha write a poem"
+        );
+        assert_eq!(
+            without_follow_on_ending("@alpha write a poem, once that's done"),
+            "@alpha write a poem"
+        );
+        assert_eq!(
+            without_follow_on_ending("@alpha fix the strength"),
+            "@alpha fix the strength"
+        );
+        assert_eq!(
+            without_follow_on_ending("@alpha write a poem,"),
+            "@alpha write a poem,"
+        );
+    }
 
     #[test]
     fn a_claude_code_turn_waits_only_for_the_earlier_agents_on_other_ais() {

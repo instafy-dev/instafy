@@ -2271,11 +2271,13 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
                 for (job, part) in [(first, &parts[0]), (second, &parts[1])] {
                     // A Claude Code agent's words start after the mention
                     // they open with, which Claude Code would read as another
-                    // agent to hand the work to; another AI's keep it.
+                    // agent to hand the work to; another AI's keep it. The
+                    // comma before the next agent's mention is neither's.
+                    let part = part.trim_end_matches(',');
                     let words = if job.engine.is_some() {
                         part.trim_start_matches(&format!("@{CLAUDE} ")).to_string()
                     } else {
-                        part.clone()
+                        part.to_string()
                     };
                     assert_eq!(
                         job.payload["prompt_text"].as_str().map(str::trim),
@@ -2422,6 +2424,95 @@ async fn a_messages_claude_code_agents_run_at_once() -> anyhow::Result<()> {
             let mut wanted = vec![json!(claude_job), json!(worker_job)];
             wanted.sort_by_key(|id| id.to_string());
             assert_eq!(leased, wanted);
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// A message that asks for one Claude Code agent's turn after another's
+/// keeps them in turns (docs/Local-Engine-Turns.md 11.23, D58): in "@claude
+/// write poem.txt, then @worker translate it", @worker's job waits for
+/// @claude's and its run says so, @claude's words lose the "then", which was
+/// @worker's, and no computer takes @worker's turn until @claude's has ended.
+#[tokio::test]
+async fn a_message_that_says_then_keeps_its_claude_code_agents_in_turns() -> anyhow::Result<()> {
+    with_lane(
+        "lane-then",
+        |_, _| {},
+        |lane| async move {
+            let space = lane.space();
+            let first_login = first_login_of(space.owner);
+            let second_login = Uuid::new_v4();
+            sql(
+                lane.pool(),
+                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
+                &[&second_login, &space.owner],
+            )
+            .await?;
+            let worker = lane.claude_code_agent(space.owner, "worker").await?;
+            sql(
+                lane.pool(),
+                "update user_agents set claude_code_login_id = $2 where id = $1",
+                &[&worker, &second_login],
+            )
+            .await?;
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(Some(space.owner), lane_ready_on(&[second_login])),
+            )
+            .await?;
+            let (status, response) = lane
+                .send(
+                    &lane.owner(),
+                    lane.chat().await?,
+                    &json!({
+                        "promptText": "@claude write a poem into poem.txt, then @worker translate poem.txt into French",
+                        "intent": "feature",
+                        "metadata": metadata_for(&[CLAUDE, "worker"], json!({})),
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+            let (lane_jobs, others) = lane.jobs_of(&response).await?;
+            assert!(others.is_empty() && lane_jobs.len() == 2, "{response}");
+            let job_on = |login: Uuid| {
+                lane_jobs
+                    .iter()
+                    .find(|job| job.claude_code_login_ids == Some(vec![login]))
+                    .expect("a job on the login")
+            };
+            let claude = job_on(first_login);
+            let worker_job = job_on(second_login);
+            assert_eq!(
+                claude.payload["prompt_text"].as_str().map(str::trim),
+                Some("write a poem into poem.txt"),
+                "{}",
+                claude.payload
+            );
+            let (claude_job, claude_waits_for) = lane.turn_of(claude.run_id.expect("run")).await?;
+            let (worker_id, worker_waits_for) =
+                lane.turn_of(worker_job.run_id.expect("run")).await?;
+            assert_eq!(claude_waits_for, None);
+            assert_eq!(worker_waits_for, Some(vec![claude_job]));
+            let stamp = lane
+                .metadata_of(
+                    "select metadata from runs where id = $1",
+                    worker_job.run_id.expect("run"),
+                )
+                .await?;
+            assert_eq!(
+                stamp["takesTurns"]["after"][0]["agent"],
+                json!(CLAUDE),
+                "{stamp}"
+            );
+            lane.leases_nothing(lane.second_desktop, "@worker waits for @claude")
+                .await?;
+            lane.lease_one(lane.desktop, claude_job).await?;
+            lane.leases_nothing(lane.second_desktop, "@claude's turn runs")
+                .await?;
+            lane.end_job(claude_job).await?;
+            lane.lease_one(lane.second_desktop, worker_id).await?;
             Ok(())
         },
     )
