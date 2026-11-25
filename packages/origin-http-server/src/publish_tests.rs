@@ -2744,7 +2744,12 @@ async fn the_hosting_process_keeps_and_puts_a_turn_folders_changes() {
         "a secret file is never kept: {kept_paths}"
     );
     assert!(!kept_paths.contains(".instafy"), "{kept_paths}");
-    assert_eq!(ig(&sc.ws, &["status", "--porcelain"]), "", "nothing moved");
+    // Tracked files and HEAD stay as they were; older git also lists the untracked `.instafy/`.
+    assert_eq!(
+        ig(&sc.ws, &["status", "--porcelain", "--untracked-files=no"]),
+        "",
+        "nothing moved"
+    );
 
     // Put in unsaved, while the folder holds what the turn began from.
     let put = crate::routes::put_turn_changes_unsaved(
