@@ -282,6 +282,8 @@ pub struct JobProcessor {
     /// Where this runtime's space's turn folders go, once it was asked: `None` when a turn
     /// folder cannot be a clone of the space's folder here (`turn_folder::TurnFolderPlace`).
     turn_folder_place: std::sync::OnceLock<Option<turn_folder::TurnFolderPlace>>,
+    /// Whether what an earlier process's turn folders left was taken up (`turn_folder::recover`).
+    turn_folders_recovered: std::sync::atomic::AtomicBool,
     isolated_workers: isolated_worker::IsolatedWorkerSettings,
     isolated_apply: AsyncMutex<()>,
     /// The executable that serves a granted turn's `provider-mcp`: this runtime-agent's own
@@ -6770,6 +6772,7 @@ impl JobProcessor {
             unsaved_put_back: Mutex::new(None),
             turn_folders: Mutex::new(None),
             turn_folder_place: std::sync::OnceLock::new(),
+            turn_folders_recovered: std::sync::atomic::AtomicBool::new(false),
             isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
@@ -6904,6 +6907,51 @@ impl JobProcessor {
                 )
             })
             .as_ref()
+    }
+
+    /// Brings into the space's folder what the turn folders an earlier process of this space left
+    /// hold (docs/Local-Engine-Turns.md 11.23), once per process and in the background, once this
+    /// runtime's origin runs in it: a process that stopped mid-turn never loses the turn's changes.
+    pub(crate) fn recover_turn_folders(self: &Arc<Self>) {
+        let (Some(place), Some(hold)) = (self.turn_folder_place().cloned(), self.turn_folders())
+        else {
+            return;
+        };
+        if self
+            .turn_folders_recovered
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let leftovers = place.leftovers();
+        if leftovers.is_empty() {
+            return;
+        }
+        let processor = self.clone();
+        let space_folder = self.config.project_workspace_dir(&self.config.project_id);
+        tokio::spawn(async move {
+            for leftover in leftovers {
+                let put_hold = hold.clone();
+                let keeper = processor.clone();
+                turn_folder::recover(
+                    leftover,
+                    &space_folder,
+                    move |files, expected| async move {
+                        match put_hold.put_unsaved(files, expected).await {
+                            Ok(put) => Some(put.changed),
+                            Err(error) => {
+                                warn!(%error, "a stopped turn's changes could not be put into the space's folder");
+                                None
+                            }
+                        }
+                    },
+                    move |folder, paths| async move {
+                        keeper.keep_turn_folder_versions(&folder, &paths).await;
+                    },
+                )
+                .await;
+            }
+        });
     }
 
     /// How many Claude Code turns this runtime runs at once (docs/Local-Engine-Turns.md 11.23,

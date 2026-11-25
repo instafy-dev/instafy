@@ -1497,8 +1497,10 @@ struct LeasingRuntime {
 ///   (a spread job may run on a runtime it does not target). A local-engine
 ///   turn counts only when this runtime could lease it now, by the lease
 ///   clause's own lane conditions (`claude_code_lane::lane_turn_runs_on`):
-///   its person's runtime with Claude Code ready on the turn's login, a login
-///   no other turn holds, while this runtime runs no lane turn. Such a turn
+///   its person's runtime with Claude Code ready on the turn's login, while
+///   this runtime runs fewer lane turns than it attests it runs at once. And
+///   no other job counts while this runtime runs a lane turn
+///   (`claude_code_lane::holds_a_lane_turn`). Such a turn
 ///   waits unpinned for its person's computer, possibly for days, held at a
 ///   plan's limit or for a login set up on another computer, and must not
 ///   keep this runtime, or any other of the space, from this read meanwhile.

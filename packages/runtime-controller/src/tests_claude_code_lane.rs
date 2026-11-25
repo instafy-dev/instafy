@@ -3528,7 +3528,9 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
 ///   of them ends;
 /// - a number out of range, or not a whole number, counts as 1;
 /// - a computer running Claude Code turns takes no other work meanwhile, and
-///   the idle poll agrees.
+///   the idle poll agrees;
+/// - while other work pinned to it waits, it takes no further Claude Code
+///   turn, and the work runs once its turns end, before the next one.
 #[tokio::test]
 async fn a_login_runs_several_turns_at_once_as_its_computers_allow() -> anyhow::Result<()> {
     with_lane(
@@ -3595,8 +3597,9 @@ async fn a_login_runs_several_turns_at_once_as_its_computers_allow() -> anyhow::
                 capabilities(Some(space.owner), lane_ready_at_once(&[login], json!(2))),
             )
             .await?;
-            // One of the desktop's turns ends: it takes the fourth, and then
-            // the other work only once its last Claude Code turn has ended.
+            // One of the desktop's turns ends: with other work waiting for it,
+            // it takes no fourth, so the work does not starve; once its last
+            // Claude Code turn ends, it takes the work, and the fourth after.
             for (computer, job) in [(lane.desktop, second), (lane.second_desktop, first)] {
                 lane.harness
                     .complete(
@@ -3606,17 +3609,21 @@ async fn a_login_runs_several_turns_at_once_as_its_computers_allow() -> anyhow::
                     )
                     .await?;
             }
-            lane.lease_one(lane.desktop, fourth).await?;
-            for job in [third, fourth] {
-                lane.harness
-                    .complete(
-                        lane.desktop,
-                        job,
-                        json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
-                    )
-                    .await?;
-            }
+            lane.leases_nothing(
+                lane.desktop,
+                "other work waits for it: no fourth Claude Code turn",
+            )
+            .await?;
+            lane.harness
+                .complete(
+                    lane.desktop,
+                    third,
+                    json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                )
+                .await?;
             lane.lease_one(lane.desktop, other_work).await?;
+            lane.end_job(other_work).await?;
+            lane.lease_one(lane.desktop, fourth).await?;
             Ok(())
         },
     )

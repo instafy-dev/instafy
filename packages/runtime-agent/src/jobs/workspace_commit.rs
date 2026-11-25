@@ -1039,6 +1039,53 @@ async fn acquire_workspace_lease(
     }
 }
 
+/// How long a turn folder's save waits for the workspace lease
+/// (docs/Local-Engine-Turns.md 11.23): another Claude Code turn of this
+/// computer is often saving at the same moment, and a save that publishes
+/// holds the lease for seconds, longer than [`LEASE_CONFLICT_RETRY_DELAYS`]
+/// wait.
+const TURN_FOLDER_LEASE_WAIT: Duration = Duration::from_secs(120);
+
+/// [`acquire_workspace_lease`], trying again while another writer holds the
+/// lease, for at most `wait`, every 250 ms at first and every 2 s at most.
+#[allow(clippy::too_many_arguments)]
+async fn acquire_workspace_lease_within(
+    client: &reqwest::Client,
+    controller_base_url: &Url,
+    controller_token: &str,
+    project_id: Uuid,
+    runtime_id: Uuid,
+    job_id: Uuid,
+    run_id: Option<Uuid>,
+    wait: Duration,
+) -> Result<Uuid> {
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut delay = Duration::from_millis(250);
+    loop {
+        match acquire_workspace_lease_once(
+            client,
+            controller_base_url,
+            controller_token,
+            project_id,
+            runtime_id,
+            job_id,
+            run_id,
+        )
+        .await
+        {
+            Ok(lease_id) => return Ok(lease_id),
+            Err(error @ LeaseAcquireError::Conflict(_)) => {
+                if tokio::time::Instant::now() + delay > deadline {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum LeaseAcquireError {
     #[error("workspace lease conflict: {0}")]
@@ -1424,7 +1471,7 @@ const TURN_FOLDER_SAVE_ATTEMPTS: usize = 3;
 /// A Claude Code turn's folder of its own and the space's folder it saves to
 /// (`turn_folder`, docs/Local-Engine-Turns.md 11.23).
 pub(crate) struct TurnFolderSave<'a> {
-    pub(crate) turn_folder: &'a Path,
+    pub(crate) turn_folder: &'a super::turn_folder::TurnFolder,
     pub(crate) space_folder: &'a Path,
     /// What the turn found at each path it changed, from its first tree.
     pub(crate) found: &'a BTreeMap<String, super::turn_folder::BaseEntry>,
@@ -1474,7 +1521,7 @@ pub(crate) async fn save_turn_folder(
         .timeout(Duration::from_secs(60))
         .build()
         .context("failed to build workspace commit http client")?;
-    let lease_id = acquire_workspace_lease(
+    let lease_id = acquire_workspace_lease_within(
         &client,
         controller_base_url,
         controller_token,
@@ -1482,6 +1529,7 @@ pub(crate) async fn save_turn_folder(
         runtime_id,
         job_id,
         run_id,
+        TURN_FOLDER_LEASE_WAIT,
     )
     .await?;
     let saved = save_turn_folder_with_lease(
@@ -1623,6 +1671,7 @@ async fn save_turn_folder_with_lease(
                     attempt,
                     "the space's folder changed while a turn folder's save was planned; it reads again"
                 );
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
             Err(error) => return Err(error),
         }
@@ -3529,7 +3578,8 @@ mod tests {
                 .args(["-R", workspace.to_str().unwrap(), turn.to_str().unwrap()])
                 .status()?;
             ensure!(copied.success(), "the copy");
-            let first = turn_folder::snapshot(&turn).await.context("first tree")?;
+            let turn_folder = turn_folder::TurnFolder::at(&turn);
+            let started = turn_folder.begin().await?;
             // The turn's changes.
             std::fs::write(turn.join("plain.md"), "plain, by the turn\n")?;
             std::fs::write(turn.join("README.md"), readme.replace("two\n", "TWO\n"))?;
@@ -3541,10 +3591,9 @@ mod tests {
                 readme.replace("six\n", "SIX\n"),
             )?;
             std::fs::write(workspace.join("clash.md"), "the space's\n")?;
-            let last = turn_folder::snapshot(&turn).await.context("last tree")?;
-            let files = turn_folder::changed_files(&turn, &first, &last)
-                .await
-                .context("changes")?;
+            let changes = turn_folder.changes(&started).await.context("changes")?;
+            let files = changes.files;
+            let found = changes.found;
             let paths: Vec<String> = files
                 .iter()
                 .map(|file| file.workspace_path.clone())
@@ -3553,9 +3602,6 @@ mod tests {
                 paths == ["README.md", "clash.md", "new.md", "plain.md"],
                 "{paths:?}"
             );
-            let found = turn_folder::entries_in(&turn, &first, &paths)
-                .await
-                .context("found")?;
             let saved = super::save_turn_folder(
                 &controller,
                 "workspace-token",
@@ -3564,7 +3610,7 @@ mod tests {
                 Uuid::new_v4(),
                 None,
                 super::TurnFolderSave {
-                    turn_folder: &turn,
+                    turn_folder: &turn_folder,
                     space_folder: &workspace,
                     found: &found,
                     agent: "alpha",
@@ -3602,6 +3648,7 @@ mod tests {
             ensure!(git(&remote, &["show", "main:plain.md"]) == "plain, by the turn");
             ensure!(git(&remote, &["show", "main:new.md"]) == "new");
             // The turn's version of the clash, kept from its folder.
+            turn_folder.done();
             let kept = server
                 .turn_folders()
                 .context("the origin's turn folders")?

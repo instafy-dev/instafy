@@ -1032,6 +1032,7 @@ impl RuntimeAgent {
                 .as_ref()
                 .and_then(|service| service.turn_folders()),
         );
+        executor.processor().recover_turn_folders();
 
         let tunnel_refresh = tunnel_lifecycle
             .as_ref()

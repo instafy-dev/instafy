@@ -765,8 +765,12 @@ pub(crate) use lane_job_login;
 /// runtime is private, attested as the job's person's own, with a
 /// `claudeCode` capability of version 2 whose program is ready and whose
 /// entry for that login is ready; and the runtime holds fewer leased lane
-/// jobs than it attests it runs at once ([`turns_at_once`], D54). A login
-/// runs as many turns at once as the computers running them allow (D56). A
+/// jobs than it attests it runs at once ([`turns_at_once`], D54). A runtime
+/// that runs lane turns while other work pinned to it waits takes no further
+/// one, so that work runs once they end: a computer runs no other work beside
+/// its Claude Code turns ([`holds_a_lane_turn`]), and a run of them never
+/// starves it. A login runs as many turns at once as the computers running
+/// them allow (D56). A
 /// SQL condition: the lease and the idle poll read it alike, so a poll idles
 /// while every lane job of the space waits for what this runtime cannot give
 /// it.
@@ -801,7 +805,28 @@ macro_rules! lane_turn_runs_on {
             ".id
               ) < ",
             $crate::claude_code_lane::turns_at_once!($runtime),
-            ")"
+            "
+              and not (
+                  exists (
+                      select 1 from agent_jobs draining_lane_turn
+                       where draining_lane_turn.engine = 'claude-code'
+                         and draining_lane_turn.status = 'leased'
+                         and draining_lane_turn.leased_by_runtime_id = ",
+            $runtime,
+            ".id
+                  )
+                  and exists (
+                      select 1 from agent_jobs pinned_work
+                       where pinned_work.target_runtime_id = ",
+            $runtime,
+            ".id
+                         and pinned_work.status = 'queued'
+                         and pinned_work.engine is null
+                         and not ",
+            $crate::message_turns::waits_for_an_earlier_turn!("pinned_work"),
+            "
+                  )
+              ))"
         )
     };
 }

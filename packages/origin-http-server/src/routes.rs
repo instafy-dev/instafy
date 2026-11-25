@@ -4024,8 +4024,10 @@ pub(crate) async fn put_turn_changes_unsaved(
     let config = state.config.clone();
     tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
-        let _workspace_apply_guard = try_acquire_workspace_apply_lock(&root)?
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        // Another process's apply holds the folder for a moment: wait for it, as `/apply` does.
+        let _workspace_apply_guard =
+            acquire_workspace_apply_lock_within(&root, std::time::Duration::from_secs(30))?
+                .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
         let workspace = WorkspaceDir::open(&root)
             .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
         let mut done = TurnChangesPut::default();

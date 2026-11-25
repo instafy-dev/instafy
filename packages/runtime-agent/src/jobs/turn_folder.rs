@@ -10,22 +10,38 @@
 //!   outside the space's folder, so no tool or watcher there sees it, and on its volume. The name
 //!   is the turn's agent's, so an agent's Claude Code sessions, kept by folder, stay in one place;
 //!   a second running turn of the same agent takes `<name>-2`, and so on.
-//! - **What the turn changed** is what differs between the folder's files as the turn began and
-//!   as it ended, both read as trees of the folder's own copy of the repository ([`snapshot`],
-//!   [`changed_files`]): ignored files stay out, as a status delta leaves them out, and a commit
-//!   Claude Code made in its copy counts as a change.
-//! - **Its save** merges into the space's folder ([`plan_merge`],
+//! - **Its repository** is fixed when the folder is made ([`TurnRepo`]): the clone's copy of the
+//!   origin's `.instafy/.git`, else of the folder's own `.git` directory. A `git init` the turn
+//!   runs changes nothing of what it reads, and a folder whose `.git` is a file (a linked
+//!   worktree or a submodule, which would share the person's real repository with the clone) gets
+//!   no turn folder at all.
+//! - **What the turn changed** has two parts, both read from how the folder began
+//!   ([`TurnFolder::begin`], [`TurnFolder::changes`]):
+//!   - the files a save sends: what differs between two trees of the clone's repository, as the
+//!     turn began and as it ended, so ignored files stay out, as a status delta leaves them out,
+//!     and a commit Claude Code made in its copy counts too;
+//!   - everything else: what differs between two walks of the folder, its ignored files, Claude
+//!     Code's own files, unpublishable files and nested repositories included, by kind, size and
+//!     modification time, which a clone keeps.
+//! - **Its save** merges the first part into the space's folder ([`plan_merge`],
 //!   `workspace_commit::save_turn_folder`): a path the space's folder still holds as the turn
 //!   found it takes the turn's version, a text file both changed merges three ways, and anything
-//!   else is kept aside, never overwritten.
-//! - **It is removed** when the turn is done with it, in the background ([`TurnFolder`]'s drop),
-//!   and a runtime that starts removes what an earlier process left ([`TurnFolderPlace::of`]).
+//!   else is kept aside, never overwritten. The second part goes into the space's folder as it is,
+//!   where the space's folder still holds what the turn found ([`bring_back`]), as a turn that ran
+//!   there would have left it.
+//! - **It is removed** once its changes reached the space's folder ([`TurnFolder::done`]), in the
+//!   background. A record beside it ([`Record`]) says how it began, so what a process that stopped
+//!   mid-turn left is brought into the space's folder when the runtime starts again
+//!   ([`recover`]).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{CodexFileDescriptor, FileChangeDescriptor, FileChangeKind};
@@ -33,12 +49,18 @@ use super::{CodexFileDescriptor, FileChangeDescriptor, FileChangeKind};
 /// The folder under `WORKSPACE_DIR` that holds each space's turn folders.
 pub(crate) const PLACE: &str = ".instafy-turns";
 
+/// The end of a turn folder's record's name, beside the folder.
+const RECORD_SUFFIX: &str = ".start.json";
+
 /// The most turn folders one name takes at once: `<name>`, `<name>-2`, … A runtime runs at most
 /// `MAX_TURNS_AT_ONCE` turns at once, so this is never reached.
 const MAX_NAMES: usize = 9;
 
 /// How long a git command of a turn folder may take.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long bringing changes into the space's folder waits for its apply lock.
+const SPACE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The turn folders this process holds, by path: a name stays taken until its folder is gone.
 static IN_USE: LazyLock<parking_lot::Mutex<HashSet<PathBuf>>> =
@@ -51,45 +73,78 @@ pub(crate) struct TurnFolderPlace {
     space_folder: PathBuf,
 }
 
+/// A folder an earlier process of this space left, with its record when it has one.
+#[derive(Debug)]
+pub(crate) struct Leftover {
+    folder: PathBuf,
+    record: PathBuf,
+}
+
 impl TurnFolderPlace {
     /// The place of `project_id`'s turn folders under `workspace_root`, when each can be a
     /// copy-on-write clone of `space_folder`: on macOS, outside the space's folder (and the space's
-    /// folder outside it), and on the same APFS volume. What an earlier process left there is
-    /// removed. `None` otherwise: the computer then runs one turn at a time, in the space's
-    /// folder (D54).
+    /// folder outside it), and on the same APFS volume. `None` otherwise: the computer then runs one
+    /// turn at a time, in the space's folder (D54).
     pub(crate) fn of(workspace_root: &Path, space_folder: &Path, project_id: Uuid) -> Option<Self> {
         if !cfg!(target_os = "macos") {
             return None;
         }
-        let root = workspace_root.join(PLACE).join(project_id.to_string());
-        std::fs::create_dir_all(&root).ok()?;
-        let root = root.canonicalize().ok()?;
+        let workspace_root = workspace_root.canonicalize().ok()?;
         let space_folder = space_folder.canonicalize().ok()?;
+        let root = workspace_root.join(PLACE).join(project_id.to_string());
         if root.starts_with(&space_folder) || space_folder.starts_with(&root) {
             return None;
         }
+        std::fs::create_dir_all(&root).ok()?;
         if !clones_between(&space_folder, &root) {
             return None;
         }
-        let place = Self { root, space_folder };
-        place.remove_leftovers();
-        Some(place)
+        Some(Self { root, space_folder })
     }
 
-    /// Removes every folder here that no turn of this process holds: what a process that stopped
-    /// mid-turn left.
-    fn remove_leftovers(&self) {
+    /// What an earlier process left here, each folder taken, so no new turn's name removes it
+    /// before [`recover`] brings its changes into the space's folder.
+    pub(crate) fn leftovers(&self) -> Vec<Leftover> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
-            return;
+            return Vec::new();
         };
-        let in_use = IN_USE.lock().clone();
+        let mut in_use = IN_USE.lock();
+        let mut leftovers = Vec::new();
+        let mut records = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if !in_use.contains(&path) {
-                remove(&path);
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(folder) = name.strip_suffix(RECORD_SUFFIX) {
+                records.push((self.root.join(folder), path));
+                continue;
+            }
+            if in_use.contains(&path) {
+                continue;
+            }
+            in_use.insert(path.clone());
+            leftovers.push(Leftover {
+                record: record_of(&path),
+                folder: path,
+            });
+        }
+        // A record whose folder is gone: the folder was being removed.
+        for (folder, record) in records {
+            if !folder.exists() {
+                let _ = std::fs::remove_file(record);
             }
         }
+        leftovers
     }
+}
+
+/// The record beside `folder`.
+fn record_of(folder: &Path) -> PathBuf {
+    let mut name = folder
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(RECORD_SUFFIX);
+    folder.with_file_name(name)
 }
 
 /// Whether a folder of `space_folder`'s can be cloned into `root`: both on one APFS volume.
@@ -162,56 +217,517 @@ fn remove(path: &Path) {
     }
 }
 
-/// A turn's folder of its own, removed in the background once dropped.
-#[derive(Debug)]
-pub(crate) struct TurnFolder {
+/// Removes `folder` and its record in a thread of its own, then frees its name: a large folder
+/// takes seconds to remove. The record goes first, so a folder half removed is never read as a
+/// turn's change.
+fn remove_in_the_background(folder: PathBuf) {
+    let work = move || {
+        let _ = std::fs::remove_file(record_of(&folder));
+        remove(&folder);
+        IN_USE.lock().remove(&folder);
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("turn-folder-removal".to_string())
+        .spawn(work)
+    {
+        tracing::warn!(%error, "no thread to remove a turn folder");
+    }
+}
+
+/// The repository a turn folder's own reads use, fixed when the folder is made: its copy of the
+/// origin's `.instafy/.git`, else its own `.git` directory.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnRepo {
+    git_dir: PathBuf,
+    work_tree: PathBuf,
+}
+
+impl TurnRepo {
+    /// The repository of `folder`, as the pre-flight picks it (`.instafy/.git`, else `.git`), when
+    /// a clone of it is a repository of its own: `None` for a folder with no repository, and for
+    /// one whose `.git` is a file, a linked worktree or a submodule, whose clone would still name
+    /// the person's real repository.
+    pub(crate) fn of(folder: &Path) -> Option<Self> {
+        let own = std::fs::symlink_metadata(folder.join(".git")).ok();
+        if own.as_ref().is_some_and(|metadata| !metadata.is_dir()) {
+            return None;
+        }
+        let instafy = folder.join(".instafy").join(".git");
+        let git_dir = if std::fs::symlink_metadata(&instafy).is_ok_and(|metadata| metadata.is_dir())
+        {
+            instafy
+        } else if own.is_some() {
+            folder.join(".git")
+        } else {
+            return None;
+        };
+        Some(Self {
+            git_dir,
+            work_tree: folder.to_path_buf(),
+        })
+    }
+
+    /// Its git directory, relative to the folder.
+    fn relative_git_dir(&self) -> PathBuf {
+        self.git_dir
+            .strip_prefix(&self.work_tree)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| PathBuf::from(".git"))
+    }
+
+    /// The same repository in `folder`, a clone of this one's folder.
+    fn in_folder(&self, folder: &Path) -> Self {
+        Self {
+            git_dir: folder.join(self.relative_git_dir()),
+            work_tree: folder.to_path_buf(),
+        }
+    }
+
+    /// `git` in this repository, with its hooks and file monitor off, only the allowlisted
+    /// environment, and stat checks that a clone keeps: a clone's files have new inodes and change
+    /// times, but their sizes and modification times are the space folder's.
+    fn git(&self, args: &[&str], index: Option<&Path>) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.checkStat=minimal",
+                "-c",
+                "core.trustctime=false",
+                "-c",
+                "core.quotePath=false",
+            ])
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .arg("--work-tree")
+            .arg(&self.work_tree)
+            .args(args)
+            .current_dir(&self.work_tree);
+        crate::model_environment::apply_allowlisted_tokio_environment(&mut command, &[]);
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
+        command
+    }
+}
+
+/// Runs `command`; its stdout when it succeeds.
+async fn output_of(mut command: tokio::process::Command, what: &str) -> Result<Vec<u8>> {
+    let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
+        .await
+        .map_err(|_| anyhow!("git {what} took too long"))?
+        .with_context(|| format!("git {what} did not run"))?;
+    if !output.status.success() {
+        bail!(
+            "git {what} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
+}
+
+/// What a folder held at a path, as two walks compare it: its kind, and a file's or a link's size
+/// and modification time, which a clone keeps. A folder compares by kind alone, since a clone's
+/// folders get times of their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WalkEntry {
+    kind: EntryKind,
+    len: u64,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum EntryKind {
+    File,
+    Dir,
+    Link,
+    Other,
+}
+
+impl WalkEntry {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let kind = if metadata.is_dir() {
+            EntryKind::Dir
+        } else if metadata.file_type().is_symlink() {
+            EntryKind::Link
+        } else if metadata.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        let (mtime_secs, mtime_nanos) = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| (time.as_secs() as i64, time.subsec_nanos()))
+            .unwrap_or((0, 0));
+        Self {
+            kind,
+            len: if kind == EntryKind::Dir {
+                0
+            } else {
+                metadata.len()
+            },
+            mtime_secs,
+            mtime_nanos,
+        }
+    }
+
+    /// Whether `other` is what this was: the same kind, and for anything but a folder the same
+    /// size and modification time.
+    fn same_as(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && (self.kind == EntryKind::Dir
+                || (self.len == other.len
+                    && self.mtime_secs == other.mtime_secs
+                    && self.mtime_nanos == other.mtime_nanos))
+    }
+}
+
+/// Every entry of a folder, by its `/`-separated path relative to the folder, without the
+/// runtime's own `.instafy/` and the folder's own `.git/`, which no turn's change goes back
+/// through.
+pub(crate) type Walk = BTreeMap<String, WalkEntry>;
+
+/// Walks `folder` ([`Walk`]), links not followed.
+fn walk(folder: &Path) -> Walk {
+    let mut entries = Walk::new();
+    let mut pending: Vec<(PathBuf, String)> = vec![(folder.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = pending.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if prefix.is_empty() && (name == ".instafy" || name == ".git") {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let walked = WalkEntry::of(&metadata);
+            if walked.kind == EntryKind::Dir {
+                pending.push((entry.path(), relative.clone()));
+            }
+            entries.insert(relative, walked);
+        }
+    }
+    entries
+}
+
+/// The folders of `walks` that hold a repository of their own (a `.git` folder or file), in path
+/// order: what a snapshot leaves out.
+fn nested_repos<'a>(walks: impl IntoIterator<Item = &'a Walk>) -> Vec<String> {
+    let mut nested: Vec<String> = walks
+        .into_iter()
+        .flat_map(|walk| walk.keys())
+        .filter_map(|path| path.strip_suffix("/.git").map(str::to_string))
+        .collect();
+    nested.sort();
+    nested.dedup();
+    nested
+}
+
+/// How a turn folder began, which [`TurnFolder::begin`] writes beside it: its repository, its first
+/// tree and its first walk.
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    version: u32,
+    /// The repository's folder, relative to the turn folder.
+    git_dir: PathBuf,
+    first_tree: String,
+    walk: Walk,
+}
+
+/// How a turn folder began.
+#[derive(Clone, Debug)]
+pub(crate) struct Started {
+    pub(crate) first_tree: String,
+    walk: Arc<Walk>,
+}
+
+struct Inner {
     path: PathBuf,
+    repo: TurnRepo,
+    begun: AtomicBool,
+    done: AtomicBool,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let path = std::mem::take(&mut self.path);
+        if self.begun.load(Ordering::SeqCst) && !self.done.load(Ordering::SeqCst) {
+            // Its changes never reached the space's folder: it stays, with its record, for the
+            // runtime's next start to bring them there (`recover`).
+            tracing::warn!(
+                folder = %path.display(),
+                "a turn folder's changes did not reach the space's folder; it stays until the runtime starts again"
+            );
+            return;
+        }
+        remove_in_the_background(path);
+    }
+}
+
+/// A turn's folder of its own. The last of its clones to go removes it in the background, once
+/// its changes reached the space's folder ([`Self::done`]) or before it began; otherwise it stays.
+#[derive(Clone)]
+pub(crate) struct TurnFolder(Arc<Inner>);
+
+impl std::fmt::Debug for TurnFolder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("TurnFolder")
+            .field(&self.0.path)
+            .finish()
+    }
 }
 
 impl TurnFolder {
     /// A clone of `place`'s space folder, as it is now, named for `name` (the turn's agent):
-    /// `name`, or `name-2` and so on while another turn of this process holds a name.
-    pub(crate) async fn clone_of(place: &TurnFolderPlace, name: &str) -> Result<Self> {
+    /// `name`, or `name-2` and so on while another turn of this process holds a name. Its
+    /// repositories are told to keep their stat caches valid for it ([`TurnRepo::git`]).
+    pub(crate) async fn clone_of(
+        place: &TurnFolderPlace,
+        repo: &TurnRepo,
+        name: &str,
+    ) -> Result<Self> {
         let place = place.clone();
         let name = folder_name(name);
-        tokio::task::spawn_blocking(move || {
+        let path = tokio::task::spawn_blocking(move || {
             let path = take_a_name(&place.root, &name)?;
             // A folder an earlier process left under this name goes first.
+            let _ = std::fs::remove_file(record_of(&path));
             remove(&path);
             if let Err(error) = clone_tree(&place.space_folder, &path) {
-                IN_USE.lock().remove(&path);
                 remove(&path);
+                IN_USE.lock().remove(&path);
                 return Err(error);
             }
-            Ok(Self { path })
+            Ok(path)
         })
         .await
-        .map_err(|error| anyhow!("the turn folder task failed: {error}"))?
+        .map_err(|error| anyhow!("the turn folder task failed: {error}"))??;
+        let folder = Self(Arc::new(Inner {
+            repo: repo.in_folder(&path),
+            path,
+            begun: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }));
+        folder.keep_stat_caches().await;
+        Ok(folder)
+    }
+
+    /// Tells the clone's repositories to compare files by size and modification time alone, and
+    /// writes their indexes so, as `git status` in the clone would otherwise read every file again.
+    async fn keep_stat_caches(&self) {
+        let own = self.0.path.join(".git");
+        let mut git_dirs = vec![self.0.repo.git_dir.clone()];
+        if own != self.0.repo.git_dir && own.is_dir() {
+            git_dirs.push(own);
+        }
+        for git_dir in git_dirs {
+            let repo = TurnRepo {
+                git_dir,
+                work_tree: self.0.path.clone(),
+            };
+            for (key, value) in [("core.checkStat", "minimal"), ("core.trustctime", "false")] {
+                if let Err(error) =
+                    output_of(repo.git(&["config", key, value], None), "config").await
+                {
+                    tracing::warn!(?error, "a turn folder's repository kept its stat checks");
+                }
+            }
+            let _ = output_of(
+                repo.git(&["update-index", "-q", "--refresh"], None),
+                "update-index",
+            )
+            .await;
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.path
+        &self.0.path
+    }
+
+    /// A turn folder over `folder` itself, for a test: no clone, and nothing removed but its
+    /// record.
+    #[cfg(test)]
+    pub(crate) fn at(folder: &Path) -> Self {
+        Self(Arc::new(Inner {
+            path: folder.to_path_buf(),
+            repo: TurnRepo::of(folder).expect("a repository"),
+            begun: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        }))
+    }
+
+    /// Reads how the folder begins, its first tree and its first walk, and writes them beside it,
+    /// so a process that stops mid-turn leaves what its next start needs to bring the turn's
+    /// changes into the space's folder.
+    pub(crate) async fn begin(&self) -> Result<Started> {
+        let path = self.0.path.clone();
+        let walked = tokio::task::spawn_blocking(move || walk(&path))
+            .await
+            .map_err(|error| anyhow!("the walk failed: {error}"))?;
+        let first_tree = snapshot_tree(&self.0.repo, &nested_repos([&walked])).await?;
+        let record = Record {
+            version: 1,
+            git_dir: self.0.repo.relative_git_dir(),
+            first_tree: first_tree.clone(),
+            walk: walked,
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        tokio::fs::write(record_of(&self.0.path), bytes)
+            .await
+            .context("the turn folder's record could not be written")?;
+        self.0.begun.store(true, Ordering::SeqCst);
+        Ok(Started {
+            first_tree,
+            walk: Arc::new(record.walk),
+        })
+    }
+
+    /// What the turn changed since it began ([`TurnChanges`]); `None` when the folder cannot be
+    /// read.
+    pub(super) async fn changes(&self, started: &Started) -> Option<TurnChanges> {
+        changes_in(&self.0.repo, started).await
+    }
+
+    /// Says the turn's changes reached the space's folder: its record goes, and the folder is
+    /// removed once the last of its clones does.
+    pub(crate) fn done(&self) {
+        let _ = std::fs::remove_file(record_of(&self.0.path));
+        self.0.done.store(true, Ordering::SeqCst);
     }
 }
 
-impl Drop for TurnFolder {
-    fn drop(&mut self) {
-        let path = std::mem::take(&mut self.path);
-        // A large folder takes seconds to remove: never on the turn's way.
-        let removal = std::thread::Builder::new()
-            .name("turn-folder-removal".to_string())
-            .spawn({
-                let path = path.clone();
-                move || {
-                    remove(&path);
-                    IN_USE.lock().remove(&path);
-                }
-            });
-        if removal.is_err() {
-            remove(&path);
-            IN_USE.lock().remove(&path);
+/// What a turn changed in its folder.
+#[derive(Debug, Default)]
+pub(super) struct TurnChanges {
+    /// The files a save sends: what differs between its first tree and its last, in path order.
+    pub(crate) files: Vec<CodexFileDescriptor>,
+    /// What the turn found at each of them, as the space's folder held it ([`BaseEntry`]).
+    pub(crate) found: BTreeMap<String, BaseEntry>,
+    /// Everything else, by path: what differs between its first walk and its last.
+    pub(crate) rest: Vec<RestChange>,
+}
+
+/// A change of a turn's beyond the files a save sends: a file, a link or a folder that is new,
+/// changed or gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RestChange {
+    pub(crate) path: String,
+    /// What the turn left there; `None` when it left nothing.
+    left: Option<WalkEntry>,
+    /// What the turn found there, as the space's folder held it; `None` for nothing.
+    found: Option<WalkEntry>,
+}
+
+async fn changes_in(repo: &TurnRepo, started: &Started) -> Option<TurnChanges> {
+    let read = async {
+        let folder = repo.work_tree.clone();
+        let last_walk = tokio::task::spawn_blocking(move || walk(&folder))
+            .await
+            .map_err(|error| anyhow!("the walk failed: {error}"))?;
+        let nested = nested_repos([started.walk.as_ref(), &last_walk]);
+        let last_tree = snapshot_tree(repo, &nested).await?;
+        let files = changed_files(repo, &started.first_tree, &last_tree).await?;
+        let paths: Vec<String> = files
+            .iter()
+            .map(|file| file.workspace_path.clone())
+            .collect();
+        let first = tree_listing(repo, &started.first_tree).await?;
+        let found = entries_in(repo, &first, &paths).await?;
+        // Whatever either tree holds that a save could send is the trees' to tell; what the walks
+        // add is the rest, unpublishable files among it.
+        let mut tracked: HashSet<String> = first.keys().cloned().collect();
+        tracked.extend(tree_listing(repo, &last_tree).await?.into_keys());
+        tracked.retain(|path| a_save_sends(path));
+        let tracked: HashSet<&str> = tracked.iter().map(String::as_str).collect();
+        let rest = rest_of(&started.walk, &last_walk, &tracked);
+        Ok::<_, anyhow::Error>(TurnChanges { files, found, rest })
+    };
+    match read.await {
+        Ok(changes) => Some(changes),
+        Err(error) => {
+            tracing::warn!(?error, "a turn folder's changes could not be read");
+            None
         }
     }
+}
+
+/// What differs between two walks, beyond `tree_paths`, in path order: new, changed and gone
+/// files and links, and new and gone folders.
+fn rest_of(first: &Walk, last: &Walk, tree_paths: &HashSet<&str>) -> Vec<RestChange> {
+    let mut rest = Vec::new();
+    for (path, left) in last {
+        if tree_paths.contains(path.as_str()) {
+            continue;
+        }
+        let found = first.get(path).copied();
+        if found.is_some_and(|found| found.same_as(left)) {
+            continue;
+        }
+        rest.push(RestChange {
+            path: path.clone(),
+            left: Some(*left),
+            found,
+        });
+    }
+    for (path, found) in first {
+        if !last.contains_key(path) && !tree_paths.contains(path.as_str()) {
+            rest.push(RestChange {
+                path: path.clone(),
+                left: None,
+                found: Some(*found),
+            });
+        }
+    }
+    rest.sort_by(|left, right| left.path.cmp(&right.path));
+    rest
+}
+
+/// The changes at `paths` in `folder` since the turn began, as [`bring_back`] takes them: for
+/// files the save leaves to go in as they are, such as Claude Code's own files (3.8).
+pub(crate) fn rest_of_files(folder: &Path, paths: &[String], started: &Started) -> Vec<RestChange> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let left = std::fs::symlink_metadata(folder.join(path))
+                .ok()
+                .map(|metadata| WalkEntry::of(&metadata));
+            let found = started.walk.get(path).copied();
+            let same = match (left, found) {
+                (Some(left), Some(found)) => left.same_as(&found),
+                (None, None) => true,
+                _ => false,
+            };
+            (!same).then(|| RestChange {
+                path: path.clone(),
+                left,
+                found,
+            })
+        })
+        .collect()
 }
 
 /// `name` as a folder name: letters, digits, `-` and `_` only, at most 64 of them, `turn` when
@@ -245,109 +761,40 @@ fn take_a_name(root: &Path, name: &str) -> Result<PathBuf> {
     bail!("every turn folder name of {name} is taken")
 }
 
-/// `git` in `folder`'s own repository, as the turn's status reads run it (`workspace_git_args`),
-/// with stat checks that a clone keeps: a clone's files have new inodes and change times, but
-/// their sizes and modification times are the space folder's.
-fn git(folder: &Path, args: &[&str], index: Option<&Path>) -> tokio::process::Command {
-    let mut full = vec![
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.checkStat=minimal",
-        "-c",
-        "core.trustctime=false",
-        "-c",
-        "core.quotePath=false",
-    ];
-    full.extend_from_slice(args);
-    let mut command = tokio::process::Command::new("git");
-    command
-        .args(super::workspace_git_args(folder, &full))
-        .current_dir(folder);
-    crate::model_environment::apply_allowlisted_tokio_environment(&mut command, &[]);
-    command
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    if let Some(index) = index {
-        command.env("GIT_INDEX_FILE", index);
-    }
-    command
-}
-
-/// Runs `command`; its stdout when it succeeds.
-async fn output_of(mut command: tokio::process::Command, what: &str) -> Result<Vec<u8>> {
-    let output = tokio::time::timeout(GIT_TIMEOUT, command.output())
-        .await
-        .map_err(|_| anyhow!("git {what} took too long"))?
-        .with_context(|| format!("git {what} did not run"))?;
-    if !output.status.success() {
-        bail!(
-            "git {what} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(output.stdout)
-}
-
-/// The repository directory of `folder`: its `.instafy/.git`, as the origin's checkout keeps
-/// it, else its own `.git` directory.
-fn git_dir(folder: &Path) -> Option<PathBuf> {
-    [folder.join(".instafy").join(".git"), folder.join(".git")]
-        .into_iter()
-        .find(|dir| dir.is_dir())
-}
-
-/// The tree of `folder`'s files as they are now, by its own repository: what `git add -A` stages
-/// into an index of its own, so the files the repository ignores stay out, written into the
-/// repository's objects. Neither the repository's index nor its HEAD moves. `None` when it
-/// cannot be read.
-pub(crate) async fn snapshot(folder: &Path) -> Option<String> {
-    match snapshot_tree(folder).await {
-        Ok(tree) => Some(tree),
-        Err(error) => {
-            tracing::warn!(?error, "a turn folder's files could not be read as a tree");
-            None
-        }
-    }
-}
-
-async fn snapshot_tree(folder: &Path) -> Result<String> {
-    let git_dir = git_dir(folder).ok_or_else(|| anyhow!("the folder has no repository"))?;
+/// The tree of the folder's files as they are now, by `repo`: what `git add -A` stages into an
+/// index of its own, a copy of the repository's, so the files the repository ignores stay out,
+/// written into the repository's objects. Neither the repository's index nor its HEAD moves.
+async fn snapshot_tree(repo: &TurnRepo, nested: &[String]) -> Result<String> {
     let scratch = tempfile::Builder::new()
         .prefix("instafy-turn-snapshot-")
         .tempdir()
         .context("no scratch folder for the snapshot's index")?;
     let index = scratch.path().join("index");
     // The repository's own index, when it has one, so only files that changed are read again.
-    let own_index = git_dir.join("index");
+    let own_index = repo.git_dir.join("index");
     if own_index.is_file() {
         tokio::fs::copy(&own_index, &index)
             .await
             .context("the repository's index could not be copied")?;
     } else {
         output_of(
-            git(folder, &["read-tree", "--empty"], Some(&index)),
+            repo.git(&["read-tree", "--empty"], Some(&index)),
             "read-tree",
         )
         .await?;
     }
     // The runtime's own `.instafy/` (its logs, its staging, the controller's pages) is never a
-    // turn's to save (`is_reserved_path`), so it is not read at all.
-    output_of(
-        git(
-            folder,
-            &["add", "-A", "--", ".", ":(top,exclude).instafy"],
-            Some(&index),
-        ),
-        "add",
-    )
-    .await?;
-    let tree = output_of(git(folder, &["write-tree"], Some(&index)), "write-tree").await?;
+    // turn's to save (`is_reserved_path`), so it is not read at all. Nor is a repository nested in
+    // the folder, which `git add` cannot take while it has no commit: its files go with the rest
+    // of the turn's changes ([`bring_back`]).
+    let excluded: Vec<String> = nested
+        .iter()
+        .map(|folder| format!(":(top,literal,exclude){folder}"))
+        .collect();
+    let mut args = vec!["add", "-A", "--", ".", ":(top,exclude).instafy"];
+    args.extend(excluded.iter().map(String::as_str));
+    output_of(repo.git(&args, Some(&index)), "add").await?;
+    let tree = output_of(repo.git(&["write-tree"], Some(&index)), "write-tree").await?;
     let tree = String::from_utf8(tree)?.trim().to_string();
     if tree.is_empty() || !tree.chars().all(|character| character.is_ascii_hexdigit()) {
         bail!("git write-tree gave no tree id");
@@ -358,72 +805,76 @@ async fn snapshot_tree(folder: &Path) -> Result<String> {
 /// What a tree held at a path, as a turn folder's save reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BaseEntry {
-    /// The blob's id.
+    /// The blob id of the file's bytes as the folder held them ([`working_bytes`]), which is
+    /// what the origin compares an `expected` id with.
     pub(crate) oid: String,
+    /// The blob's id in the repository, from which [`working_bytes`] reads it again.
+    tree_oid: String,
     /// Whether it is a link (mode 120000), which a save never sends.
     pub(crate) link: bool,
 }
 
-/// What changed between the trees `from` and `to` of `folder`'s repository, as the files a save
-/// sends: created, changed or deleted, by folder-relative path, in path order, with the paths a
-/// save never sends left out (as `status_delta_files_for_checkpoint` leaves them out). `None`
-/// when it cannot be read.
-pub(super) async fn changed_files(
-    folder: &Path,
-    from: &str,
-    to: &str,
-) -> Option<Vec<CodexFileDescriptor>> {
+/// What changed between the trees `from` and `to` of `repo`, as the files a save sends: created,
+/// changed or deleted, by folder-relative path, in path order, with the paths a save never sends
+/// left out (as `status_delta_files_for_checkpoint` leaves them out), and nested repositories
+/// (gitlinks), whose files go back with the rest of the turn's changes.
+async fn changed_files(repo: &TurnRepo, from: &str, to: &str) -> Result<Vec<CodexFileDescriptor>> {
     let listed = output_of(
-        git(
-            folder,
-            &[
-                "diff-tree",
-                "-r",
-                "-z",
-                "--no-renames",
-                "--name-status",
-                from,
-                to,
-            ],
+        repo.git(
+            &["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to],
             None,
         ),
         "diff-tree",
     )
-    .await
-    .map_err(|error| tracing::warn!(?error, "a turn folder's changes could not be read"))
-    .ok()?;
-    Some(files_of_name_status(&listed))
+    .await?;
+    Ok(files_of_raw_diff(&listed))
 }
 
-/// The files of `git diff-tree -z --name-status` output.
-fn files_of_name_status(listed: &[u8]) -> Vec<CodexFileDescriptor> {
+/// The files of `git diff-tree -z --raw` output.
+fn files_of_raw_diff(listed: &[u8]) -> Vec<CodexFileDescriptor> {
     let mut fields = listed
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
     let mut files = Vec::new();
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let Ok(meta) = std::str::from_utf8(meta) else {
+            continue;
+        };
         let Ok(path) = std::str::from_utf8(path) else {
             continue;
         };
-        let kind = match status.first() {
-            Some(b'A') => FileChangeKind::Created,
-            Some(b'D') => FileChangeKind::Deleted,
+        // `:<old mode> <new mode> <old oid> <new oid> <status>`
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let [old_mode, new_mode, _, _, status] = parts.as_slice() else {
+            continue;
+        };
+        if *old_mode == "160000" || *new_mode == "160000" {
+            continue;
+        }
+        let kind = match status.chars().next() {
+            Some('A') => FileChangeKind::Created,
+            Some('D') => FileChangeKind::Deleted,
             _ => FileChangeKind::Changed,
         };
         let Some(sanitized) = super::sanitize_relative_workspace_path(path) else {
             continue;
         };
         let path = sanitized.to_string_lossy().replace('\\', "/");
-        if path.is_empty()
-            || origin_http_server::paths::is_reserved_path(&path)
-            || origin_http_server::publish_policy::is_unpublishable(&path)
-        {
+        if !a_save_sends(&path) {
             continue;
         }
         files.push(changed_file(path, kind));
     }
     files.sort_by(|left, right| left.workspace_path.cmp(&right.workspace_path));
     files
+}
+
+/// Whether a save may send `path`, a folder-relative path: never a reserved or an unpublishable
+/// one, as `status_delta_files_for_checkpoint` leaves them out.
+fn a_save_sends(path: &str) -> bool {
+    !path.is_empty()
+        && !origin_http_server::paths::is_reserved_path(path)
+        && !origin_http_server::publish_policy::is_unpublishable(path)
 }
 
 /// A file a turn changed, as its save and its reply list it.
@@ -449,22 +900,14 @@ fn changed_file(path: String, kind: FileChangeKind) -> CodexFileDescriptor {
     }
 }
 
-/// What the tree `tree` of `folder`'s repository held at each of `paths`: an entry for a file or
-/// a link, none for a path it did not hold as one. `None` when it cannot be read.
-pub(crate) async fn entries_in(
-    folder: &Path,
-    tree: &str,
-    paths: &[String],
-) -> Option<BTreeMap<String, BaseEntry>> {
-    let wanted: HashSet<&str> = paths.iter().map(String::as_str).collect();
+/// Every file and link the tree `tree` of `repo` holds, by path: its mode and its blob's id.
+async fn tree_listing(repo: &TurnRepo, tree: &str) -> Result<BTreeMap<String, (String, String)>> {
     let listed = output_of(
-        git(folder, &["ls-tree", "-r", "-z", "--full-tree", tree], None),
+        repo.git(&["ls-tree", "-r", "-z", "--full-tree", tree], None),
         "ls-tree",
     )
-    .await
-    .map_err(|error| tracing::warn!(?error, "a turn folder's first tree could not be read"))
-    .ok()?;
-    let mut entries = BTreeMap::new();
+    .await?;
+    let mut listing = BTreeMap::new();
     for line in listed
         .split(|byte| *byte == 0)
         .filter(|line| !line.is_empty())
@@ -475,27 +918,59 @@ pub(crate) async fn entries_in(
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
-        if !wanted.contains(path) {
-            continue;
-        }
         let mut meta = meta.split(' ');
         let (Some(mode), Some("blob"), Some(oid)) = (meta.next(), meta.next(), meta.next()) else {
             continue;
         };
+        listing.insert(path.to_string(), (mode.to_string(), oid.to_string()));
+    }
+    Ok(listing)
+}
+
+/// What `listing`, a tree's ([`tree_listing`]), held at each of `paths`: an entry for a file or a
+/// link, none for a path it did not hold as one.
+async fn entries_in(
+    repo: &TurnRepo,
+    listing: &BTreeMap<String, (String, String)>,
+    paths: &[String],
+) -> Result<BTreeMap<String, BaseEntry>> {
+    let mut entries = BTreeMap::new();
+    for path in paths {
+        let Some((mode, tree_oid)) = listing.get(path) else {
+            continue;
+        };
+        let link = mode == "120000";
+        let oid = if link {
+            tree_oid.clone()
+        } else {
+            let bytes = working_bytes(repo, tree_oid, path).await?;
+            origin_http_server::workspace_git::blob_oid(&bytes)
+        };
         entries.insert(
-            path.to_string(),
+            path.clone(),
             BaseEntry {
-                oid: oid.to_string(),
-                link: mode == "120000",
+                oid,
+                tree_oid: tree_oid.clone(),
+                link,
             },
         );
     }
-    Some(entries)
+    Ok(entries)
 }
 
-/// The bytes of the blob `oid` in `folder`'s repository.
-async fn blob_bytes(folder: &Path, oid: &str) -> Result<Vec<u8>> {
-    output_of(git(folder, &["cat-file", "blob", oid], None), "cat-file").await
+/// The bytes of the blob `oid` as the folder held them at `path`: through the repository's
+/// filters (line endings, LFS), which `git add` applied to them, else as stored.
+async fn working_bytes(repo: &TurnRepo, oid: &str, path: &str) -> Result<Vec<u8>> {
+    let path_arg = format!("--path={path}");
+    match output_of(
+        repo.git(&["cat-file", "--filters", &path_arg, oid], None),
+        "cat-file --filters",
+    )
+    .await
+    {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => output_of(repo.git(&["cat-file", "blob", oid], None), "cat-file").await,
+    }
 }
 
 /// What a turn folder's save sends, and what it keeps aside.
@@ -546,38 +1021,39 @@ fn version_oid(version: &Version) -> Option<Option<String>> {
     }
 }
 
-/// Plans a turn folder's save (11.23): for each of `files` the turn changed, its version in
-/// `turn_folder`, what the turn found there (`base`, read from the turn's first tree), and what
-/// `space_folder` holds now.
+/// Plans a turn folder's save (11.23): for each of `files` the turn changed, its version in the
+/// turn's folder, what the turn found there (`found`), and what `space_folder` holds now.
 /// - The space still holds what the turn found: the turn's version goes, with that as expected.
 /// - The space already holds the turn's version: nothing goes.
 /// - The space changed it too, and all three are text: they merge three ways (`git merge-file`).
 ///   A clean merge goes, with the space's version now as expected.
-/// - Anything else (lines both changed, a binary file, one side removed it, a link) is kept.
+/// - Anything else (lines both changed, a binary file, one side removed it, a link, a merge that
+///   could not run) is kept.
 pub(super) async fn plan_merge(
-    turn_folder: &Path,
+    turn_folder: &TurnFolder,
     space_folder: &Path,
     files: &[CodexFileDescriptor],
-    base: &BTreeMap<String, BaseEntry>,
+    found: &BTreeMap<String, BaseEntry>,
     agent: &str,
 ) -> Result<MergePlan> {
+    let repo = &turn_folder.0.repo;
     let mut plan = MergePlan::default();
     for file in files {
         if file.is_read_reference() {
             continue;
         }
         let path = file.workspace_path.clone();
-        let theirs = version_at(turn_folder, &path);
+        let theirs = version_at(turn_folder.path(), &path);
         let current = version_at(space_folder, &path);
-        let found = base.get(&path);
-        if found.is_some_and(|entry| entry.link)
+        let base = found.get(&path);
+        if base.is_some_and(|entry| entry.link)
             || matches!(theirs, Version::Other)
             || matches!(current, Version::Other)
         {
             plan.kept.push(path);
             continue;
         }
-        let found_oid = found.map(|entry| entry.oid.clone());
+        let found_oid = base.map(|entry| entry.oid.clone());
         let current_oid = version_oid(&current).flatten();
         if current_oid == found_oid {
             match theirs {
@@ -592,20 +1068,26 @@ pub(super) async fn plan_merge(
         if theirs == current {
             continue;
         }
-        let (Version::File(ours), Version::File(other), Some(found_oid)) =
-            (&current, &theirs, found_oid.as_deref())
+        let (Version::File(ours), Version::File(other), Some(base)) = (&current, &theirs, base)
         else {
             plan.kept.push(path);
             continue;
         };
-        let found_bytes = blob_bytes(turn_folder, found_oid).await?;
-        match merge_three_ways(ours, &found_bytes, other, agent).await? {
-            Some(merged) => {
+        let merged = match working_bytes(repo, &base.tree_oid, &path).await {
+            Ok(found_bytes) => merge_three_ways(ours, &found_bytes, other, agent).await,
+            Err(error) => Err(error),
+        };
+        match merged {
+            Ok(Some(merged)) => {
                 plan.writes.push((path.clone(), merged));
                 plan.expected.insert(path.clone(), current_oid);
                 plan.merged.push(path);
             }
-            None => plan.kept.push(path),
+            Ok(None) => plan.kept.push(path),
+            Err(error) => {
+                tracing::warn!(?error, %path, "a merge could not run; the space keeps its version");
+                plan.kept.push(path);
+            }
         }
     }
     Ok(plan)
@@ -669,6 +1151,305 @@ async fn merge_three_ways(
     }
 }
 
+/// What [`bring_back`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BroughtBack {
+    /// The paths it brought into the space's folder (written, made or removed).
+    pub(crate) put: Vec<String>,
+    /// The paths the space's folder changed since the turn began, which it left as they are.
+    pub(crate) changed_meanwhile: Vec<String>,
+}
+
+/// Brings `rest`, the turn's changes beyond the files a save sends, from its folder into
+/// `space_folder`, under the space's apply lock: each where the space's folder still holds what
+/// the turn found there, as a turn that ran there would have left it. A new folder goes in whole;
+/// a file or a link is copied in; what the turn removed is removed, a folder once it is empty.
+pub(crate) async fn bring_back(
+    turn_folder: &Path,
+    space_folder: &Path,
+    rest: &[RestChange],
+) -> BroughtBack {
+    if rest.is_empty() {
+        return BroughtBack::default();
+    }
+    let (turn_folder, space_folder, rest) = (
+        turn_folder.to_path_buf(),
+        space_folder.to_path_buf(),
+        rest.to_vec(),
+    );
+    tokio::task::spawn_blocking(move || {
+        let lock = match origin_http_server::acquire_workspace_apply_lock_within(
+            &space_folder,
+            SPACE_LOCK_WAIT,
+        ) {
+            Ok(Some(lock)) => lock,
+            _ => {
+                tracing::warn!("the space's folder stayed locked; a turn's other changes stay out");
+                return BroughtBack {
+                    put: Vec::new(),
+                    changed_meanwhile: rest.into_iter().map(|change| change.path).collect(),
+                };
+            }
+        };
+        let brought = bring_back_locked(&turn_folder, &space_folder, &rest);
+        drop(lock);
+        brought
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn bring_back_locked(turn_folder: &Path, space_folder: &Path, rest: &[RestChange]) -> BroughtBack {
+    let mut brought = BroughtBack::default();
+    // Folders the turn made, which went in whole: nothing under them is looked at again.
+    let mut moved_whole: Vec<String> = Vec::new();
+    let under = |path: &str, folders: &[String]| {
+        folders.iter().any(|folder| {
+            path.starts_with(folder.as_str()) && path[folder.len()..].starts_with('/')
+        })
+    };
+    for change in rest.iter().filter(|change| change.left.is_some()) {
+        if under(&change.path, &moved_whole) {
+            continue;
+        }
+        let left = change.left.expect("filtered");
+        let source = turn_folder.join(&change.path);
+        let target = space_folder.join(&change.path);
+        let current = std::fs::symlink_metadata(&target)
+            .ok()
+            .map(|metadata| WalkEntry::of(&metadata));
+        if left.kind == EntryKind::Dir {
+            match current {
+                Some(entry) if entry.kind == EntryKind::Dir => {}
+                None if change.found.is_none() => {
+                    // A folder the turn made: it goes in whole.
+                    if clone_into(&source, &target).is_ok() {
+                        brought.put.push(change.path.clone());
+                        moved_whole.push(change.path.clone());
+                    } else {
+                        brought.changed_meanwhile.push(change.path.clone());
+                    }
+                }
+                _ => brought.changed_meanwhile.push(change.path.clone()),
+            }
+            continue;
+        }
+        let unchanged = match (current, change.found) {
+            (None, None) => true,
+            (Some(current), Some(found)) => current.same_as(&found),
+            _ => false,
+        };
+        if !unchanged || left.kind == EntryKind::Other {
+            brought.changed_meanwhile.push(change.path.clone());
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if replace_with_clone(&source, &target).is_ok() {
+            brought.put.push(change.path.clone());
+        } else {
+            brought.changed_meanwhile.push(change.path.clone());
+        }
+    }
+    // What the turn removed, deepest first, so a folder is empty by the time it goes.
+    let mut removed: Vec<&RestChange> =
+        rest.iter().filter(|change| change.left.is_none()).collect();
+    removed.sort_by(|left, right| right.path.cmp(&left.path));
+    for change in removed {
+        let target = space_folder.join(&change.path);
+        let Some(found) = change.found else {
+            continue;
+        };
+        let current = std::fs::symlink_metadata(&target)
+            .ok()
+            .map(|metadata| WalkEntry::of(&metadata));
+        match current {
+            None => {}
+            Some(current) if current.same_as(&found) => {
+                let gone = if current.kind == EntryKind::Dir {
+                    std::fs::remove_dir(&target)
+                } else {
+                    std::fs::remove_file(&target)
+                };
+                if gone.is_ok() {
+                    brought.put.push(change.path.clone());
+                } else {
+                    brought.changed_meanwhile.push(change.path.clone());
+                }
+            }
+            Some(_) => brought.changed_meanwhile.push(change.path.clone()),
+        }
+    }
+    brought.put.sort();
+    brought.changed_meanwhile.sort();
+    brought
+}
+
+/// `source` cloned to `target`, which must not exist: a whole folder, a file or a link.
+fn clone_into(source: &Path, target: &Path) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    clone_tree(source, target).or_else(|_| copy_plainly(source, target))
+}
+
+/// `source` copied to `target` without a clone: a file or a link; a folder is refused.
+fn copy_plainly(source: &Path, target: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(std::fs::read_link(source)?, target)?;
+        return Ok(());
+    }
+    if metadata.is_file() {
+        std::fs::copy(source, target)?;
+        return Ok(());
+    }
+    bail!("only files and links are copied plainly")
+}
+
+/// `target` replaced by a clone of `source`, a file or a link, through a name of its own beside
+/// it, so the space's folder never holds half of it.
+fn replace_with_clone(source: &Path, target: &Path) -> Result<()> {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let staged = target.with_file_name(format!(".{name}.instafy-turn-{}", Uuid::new_v4()));
+    clone_into(source, &staged)?;
+    if let Err(error) = std::fs::rename(&staged, target) {
+        remove(&staged);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// The name a turn's version of `path` gets beside it when the space's history cannot keep it
+/// (a folder whose origin has no repository): `notes (Claude Code's version).md`, then ` 2` and so
+/// on while the space's folder holds a file of that name.
+pub(crate) fn kept_copy_name(space_folder: &Path, path: &str) -> String {
+    let (dir, name) = match path.rsplit_once('/') {
+        Some((dir, name)) => (format!("{dir}/"), name),
+        None => (String::new(), path),
+    };
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+        _ => (name, String::new()),
+    };
+    for index in 1..100 {
+        let suffix = if index == 1 {
+            "Claude Code's version".to_string()
+        } else {
+            format!("Claude Code's version {index}")
+        };
+        let candidate = format!("{dir}{stem} ({suffix}){extension}");
+        if !space_folder.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!(
+        "{dir}{stem} (Claude Code's version {}){extension}",
+        Uuid::new_v4()
+    )
+}
+
+/// What an earlier process left in `leftover`: when its record says how the turn began, its
+/// changes go into the space's folder unsaved, the files a save sends through `put` (each with
+/// what the turn found there), the files the space changed meanwhile kept through `keep`, and the
+/// rest as [`bring_back`] brings it. The folder is removed afterwards, and with no record it is
+/// removed as it is.
+pub(crate) async fn recover<P, PF, K, KF>(leftover: Leftover, space_folder: &Path, put: P, keep: K)
+where
+    P: FnOnce(Vec<(String, Option<Vec<u8>>)>, BTreeMap<String, Option<String>>) -> PF,
+    PF: std::future::Future<Output = Option<Vec<String>>>,
+    K: FnOnce(PathBuf, Vec<String>) -> KF,
+    KF: std::future::Future<Output = ()>,
+{
+    let Leftover { folder, record } = leftover;
+    let read = tokio::fs::read(&record).await.ok().and_then(|bytes| {
+        serde_json::from_slice::<Record>(&bytes)
+            .ok()
+            .filter(|record| record.version == 1)
+    });
+    if let Some(record) = read
+        && folder.is_dir()
+    {
+        let repo = TurnRepo {
+            git_dir: folder.join(&record.git_dir),
+            work_tree: folder.clone(),
+        };
+        let started = Started {
+            first_tree: record.first_tree,
+            walk: Arc::new(record.walk),
+        };
+        let Some(changes) = changes_in(&repo, &started).await else {
+            tracing::warn!(
+                folder = %folder.display(),
+                "a turn folder a stopped process left could not be read; it stays"
+            );
+            return;
+        };
+        let (files, expected) = unsaved_changes(&folder, &changes.files, &changes.found);
+        if !files.is_empty() {
+            match put(files, expected).await {
+                None => {
+                    tracing::warn!(
+                        folder = %folder.display(),
+                        "a turn folder a stopped process left could not be put into the space's folder; it stays"
+                    );
+                    return;
+                }
+                Some(changed) if !changed.is_empty() => keep(folder.clone(), changed).await,
+                Some(_) => {}
+            }
+        }
+        bring_back(&folder, space_folder, &changes.rest).await;
+        tracing::info!(
+            folder = %folder.display(),
+            "a turn folder a stopped process left was brought into the space's folder"
+        );
+    }
+    remove_in_the_background(folder);
+}
+
+/// The turn's `files` as they are in `folder`, each with what the space's folder must still hold
+/// for it to go in unsaved: its bytes, or `None` for a file the turn removed, and the blob id the
+/// turn found there. Links, folders and unreadable files are left out.
+#[allow(clippy::type_complexity)]
+pub(super) fn unsaved_changes(
+    folder: &Path,
+    files: &[CodexFileDescriptor],
+    found: &BTreeMap<String, BaseEntry>,
+) -> (
+    Vec<(String, Option<Vec<u8>>)>,
+    BTreeMap<String, Option<String>>,
+) {
+    let mut changes = Vec::new();
+    let mut expected = BTreeMap::new();
+    for file in files {
+        let path = file.workspace_path.clone();
+        if found.get(&path).is_some_and(|entry| entry.link) {
+            continue;
+        }
+        let bytes = match std::fs::symlink_metadata(folder.join(&path)) {
+            Ok(metadata) if metadata.is_file() => match std::fs::read(folder.join(&path)) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => continue,
+            },
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        expected.insert(
+            path.clone(),
+            found.get(&path).map(|entry| entry.oid.clone()),
+        );
+        changes.push((path, bytes));
+    }
+    (changes, expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +1476,16 @@ mod tests {
         }
         git_in(folder, &["add", "-A"]);
         git_in(folder, &["commit", "-q", "-m", "first"]);
+    }
+
+    /// A turn folder over `folder` itself, as a test's own: no clone, and nothing removed.
+    fn turn_folder_at(folder: &Path) -> TurnFolder {
+        TurnFolder(Arc::new(Inner {
+            path: folder.to_path_buf(),
+            repo: TurnRepo::of(folder).expect("a repository"),
+            begun: AtomicBool::new(true),
+            done: AtomicBool::new(false),
+        }))
     }
 
     fn paths(files: &[CodexFileDescriptor]) -> Vec<(String, String)> {
@@ -734,81 +1525,155 @@ mod tests {
         IN_USE.lock().remove(&second);
     }
 
-    /// What a turn changed is what differs between the folder's trees as it began and ended:
-    /// edits, new and removed files, a commit the turn made itself, and none of what the
-    /// repository ignores, nor a change made and taken back.
-    #[tokio::test]
-    async fn a_turn_changed_what_differs_between_its_first_and_last_tree() {
+    #[test]
+    fn the_repository_is_the_origins_else_the_folders_own_and_never_a_git_file() {
         let folder = tempfile::tempdir().expect("folder");
+        assert!(TurnRepo::of(folder.path()).is_none(), "no repository");
+        std::fs::create_dir_all(folder.path().join(".git")).expect(".git");
+        assert_eq!(
+            TurnRepo::of(folder.path()).expect("own").git_dir,
+            folder.path().join(".git")
+        );
+        std::fs::create_dir_all(folder.path().join(".instafy/.git")).expect("origin's");
+        assert_eq!(
+            TurnRepo::of(folder.path()).expect("origin's").git_dir,
+            folder.path().join(".instafy/.git")
+        );
+        std::fs::remove_dir_all(folder.path().join(".git")).expect("gone");
+        std::fs::write(folder.path().join(".git"), "gitdir: /elsewhere\n").expect("a git file");
+        assert!(TurnRepo::of(folder.path()).is_none(), "a .git file");
+    }
+
+    /// What a turn changed: the files a save sends are what differs between the folder's trees
+    /// as it began and ended (edits, new and removed files, a commit the turn made itself), and
+    /// everything else (ignored files, a nested repository) is what differs between two walks. A
+    /// `git init` the turn ran changes neither, and the runtime's own files are in neither.
+    #[tokio::test]
+    async fn a_turn_changed_what_differs_between_its_first_and_last_tree_and_walk() {
+        let folder = tempfile::tempdir().expect("folder");
+        let root = folder.path();
         repository(
-            folder.path(),
+            root,
             &[
                 ("README.md", "one\n"),
                 ("gone.md", "bye\n"),
                 ("same.md", "same\n"),
-                (".gitignore", "node_modules/\n"),
+                (".gitignore", "node_modules/\n.env\n"),
             ],
         );
+        std::fs::write(root.join(".env"), "A=1\n").expect("ignored");
         // An edit the person had not saved when the turn began is where the turn starts.
-        std::fs::write(folder.path().join("draft.md"), "draft\n").expect("draft");
-        // The runtime's own files are never read into a tree.
-        std::fs::create_dir_all(folder.path().join(".instafy/agent")).expect("runtime's");
-        std::fs::write(folder.path().join(".instafy/agent/log"), "runtime\n").expect("runtime's");
-        let first = snapshot(folder.path()).await.expect("first tree");
-
-        std::fs::write(folder.path().join("README.md"), "one\ntwo\n").expect("edit");
-        std::fs::remove_file(folder.path().join("gone.md")).expect("remove");
-        std::fs::create_dir_all(folder.path().join("node_modules/x")).expect("ignored");
-        std::fs::write(folder.path().join("node_modules/x/index.js"), "x\n").expect("ignored");
-        std::fs::write(folder.path().join("same.md"), "changed\n").expect("edit");
-        std::fs::write(folder.path().join("same.md"), "same\n").expect("taken back");
-        std::fs::write(folder.path().join("committed.md"), "by the turn\n").expect("new");
-        git_in(folder.path(), &["add", "committed.md"]);
+        std::fs::write(root.join("draft.md"), "draft\n").expect("draft");
+        std::fs::create_dir_all(root.join(".instafy/agent")).expect("runtime's");
+        std::fs::write(root.join(".instafy/agent/log"), "runtime\n").expect("runtime's");
+        // The origin's own repository, a clone of the folder's, as Desktop keeps it.
+        let origin = root.join(".instafy/.git");
         git_in(
-            folder.path(),
-            &["commit", "-q", "-m", "the turn's own commit"],
+            root,
+            &["clone", "-q", "--bare", ".", origin.to_str().expect("utf8")],
         );
-        std::fs::write(folder.path().join(".instafy/agent/log"), "runtime, later\n").expect("log");
-        let last = snapshot(folder.path()).await.expect("last tree");
-        assert!(
-            !git_in(folder.path(), &["ls-tree", "-r", "--name-only", &last]).contains(".instafy"),
-            "the runtime's own files stay out"
+        git_in(
+            root,
+            &[
+                "--git-dir",
+                origin.to_str().unwrap(),
+                "config",
+                "core.bare",
+                "false",
+            ],
         );
+        git_in(
+            root,
+            &[
+                "--git-dir",
+                origin.to_str().unwrap(),
+                "--work-tree",
+                ".",
+                "reset",
+                "-q",
+            ],
+        );
+        let turn = turn_folder_at(root);
+        assert_eq!(turn.0.repo.git_dir, origin);
+        let started = turn.begin().await.expect("began");
+        assert!(record_of(root).exists(), "the record is beside the folder");
 
-        let files = changed_files(folder.path(), &first, &last)
-            .await
-            .expect("changes");
+        std::fs::write(root.join("README.md"), "one\ntwo\n").expect("edit");
+        std::fs::remove_file(root.join("gone.md")).expect("remove");
+        std::fs::write(root.join("same.md"), "changed\n").expect("edit");
+        std::fs::write(root.join("same.md"), "same\n").expect("taken back");
+        std::fs::write(root.join(".env"), "A=2\n").expect("ignored edit");
+        std::fs::create_dir_all(root.join("node_modules/x")).expect("ignored");
+        std::fs::write(root.join("node_modules/x/index.js"), "x\n").expect("ignored");
+        std::fs::create_dir_all(root.join("app")).expect("nested");
+        git_in(&root.join("app"), &["init", "-q"]);
+        std::fs::write(root.join("app/page.js"), "page\n").expect("nested file");
+        std::fs::write(root.join(".instafy/agent/log"), "runtime, later\n").expect("log");
+        // The turn's own commit, in its copy of the origin's repository, and a `git init` at the
+        // top, which the turn's reads never follow.
+        std::fs::write(root.join("committed.md"), "by the turn\n").expect("new");
+        git_in(
+            root,
+            &[
+                "--git-dir",
+                origin.to_str().unwrap(),
+                "--work-tree",
+                ".",
+                "add",
+                "committed.md",
+            ],
+        );
+        git_in(
+            root,
+            &[
+                "--git-dir",
+                origin.to_str().unwrap(),
+                "--work-tree",
+                ".",
+                "commit",
+                "-q",
+                "-m",
+                "the turn's own commit",
+            ],
+        );
+        let changes = turn.changes(&started).await.expect("changes");
         assert_eq!(
-            paths(&files),
+            paths(&changes.files),
             vec![
                 ("README.md".to_string(), "changed".to_string()),
                 ("committed.md".to_string(), "created".to_string()),
                 ("gone.md".to_string(), "deleted".to_string()),
             ]
         );
-        // Neither the repository's index nor its HEAD moved for the reads.
-        assert!(git_in(folder.path(), &["status", "--porcelain"]).contains("README.md"));
-
-        let entries = entries_in(
-            folder.path(),
-            &first,
-            &[
-                "README.md".to_string(),
-                "committed.md".to_string(),
-                "draft.md".to_string(),
-            ],
-        )
-        .await
-        .expect("entries");
         assert_eq!(
-            entries.get("README.md").map(|entry| entry.oid.clone()),
+            changes
+                .found
+                .get("README.md")
+                .map(|entry| entry.oid.clone()),
             Some(origin_http_server::workspace_git::blob_oid(b"one\n"))
         );
-        assert_eq!(
-            entries.get("draft.md").map(|entry| entry.oid.clone()),
-            Some(origin_http_server::workspace_git::blob_oid(b"draft\n"))
+        let rest: Vec<&str> = changes
+            .rest
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert!(rest.contains(&".env"), "{rest:?}");
+        assert!(rest.contains(&"node_modules/x/index.js"), "{rest:?}");
+        assert!(rest.contains(&"app/page.js"), "{rest:?}");
+        assert!(rest.contains(&"app/.git"), "{rest:?}");
+        assert!(
+            !rest.iter().any(|path| path.starts_with(".instafy")),
+            "{rest:?}"
         );
-        assert!(!entries.contains_key("committed.md"));
+        assert!(
+            !rest.contains(&"README.md") && !rest.contains(&"same.md"),
+            "{rest:?}"
+        );
+        turn.done();
+        assert!(
+            !record_of(root).exists(),
+            "the record goes once the changes are in"
+        );
     }
 
     /// A save merges: a path the space still holds as the turn found it takes the turn's
@@ -816,7 +1681,7 @@ mod tests {
     /// merges three ways, and lines both changed, or a file one side removed, are kept aside.
     #[tokio::test]
     async fn a_turn_folders_save_merges_into_the_space() {
-        let turn = tempfile::tempdir().expect("turn");
+        let turn_dir = tempfile::tempdir().expect("turn");
         let space = tempfile::tempdir().expect("space");
         let shared = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
         let files = [
@@ -827,24 +1692,22 @@ mod tests {
             ("removed.md", "here\n"),
             ("binary.bin", "a\n"),
         ];
-        repository(turn.path(), &files);
+        repository(turn_dir.path(), &files);
         for (path, content) in files {
             std::fs::write(space.path().join(path), content).expect("space");
         }
-        let first = snapshot(turn.path()).await.expect("first");
+        let turn = turn_folder_at(turn_dir.path());
+        let started = turn.begin().await.expect("began");
 
         // The turn's changes.
-        std::fs::write(turn.path().join("plain.md"), "plain, by the turn\n").expect("turn");
-        std::fs::write(turn.path().join("same.md"), "same, by both\n").expect("turn");
-        std::fs::write(
-            turn.path().join("both.md"),
-            shared.replace("two\n", "TWO, by the turn\n"),
-        )
-        .expect("turn");
-        std::fs::write(turn.path().join("clash.md"), "the turn's\n").expect("turn");
-        std::fs::write(turn.path().join("removed.md"), "edited by the turn\n").expect("turn");
-        std::fs::write(turn.path().join("binary.bin"), b"\0turn").expect("turn");
-        std::fs::write(turn.path().join("new.md"), "new\n").expect("turn");
+        let at = |path: &str| turn_dir.path().join(path);
+        std::fs::write(at("plain.md"), "plain, by the turn\n").expect("turn");
+        std::fs::write(at("same.md"), "same, by both\n").expect("turn");
+        std::fs::write(at("both.md"), shared.replace("two\n", "TWO, by the turn\n")).expect("turn");
+        std::fs::write(at("clash.md"), "the turn's\n").expect("turn");
+        std::fs::write(at("removed.md"), "edited by the turn\n").expect("turn");
+        std::fs::write(at("binary.bin"), b"\0turn").expect("turn");
+        std::fs::write(at("new.md"), "new\n").expect("turn");
         // Meanwhile, in the space (another turn's save, the person's own edit).
         std::fs::write(space.path().join("same.md"), "same, by both\n").expect("space");
         std::fs::write(
@@ -856,18 +1719,8 @@ mod tests {
         std::fs::remove_file(space.path().join("removed.md")).expect("space");
         std::fs::write(space.path().join("binary.bin"), b"\0space").expect("space");
 
-        let last = snapshot(turn.path()).await.expect("last");
-        let changed = changed_files(turn.path(), &first, &last)
-            .await
-            .expect("changed");
-        let changed_paths: Vec<String> = changed
-            .iter()
-            .map(|file| file.workspace_path.clone())
-            .collect();
-        let base = entries_in(turn.path(), &first, &changed_paths)
-            .await
-            .expect("base");
-        let plan = plan_merge(turn.path(), space.path(), &changed, &base, "alpha")
+        let changes = turn.changes(&started).await.expect("changes");
+        let plan = plan_merge(&turn, space.path(), &changes.files, &changes.found, "alpha")
             .await
             .expect("plan");
 
@@ -906,34 +1759,26 @@ mod tests {
                 ("plain.md".to_string(), Some(blob(b"plain\n"))),
             ])
         );
+        turn.done();
     }
 
     /// A turn that removes a file the space still holds as the turn found it removes it there,
     /// and one the space removed too sends nothing.
     #[tokio::test]
     async fn a_removal_goes_while_the_space_holds_what_the_turn_found() {
-        let turn = tempfile::tempdir().expect("turn");
+        let turn_dir = tempfile::tempdir().expect("turn");
         let space = tempfile::tempdir().expect("space");
-        repository(turn.path(), &[("a.md", "a\n"), ("b.md", "b\n")]);
+        repository(turn_dir.path(), &[("a.md", "a\n"), ("b.md", "b\n")]);
         for (path, content) in [("a.md", "a\n"), ("b.md", "b\n")] {
             std::fs::write(space.path().join(path), content).expect("space");
         }
-        let first = snapshot(turn.path()).await.expect("first");
-        std::fs::remove_file(turn.path().join("a.md")).expect("turn");
-        std::fs::remove_file(turn.path().join("b.md")).expect("turn");
+        let turn = turn_folder_at(turn_dir.path());
+        let started = turn.begin().await.expect("began");
+        std::fs::remove_file(turn_dir.path().join("a.md")).expect("turn");
+        std::fs::remove_file(turn_dir.path().join("b.md")).expect("turn");
         std::fs::remove_file(space.path().join("b.md")).expect("space");
-        let last = snapshot(turn.path()).await.expect("last");
-        let changed = changed_files(turn.path(), &first, &last)
-            .await
-            .expect("changed");
-        let base = entries_in(
-            turn.path(),
-            &first,
-            &["a.md".to_string(), "b.md".to_string()],
-        )
-        .await
-        .expect("base");
-        let plan = plan_merge(turn.path(), space.path(), &changed, &base, "beta")
+        let changes = turn.changes(&started).await.expect("changes");
+        let plan = plan_merge(&turn, space.path(), &changes.files, &changes.found, "beta")
             .await
             .expect("plan");
         assert_eq!(plan.deletes, ["a.md"]);
@@ -945,14 +1790,110 @@ mod tests {
                 Some(origin_http_server::workspace_git::blob_oid(b"a\n"))
             )])
         );
+        turn.done();
+    }
+
+    /// What a save never sends goes into the space's folder as it is, where the space still holds
+    /// what the turn found: an edit of an ignored file, a new folder whole, a removal; a file the
+    /// space changed meanwhile stays as the space has it.
+    #[tokio::test]
+    async fn the_rest_of_a_turns_changes_goes_where_the_space_holds_what_the_turn_found() {
+        let turn = tempfile::tempdir().expect("turn");
+        let space = tempfile::tempdir().expect("space");
+        for root in [turn.path(), space.path()] {
+            std::fs::create_dir_all(root.join("cache")).expect("dir");
+            std::fs::write(root.join(".env"), "A=1\n").expect("env");
+            std::fs::write(root.join("cache/old"), "old\n").expect("old");
+            std::fs::write(root.join("local.txt"), "mine\n").expect("local");
+        }
+        // The two folders as a clone keeps them: the same times.
+        for path in [".env", "cache/old", "local.txt"] {
+            let time = std::fs::metadata(space.path().join(path))
+                .expect("time")
+                .modified()
+                .expect("modified");
+            let file = std::fs::File::options()
+                .write(true)
+                .open(turn.path().join(path))
+                .expect("open");
+            file.set_modified(time).expect("set");
+        }
+        let first = walk(turn.path());
+        std::fs::write(turn.path().join(".env"), "A=2\n").expect("turn");
+        std::fs::create_dir_all(turn.path().join("node_modules/lodash")).expect("turn");
+        std::fs::write(turn.path().join("node_modules/lodash/index.js"), "x\n").expect("turn");
+        std::fs::remove_file(turn.path().join("cache/old")).expect("turn");
+        std::fs::write(turn.path().join("local.txt"), "the turn's\n").expect("turn");
+        std::fs::write(space.path().join("local.txt"), "the person's\n").expect("space");
+        let last = walk(turn.path());
+        let rest = rest_of(&first, &last, &HashSet::new());
+        let brought = bring_back(turn.path(), space.path(), &rest).await;
+        assert_eq!(
+            std::fs::read_to_string(space.path().join(".env"))
+                .ok()
+                .as_deref(),
+            Some("A=2\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(space.path().join("node_modules/lodash/index.js"))
+                .ok()
+                .as_deref(),
+            Some("x\n")
+        );
+        assert!(!space.path().join("cache/old").exists());
+        assert_eq!(
+            std::fs::read_to_string(space.path().join("local.txt"))
+                .ok()
+                .as_deref(),
+            Some("the person's\n")
+        );
+        assert_eq!(brought.changed_meanwhile, ["local.txt"]);
+        assert!(brought.put.contains(&".env".to_string()), "{brought:?}");
+        assert!(
+            brought.put.contains(&"node_modules".to_string()),
+            "{brought:?}"
+        );
+        assert!(
+            brought.put.contains(&"cache/old".to_string()),
+            "{brought:?}"
+        );
+    }
+
+    #[test]
+    fn a_kept_copy_takes_a_name_the_folder_does_not_hold() {
+        let space = tempfile::tempdir().expect("space");
+        assert_eq!(
+            kept_copy_name(space.path(), "docs/notes.md"),
+            "docs/notes (Claude Code's version).md"
+        );
+        std::fs::create_dir_all(space.path().join("docs")).expect("docs");
+        std::fs::write(
+            space.path().join("docs/notes (Claude Code's version).md"),
+            "x",
+        )
+        .expect("x");
+        assert_eq!(
+            kept_copy_name(space.path(), "docs/notes.md"),
+            "docs/notes (Claude Code's version 2).md"
+        );
+        assert_eq!(
+            kept_copy_name(space.path(), "Makefile"),
+            "Makefile (Claude Code's version)"
+        );
+        assert_eq!(
+            kept_copy_name(space.path(), ".env"),
+            ".env (Claude Code's version)"
+        );
     }
 
     /// On macOS a turn folder is a clone of the whole space folder, ignored files and the
-    /// repository included, named for its agent, and gone once dropped; the place refuses a
-    /// root inside the space's folder.
+    /// repository included, named for its agent, its repository told to keep its stat cache, and
+    /// gone once done and dropped; the place refuses a root inside the space's folder. A folder a
+    /// process left is taken as a leftover, and `recover` brings its changes into the space's
+    /// folder and removes it.
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn a_turn_folder_is_a_clone_of_the_whole_space_folder() {
+    async fn a_turn_folder_is_a_clone_of_the_whole_space_folder_and_a_leftover_is_recovered() {
         let workspace = tempfile::tempdir().expect("workspace");
         let space = workspace.path().join("space");
         std::fs::create_dir_all(&space).expect("space");
@@ -964,7 +1905,8 @@ mod tests {
             // Not an APFS volume here: nothing to clone on.
             return;
         };
-        let folder = TurnFolder::clone_of(&place, "agent-1")
+        let repo = TurnRepo::of(&space).expect("a repository");
+        let folder = TurnFolder::clone_of(&place, &repo, "agent-1")
             .await
             .expect("clone");
         let path = folder.path().to_path_buf();
@@ -977,13 +1919,53 @@ mod tests {
             Some("LOCAL=1\n")
         );
         assert_eq!(git_in(&path, &["status", "--porcelain"]), "");
+        assert_eq!(
+            git_in(&path, &["config", "core.checkStat"]).trim(),
+            "minimal"
+        );
+
+        // A turn that began and was left, as a process that stopped mid-turn leaves it.
+        let started = folder.begin().await.expect("began");
+        std::fs::write(path.join("README.md"), "one, by the turn\n").expect("turn");
+        std::fs::write(path.join(".env"), "LOCAL=2\n").expect("turn");
+        drop(started);
         drop(folder);
-        for _ in 0..50 {
+        assert!(path.exists(), "a turn whose changes never went in stays");
+        IN_USE.lock().remove(&path);
+        let leftovers = place.leftovers();
+        assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+        let put_space = space.clone();
+        recover(
+            leftovers.into_iter().next().expect("one"),
+            &space,
+            |files, _expected| async move {
+                for (path, bytes) in files {
+                    if let Some(bytes) = bytes {
+                        std::fs::write(put_space.join(path), bytes).expect("put");
+                    }
+                }
+                Some(Vec::new())
+            },
+            |_, _| async {},
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(space.join("README.md"))
+                .ok()
+                .as_deref(),
+            Some("one, by the turn\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(space.join(".env")).ok().as_deref(),
+            Some("LOCAL=2\n")
+        );
+        for _ in 0..100 {
             if !path.exists() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!path.exists());
+        assert!(!record_of(&path).exists());
     }
 }
