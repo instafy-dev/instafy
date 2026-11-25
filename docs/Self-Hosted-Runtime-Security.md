@@ -110,6 +110,13 @@ lease metrics, messages, metadata, previews and routing fields remain omitted; t
 owner receives the original event. This keeps shared chats up to date without granting
 runtime discovery or control.
 
+A person's computers (`user_computers`, [Local-engine turns](Local-Engine-Turns.md) 11.23) are
+theirs alone. Only their own session lists, renames, pauses or forgets them, and the computers'
+names, presence, the spaces they run and why they did or did not start one go to no teammate,
+who sees only that a turn waits for its owner's computer. A computer reports the runtime it runs,
+and the controller keeps it only when it is a private runtime attested to that person; nothing in
+the record lets a runtime lease a job.
+
 Raw runtime routing state is controller-only. Authenticated project members have
 no direct database privileges on runtimes, runtime leases/events, tunnel grants,
 origins, presence, origin instances, or workspace commit receipts; otherwise a

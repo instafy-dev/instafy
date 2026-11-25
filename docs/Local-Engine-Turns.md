@@ -1834,6 +1834,7 @@ Phase 8 (section 9) still turns it on, with its gates as they stand. Its live su
 - **D51. Which sign-in ran a turn** shows only to its owner, by the name they gave it (11.19, 11.20).
 - **D52. The capability, version 2.** `claudeCode` reports the program once and each login apart, and a runtime that reports version 1 takes no Claude Code turn (11.19).
 - **D53. A message to several agents, in turns.** A person's message that names several of their agents and may change files, with no write scope for any of them, gives each agent's turn the whole space, whatever AI it uses, and runs the turns one after another, in the order the message names them (11.22). Running them at once stays D47's follow-up.
+- **D54. Your computers.** The controller keeps a person's computers, each with the Claude Code logins ready there, what it runs and whether it is on, and tells each one of the spaces where a turn of the person's waits that its logins could run, so Desktop can start that space by itself. Nothing about a computer ever lets a runtime lease a turn (11.23).
 
 ### 11.19 Several Claude Code logins
 
@@ -1983,6 +1984,46 @@ A message that gives any of its agents a write scope keeps the owned-path rules,
 - Studio's line and liveness.
 
 The first runs used its first cut, whose `after_job_id` named only the job before. A review then found that a middle turn stopped while it waited let the next start beside the first, and the column became the list.
+
+### 11.23 Your computers
+
+Decided by the owner on 2026-11-25: a person who sends "@bot how are you?" to their own Claude Code agent from the web, a phone or another computer should reach whichever of their Macs is on with Instafy Desktop and has that login, "same as how runtimes work". Until now a turn waited until Desktop happened to run that exact space (11.7, D44), and no client could tell whether the Mac was on. This section adds the computer layer (D54). It ships in steps; this step is the controller's, dark behind `CLAUDE_CODE_LANE_USER_IDS` like the rest of the lane.
+
+**The turn's path does not change.** Admission (L1-L3), the unpinned lane job, the lease clause (`lane_turn_runs_on!`, `lane_job_login!`), runtime-agent's own check of each job, the run-once sweeps and `agent_jobs_engine_check` stay the authority. The new layer only:
+- tells the person's computer which of their spaces holds a waiting turn it could run;
+- lets the computer say it is starting that space, so their other computers leave it alone;
+- records whether each computer is on, what it runs and why it did not start a space, for every client of the person's.
+
+**The record** (`user_computers`, RC/computers.rs). One row per computer of a person's, keyed by Desktop's own id for the computer (`desktop-<uuid>`), at most 10 a person; a computer unseen for 30 days is forgotten when they add another. Controller only, like `claude_code_logins`: RLS on, only the service role has a policy. It holds:
+- a label, which Desktop's first report sets and only the person changes after, its platform and Desktop version, and whether this Desktop starts spaces by itself (`startsSpaces`);
+- `logins`: the ids of the person's Claude Code logins ready there, intersected with their own `claude_code_logins`. Never a folder, path, account or sign-in: a report's other fields are dropped before anything is stored;
+- the runtime Desktop runs now and its space, kept only for a private runtime attested to the person and not a Personal Browser runtime;
+- a claim of a space it is starting, for 2 minutes, and a failed start, which keeps that computer off the space for 10 minutes;
+- `decisions`: at most 20 `{projectId, reason}`, why it did or did not start a space where a turn waited. The reasons are a fixed list: `starting`, `runs_here`, `busy`, `in_use`, `no_working_copy`, `no_access`, `no_git_remote`, `desktop_update` and `failed`;
+- `status`, `available` or `paused`: the person's own stop, from any client;
+- when it was last seen, and when and why it said it went offline (`quit` or `sleep`). A computer is online while its last poll is at most 45 s old and it has not said it went offline since.
+
+**The routes** serve a person's own session only (`require_user_session`): the service role and job, runtime and origin tokens get 401. Another person's computer is never found (404).
+- `GET /me/computers` lists them, to their own person only.
+- `PATCH /me/computers/:id` renames one or pauses and resumes it, and `DELETE /me/computers/:id` forgets one. Both work whether or not the switch covers the person.
+- `POST /me/computers/:id/offline {reason}` says it is going to sleep or quitting, so it reads offline at once, and drops its claim.
+- `POST /me/computers/poll` and `POST /me/computers/:id/claim` need the switch to cover the person (403 `claude_code_turn_not_allowed`).
+
+**The poll** is the computer's heartbeat and its wait for work. It records the report first, then answers with:
+- `wanted`: the spaces where the person's own queued, never-leased Claude Code turns wait, oldest first, one entry per space and at most 5, ids only, never the turn's words: `{projectId, loginId, waitingSince}`. A turn is wanted only when the login a lease would pick for it now (`lane_job_login!`) is one of this computer's, it waits for no earlier turn (`waits_for_an_earlier_turn!`, 11.22), the person may still write to the space, none of their other online computers holds a claim on the space, and the space did not just fail to start here. A paused computer is told of nothing.
+- `running`: the Claude Code turn its runtime runs now, if any.
+
+With `waitMs` (at most 20 s) the poll is held, with no pool connection, as a lease poll is, until the answer differs from what the computer says it already knows (`known`, `knownRunning`). It re-checks every 5 s, and at once when dispatch queues a turn of the person's: after its commit, dispatch publishes `computers.wanted` to that person, with the space. The event wakes their computers' held polls through a per-person waker on each node, carried across nodes by the bus, and reaches only that person's event streams on that space. A pause, a forget, an offline and a claim publish it too.
+
+**The claim.** A computer claims a space before it starts it. The claim is a conditional update under a per-person lock: 409 `computer_claim_taken` when another online computer of the person's holds it, and 409 `computer_paused` for a paused computer. A failed start reports its reason instead (`failed`, `no_access`, `no_git_remote` or `no_working_copy`), which drops the claim and keeps this computer off the space for 10 minutes, so another of the person's computers may take it.
+
+**What it never does.** The record never makes a runtime eligible to lease: the lease reads the runtime's attested capability alone, and a computer that names a runtime with no Claude Code makes it lease nothing. A forged row, which needs the person's own session, can only delay their own turns or start their own spaces where they may write. No Claude sign-in, folder or path is read, stored or forwarded; model traffic still goes from the person's own `claude` straight to Anthropic; and presence and wake are outbound HTTPS from the computer, with no tunnel and no relay.
+
+**One rule for ready logins.** `claude_code_lane::ready_logins_in` returns the logins on which one of the person's runtimes in a space could take a turn now, by the lease clause's runtime conditions. An evaluation's `a_computer_is_ready` (D38) is a membership test on it, so evaluations and computers read one rule.
+
+**Migrations.** `20261125120000_user_computers.sql` adds the table; `20261125120002_agent_jobs_waiting_claude_code_turn_idx.sql`, in its own file, adds the partial index the poll reads by person (`(payload ->> 'user_id'), created_at, id` where `engine is not null and status = 'queued'`). Both are additive.
+
+**Next steps**, each in its own change: Desktop's consent to start spaces by itself and its window that hides on close; Studio's bridge in Desktop that polls, claims and starts a space; the list of a person's computers and waiting lines that name them, for their owner only; and a turn whose computer is away running on the agent's backup AI.
 
 ---
 

@@ -284,6 +284,7 @@ where
         .merge(crate::agent::router())
         .merge(crate::ai_agents::router())
         .merge(crate::claude_code_logins::router())
+        .merge(crate::computers::router())
         .merge(crate::automations::router())
         .merge(crate::device_grants::router())
         .merge(crate::secrets::router())
@@ -7194,3 +7195,8 @@ fn a_target_passes_only_as_its_owners_own_turn_on_the_switch() {
 /// harness.
 #[path = "tests_backup_ais.rs"]
 mod backup_ais;
+
+/// Your computers (docs/Local-Engine-Turns.md 11.23), on this file's space and
+/// harness.
+#[path = "tests_computers.rs"]
+mod computers;

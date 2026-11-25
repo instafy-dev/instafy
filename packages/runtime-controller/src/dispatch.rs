@@ -3116,6 +3116,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
     // alert reports them as retargeted with the jobs it unpins itself.
     let mut unpinned_job_ids: Vec<Uuid> = Vec::new();
     let mut primary_job_id: Option<Uuid> = None;
+    // Whether this dispatch queued a Claude Code turn, which its person's
+    // computers are told of once it commits (crate::computers).
+    let mut queued_lane_turn = false;
     let mut dispatches: Vec<(Uuid, Option<Uuid>, Option<JsonValue>, Option<JsonValue>)> =
         Vec::new();
 
@@ -3395,6 +3398,7 @@ pub(crate) async fn process_dispatch_prompt_timed(
                 .cloned(),
         ));
         if let Some(job_uuid) = job_id {
+            queued_lane_turn |= target.claude_code;
             if primary_job_id.is_none() {
                 primary_job_id = Some(job_uuid);
             }
@@ -3414,6 +3418,12 @@ pub(crate) async fn process_dispatch_prompt_timed(
     let committed = Instant::now();
     let committed_at = Utc::now();
     timings.transaction = Some(committed.duration_since(transaction_started));
+    // A lane job is its dispatch's own person's (claude_code_lane::check_target):
+    // wake their computers' held polls now, on every node, rather than at
+    // their next re-check (docs/Local-Engine-Turns.md 11.23).
+    if let (true, Some(person)) = (queued_lane_turn, context.user_id) {
+        crate::computers::announce(&state.events, Some(project.id), person);
+    }
 
     if let Some(user_message) = user_message.as_ref() {
         // A reused record-then-dispatch row is published again so clients
