@@ -1294,7 +1294,9 @@ fn clone_into(source: &Path, target: &Path) -> Result<()> {
     clone_tree(source, target).or_else(|_| copy_plainly(source, target))
 }
 
-/// `source` copied to `target` without a clone: a file or a link; a folder is refused.
+/// `source` copied to `target` without a clone, where a clone cannot be made (another volume, a
+/// file system without clones): a file, a link, or a folder with everything under it. What is
+/// neither (a socket, a pipe) is left out, as nothing of a turn's lives in one.
 fn copy_plainly(source: &Path, target: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
@@ -1306,7 +1308,15 @@ fn copy_plainly(source: &Path, target: &Path) -> Result<()> {
         std::fs::copy(source, target)?;
         return Ok(());
     }
-    bail!("only files and links are copied plainly")
+    if metadata.is_dir() {
+        std::fs::create_dir(target)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_plainly(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    Ok(())
 }
 
 /// `target` replaced by a clone of `source`, a file or a link, through a name of its own beside
@@ -1856,6 +1866,37 @@ mod tests {
         assert!(
             brought.put.contains(&"cache/old".to_string()),
             "{brought:?}"
+        );
+    }
+
+    /// Where no clone can be made, a folder is copied with everything under it, links as links.
+    #[test]
+    fn a_folder_is_copied_plainly_where_no_clone_can_be_made() {
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("source");
+        std::fs::create_dir_all(source.join("lodash/lib")).expect("dirs");
+        std::fs::write(source.join("lodash/index.js"), "x\n").expect("file");
+        std::fs::write(source.join("lodash/lib/a.js"), "a\n").expect("file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("index.js", source.join("lodash/main.js")).expect("link");
+        let target = root.path().join("target");
+        copy_plainly(&source, &target).expect("copied");
+        assert_eq!(
+            std::fs::read_to_string(target.join("lodash/index.js"))
+                .ok()
+                .as_deref(),
+            Some("x\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("lodash/lib/a.js"))
+                .ok()
+                .as_deref(),
+            Some("a\n")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(target.join("lodash/main.js")).ok(),
+            Some(PathBuf::from("index.js"))
         );
     }
 
