@@ -105,6 +105,7 @@ mod stopped_change;
 pub(crate) mod stopped_turn;
 mod turn_baseline;
 mod turn_continuation;
+pub(crate) mod turn_folder;
 #[cfg(test)]
 mod turn_reading_tests;
 pub(crate) mod user_input_request;
@@ -275,6 +276,12 @@ pub struct JobProcessor {
     /// That origin's put-back of a stopped turn's unsaved change, set and
     /// cleared with it (see `stopped_change`).
     unsaved_put_back: Mutex<Option<crate::origin::UnsavedPutBack>>,
+    /// That origin's hold on a Claude Code turn's folder of its own, set and cleared with it
+    /// (`turn_folder`, docs/Local-Engine-Turns.md 11.23).
+    turn_folders: Mutex<Option<origin_http_server::server::TurnFolders>>,
+    /// Where this runtime's space's turn folders go, once it was asked: `None` when a turn
+    /// folder cannot be a clone of the space's folder here (`turn_folder::TurnFolderPlace`).
+    turn_folder_place: std::sync::OnceLock<Option<turn_folder::TurnFolderPlace>>,
     isolated_workers: isolated_worker::IsolatedWorkerSettings,
     isolated_apply: AsyncMutex<()>,
     /// The executable that serves a granted turn's `provider-mcp`: this runtime-agent's own
@@ -6761,6 +6768,8 @@ impl JobProcessor {
             controller_tokens,
             local_origin_sync: Mutex::new(None),
             unsaved_put_back: Mutex::new(None),
+            turn_folders: Mutex::new(None),
+            turn_folder_place: std::sync::OnceLock::new(),
             isolated_workers: isolated_worker::IsolatedWorkerSettings::from_env(),
             isolated_apply: AsyncMutex::new(()),
             provider_mcp_program: None,
@@ -6870,6 +6879,42 @@ impl JobProcessor {
 
     fn unsaved_put_back(&self) -> Option<crate::origin::UnsavedPutBack> {
         self.unsaved_put_back.lock().clone()
+    }
+
+    /// Publish (or clear, with None) the locally hosted origin's hold on a Claude Code turn's
+    /// folder of its own (`turn_folder`).
+    pub fn set_turn_folders(&self, value: Option<origin_http_server::server::TurnFolders>) {
+        *self.turn_folders.lock() = value;
+    }
+
+    fn turn_folders(&self) -> Option<origin_http_server::server::TurnFolders> {
+        self.turn_folders.lock().clone()
+    }
+
+    /// Where this runtime's space's turn folders go, when a turn folder can be a clone of the
+    /// space's folder here; worked out once, which removes what an earlier process left there.
+    fn turn_folder_place(&self) -> Option<&turn_folder::TurnFolderPlace> {
+        self.turn_folder_place
+            .get_or_init(|| {
+                let project_id = self.config.project_id;
+                turn_folder::TurnFolderPlace::of(
+                    &self.config.workspace_root,
+                    &self.config.project_workspace_dir(&project_id),
+                    project_id,
+                )
+            })
+            .as_ref()
+    }
+
+    /// How many Claude Code turns this runtime runs at once (docs/Local-Engine-Turns.md 11.23,
+    /// D54): runtime-contracts' `MAX_TURNS_AT_ONCE` while it can give each a folder of its own,
+    /// with its own origin running in this process, and 1 otherwise.
+    pub(crate) fn turns_at_once(&self) -> u64 {
+        if self.turn_folders().is_some() && self.turn_folder_place().is_some() {
+            runtime_contracts::claude_code_lane::MAX_TURNS_AT_ONCE
+        } else {
+            1
+        }
     }
 
     /// The rolling saves of a write job, when it takes them (see

@@ -1557,6 +1557,9 @@ async fn idle_lease_poll_finds_no_work(
                 crate::claude_code_lane::lane_turn_runs_on!("r"),
                 "
                           )
+                          and (aj.engine is not null or not ",
+                crate::claude_code_lane::holds_a_lane_turn!("r.id"),
+                ")
                     ) as has_queued_work
              from runtimes r
              join projects p on p.id = r.project_id
@@ -5243,14 +5246,13 @@ pub(crate) async fn lease_next_agent_job(
                   -- own in its space: a private runtime the controller
                   -- attested as theirs, with the `claudeCode` capability of
                   -- version 2 registration attested as ready on the turn's
-                  -- Claude Code login. It waits, queued, until one is, while
-                  -- another turn runs on that login, and while this runtime
-                  -- runs another: one runs at a time on each login and on
-                  -- each computer, and turns on a person's other logins run
-                  -- meanwhile on their other computers
+                  -- Claude Code login. It waits, queued, until one is, and
+                  -- while this runtime runs as many as it attests it runs at
+                  -- once, on any of its logins
                   -- (`claude_code_lane::lane_turn_runs_on`,
-                  -- docs/Local-Engine-Turns.md 11.7, 11.19). A hosted runtime
-                  -- has no owner filter below, so this is what keeps it out.
+                  -- docs/Local-Engine-Turns.md 11.7, 11.19, 11.23). A hosted
+                  -- runtime has no owner filter below, so this is what keeps
+                  -- it out.
                   and (
                         aj.engine is null
                         or exists (
@@ -5260,6 +5262,9 @@ pub(crate) async fn lease_next_agent_job(
                                and ", crate::claude_code_lane::lane_turn_runs_on!("lane_runtime"), "
                         )
                   )
+                  -- A runtime running Claude Code turns takes no other work
+                  -- meanwhile (`claude_code_lane::holds_a_lane_turn`, D54).
+                  and (aj.engine is not null or not ", crate::claude_code_lane::holds_a_lane_turn!("$2"), ")
                   and ($11::bool or coalesce(aj.agent_role, aj.payload #>> '{metadata,multiAgentPlan,role}', '') <> 'worker')
                   -- A plan agent waits while its AI upstream is paced
                   -- (`upstream_pacing`).
@@ -5496,9 +5501,8 @@ pub(crate) async fn lease_next_agent_job(
                  active_input_ready_turn_id = null,
                  heartbeat_at = statement_timestamp(),
                  payload = aj.payload - 'requeuedAt' - 'requeuedReason',
-                 -- The login a local-engine turn runs on, which
-                 -- agent_jobs_one_running_claude_code_login_turn_idx holds to
-                 -- one turn at a time; none for any other job.
+                 -- The login a local-engine turn runs on; none for any other
+                 -- job.
                  claude_code_login_id = candidate.lane_login_id
              from candidate
              where aj.id = candidate.id
@@ -5528,19 +5532,7 @@ pub(crate) async fn lease_next_agent_job(
             ],
         )
         .await
-        .map_err(|error| {
-            // Two computers leased waiting local-engine turns on the same
-            // Claude Code login at once, and the one-running-turn index
-            // refused the second (crate::claude_code_lane). The lease's
-            // transaction is spent, so this poll takes nothing and fails,
-            // and the runtime polls again.
-            if crate::claude_code_lane::is_second_running_turn(&error) {
-                return internal_error(
-                    "another Claude Code turn on this login started meanwhile",
-                );
-            }
-            internal_error(format!("failed to lease job: {error:?}"))
-        })?;
+        .map_err(|error| internal_error(format!("failed to lease job: {error:?}")))?;
 
     let Some(row) = row else {
         return Ok(None);

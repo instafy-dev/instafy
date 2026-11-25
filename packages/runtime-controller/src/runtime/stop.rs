@@ -2713,8 +2713,9 @@ pub(crate) async fn record_failed_claude_code_turn(
     })
 }
 
-/// Fails the local-engine turn (crate::claude_code_lane) `runtime` leased as
-/// `claude_code_machine_stopped`: such a turn runs once, on its person's own
+/// Fails the local-engine turns (crate::claude_code_lane) `runtime` leased, as
+/// many as it ran at once (11.23), as `claude_code_machine_stopped`: such a
+/// turn runs once, on its person's own
 /// computer, so a stop never requeues or moves it. Waiting ones have no pin
 /// and keep waiting for a computer of their person's (11.7); one still pinned
 /// to the stopped runtime, which version 2 never queues, is failed too. Only

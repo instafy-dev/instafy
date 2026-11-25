@@ -7,8 +7,8 @@
 // it, whoever or whatever started them, is checked before anything is
 // written (`claude_code_lane::check_target`). An admitted turn's job waits,
 // unpinned, until one of its person's own computers in the space with Claude
-// Code ready on the turn's Claude Code login leases it, one at a time on each
-// login (11.19). The space and harness are `tests_provider_space.rs`'s,
+// Code ready on the turn's Claude Code login leases it, as many at once as
+// that computer attests (11.19, 11.23). The space and harness are `tests_provider_space.rs`'s,
 // seeded here with a Claude Code agent, `@claude`, and a first Claude Code
 // login ([`first_login_of`]) for the owner and the member, and with their
 // computers, ready on that login. Requires `TEST_DATABASE_URL` like the tests
@@ -148,6 +148,14 @@ fn lane_ready_on(logins: &[Uuid]) -> JsonValue {
         .map(|login| (login.to_string(), json!({ "ready": true })))
         .collect();
     json!({ "claudeCode": { "version": 2, "ready": true, "logins": logins } })
+}
+
+/// [`lane_ready_on`], attesting `turns` as the number of turns the
+/// computer runs at once (`claudeCode.turnsAtOnce`, 11.23).
+fn lane_ready_at_once(logins: &[Uuid], turns: JsonValue) -> JsonValue {
+    let mut capability = lane_ready_on(logins);
+    capability["claudeCode"]["turnsAtOnce"] = turns;
+    capability
 }
 
 /// The capability registration attests for `person`'s lane-ready computer:
@@ -2320,18 +2328,19 @@ async fn a_message_to_several_agents_runs_their_turns_one_after_another() -> any
     .await
 }
 
-/// Two Claude Code agents a message names take turns too, on whichever
-/// computers and logins (docs/Local-Engine-Turns.md 11.22): the later one's
-/// turn waits for the earlier one's, though a computer of the person's is
-/// ready on its own login and runs nothing (D46 and D47 alone would let them
-/// run at once), and goes once the earlier one has ended.
+/// The Claude Code agents a message names run at once (docs/Local-Engine-Turns.md
+/// 11.23, D57): neither job waits for the other and neither run is stamped
+/// as waiting, so two computers of the person's, each ready on its agent's
+/// login, take both turns at once; and a computer that attests 2, ready on
+/// both logins, takes both turns of the next such message itself.
 #[tokio::test]
-async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> anyhow::Result<()> {
+async fn a_messages_claude_code_agents_run_at_once() -> anyhow::Result<()> {
     with_lane(
-        "lane-in-turns-two-logins",
+        "lane-at-once-two-logins",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
+            let first_login = first_login_of(space.owner);
             let second_login = Uuid::new_v4();
             sql(
                 lane.pool(),
@@ -2351,46 +2360,68 @@ async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> an
                 capabilities(Some(space.owner), lane_ready_on(&[second_login])),
             )
             .await?;
-            let (status, response) = lane
-                .send(
-                    &lane.owner(),
-                    lane.chat().await?,
-                    &json!({
-                        "promptText": "@claude fix the build, @worker update the docs",
-                        "intent": "feature",
-                        "metadata": metadata_for(&[CLAUDE, "worker"], json!({})),
-                    }),
-                )
-                .await?;
-            anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
-            let (lane_jobs, others) = lane.jobs_of(&response).await?;
-            assert!(others.is_empty(), "{response}");
-            assert_eq!(lane_jobs.len(), 2, "{response}");
-            let run_of_login = |login: Uuid| {
-                lane_jobs
-                    .iter()
-                    .find(|job| job.claude_code_login_ids == Some(vec![login]))
-                    .and_then(|job| job.run_id)
-                    .expect("a job on the login")
+            let message = || async {
+                let (status, response) = lane
+                    .send(
+                        &lane.owner(),
+                        lane.chat().await?,
+                        &json!({
+                            "promptText": "@claude fix the build, @worker update the docs",
+                            "intent": "feature",
+                            "metadata": metadata_for(&[CLAUDE, "worker"], json!({})),
+                        }),
+                    )
+                    .await?;
+                anyhow::ensure!(status == StatusCode::OK, "{status} {response}");
+                let (lane_jobs, others) = lane.jobs_of(&response).await?;
+                anyhow::ensure!(others.is_empty() && lane_jobs.len() == 2, "{response}");
+                let mut turns = Vec::new();
+                for login in [first_login, second_login] {
+                    let run = lane_jobs
+                        .iter()
+                        .find(|job| job.claude_code_login_ids == Some(vec![login]))
+                        .and_then(|job| job.run_id)
+                        .expect("a job on the login");
+                    let (job, waits_for) = lane.turn_of(run).await?;
+                    anyhow::ensure!(waits_for.is_none(), "{login} waits for {waits_for:?}");
+                    let stamp = lane
+                        .metadata_of("select metadata from runs where id = $1", run)
+                        .await?;
+                    anyhow::ensure!(stamp.get("takesTurns").is_none(), "{stamp}");
+                    let scope = &lane.job(job).await?.payload["metadata"]["writeScope"];
+                    anyhow::ensure!(scope["mode"] == json!("unscoped"), "{scope}");
+                    turns.push(job);
+                }
+                Ok::<_, anyhow::Error>((turns[0], turns[1]))
             };
-            let (claude_job, claude_waits_for) = lane
-                .turn_of(run_of_login(first_login_of(space.owner)))
-                .await?;
-            let (worker_job, worker_waits_for) = lane.turn_of(run_of_login(second_login)).await?;
-            assert_eq!(claude_waits_for, None);
-            assert_eq!(worker_waits_for, Some(vec![claude_job]));
 
-            lane.leases_nothing(lane.second_desktop, "@worker waits for @claude")
-                .await?;
+            // Two computers, each ready on one agent's login, take both turns
+            // at once.
+            let (claude_job, worker_job) = message().await?;
             lane.lease_one(lane.desktop, claude_job).await?;
-            lane.leases_nothing(lane.second_desktop, "@claude's turn runs")
-                .await?;
-            lane.end_job(claude_job).await?;
-            let leased = lane.lease_one(lane.second_desktop, worker_job).await?;
-            assert_eq!(
-                leased["claude_code_login_id"],
-                json!(second_login.to_string())
-            );
+            lane.lease_one(lane.second_desktop, worker_job).await?;
+            lane.end_jobs().await?;
+
+            // One computer that attests 2, ready on both logins, takes both.
+            lane.set_capabilities(
+                lane.second_desktop,
+                capabilities(
+                    Some(space.owner),
+                    lane_ready_at_once(&[first_login, second_login], json!(2)),
+                ),
+            )
+            .await?;
+            let (claude_job, worker_job) = message().await?;
+            let mut leased = Vec::new();
+            for _ in 0..2 {
+                let jobs = lane.lease_jobs(lane.second_desktop, 5).await?;
+                anyhow::ensure!(jobs.len() == 1, "one lane turn a lease: {jobs:?}");
+                leased.push(jobs[0]["id"].clone());
+            }
+            leased.sort_by_key(|id| id.to_string());
+            let mut wanted = vec![json!(claude_job), json!(worker_job)];
+            wanted.sort_by_key(|id| id.to_string());
+            assert_eq!(leased, wanted);
             Ok(())
         },
     )
@@ -2398,9 +2429,12 @@ async fn two_claude_code_agents_a_message_names_take_turns_on_two_logins() -> an
 }
 
 /// A later turn waits for every earlier turn of its message, not just the
-/// one before it (docs/Local-Engine-Turns.md 11.22): with three agents, a
-/// Stop of the middle one while it waits never lets the third start beside
-/// the first, and the third goes once the first has ended.
+/// one before it (docs/Local-Engine-Turns.md 11.22), unless both are Claude
+/// Code turns (11.23, D57). In "@claude …, @worker …, @helper …", @worker's
+/// Claude Code turn waits for nobody and runs beside @claude's, on one
+/// computer that attests 2, while @helper's waits for both: a Stop of
+/// @worker's running turn never lets @helper start beside @claude's, and
+/// @helper goes once @claude's has ended.
 #[tokio::test]
 async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::Result<()> {
     with_lane(
@@ -2408,6 +2442,7 @@ async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::R
         |_, _| {},
         |lane| async move {
             let space = lane.space();
+            let first_login = first_login_of(space.owner);
             let second_login = Uuid::new_v4();
             sql(
                 lane.pool(),
@@ -2424,7 +2459,10 @@ async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::R
             .await?;
             lane.set_capabilities(
                 lane.second_desktop,
-                capabilities(Some(space.owner), lane_ready_on(&[second_login])),
+                capabilities(
+                    Some(space.owner),
+                    lane_ready_at_once(&[first_login, second_login], json!(2)),
+                ),
             )
             .await?;
             let (status, response) = lane
@@ -2432,10 +2470,10 @@ async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::R
                     &lane.owner(),
                     lane.chat().await?,
                     &json!({
-                        "promptText": "@claude fix the build, @helper review the docs, @worker update the changelog",
+                        "promptText": "@claude fix the build, @worker update the changelog, @helper review the docs",
                         "intent": "feature",
                         "runtimeId": lane.desktop.to_string(),
-                        "metadata": metadata_for(&[CLAUDE, "helper", "worker"], json!({})),
+                        "metadata": metadata_for(&[CLAUDE, "worker", "helper"], json!({})),
                     }),
                 )
                 .await?;
@@ -2449,28 +2487,31 @@ async fn a_later_turn_waits_for_every_earlier_turn_of_its_message() -> anyhow::R
                     .and_then(|job| job.run_id)
                     .expect("a job on the login")
             };
-            let (claude_job, claude_waits_for) =
-                lane.turn_of(run_on(first_login_of(space.owner))).await?;
+            let (claude_job, claude_waits_for) = lane.turn_of(run_on(first_login)).await?;
+            let (worker_job, worker_waits_for) = lane.turn_of(run_on(second_login)).await?;
             let (helper_job, helper_waits_for) =
                 lane.turn_of(others[0].run_id.expect("run")).await?;
-            let (worker_job, worker_waits_for) = lane.turn_of(run_on(second_login)).await?;
             assert_eq!(claude_waits_for, None);
-            assert_eq!(helper_waits_for, Some(vec![claude_job]));
-            assert_eq!(worker_waits_for, Some(vec![claude_job, helper_job]));
+            assert_eq!(worker_waits_for, None);
+            assert_eq!(helper_waits_for, Some(vec![claude_job, worker_job]));
 
-            lane.lease_one(lane.desktop, claude_job).await?;
-            // The person stops @helper's turn while it waits, as a Stop of
-            // that one turn cancels it.
+            // Both Claude Code turns run at once on the second desktop.
+            for job in [claude_job, worker_job] {
+                lane.lease_one(lane.second_desktop, job).await?;
+            }
+            // The person stops @worker's turn.
             sql(
                 lane.pool(),
                 "update agent_jobs set status = 'canceled', completed_at = now() where id = $1",
-                &[&helper_job],
+                &[&worker_job],
             )
             .await?;
-            lane.leases_nothing(lane.second_desktop, "@worker still waits for @claude")
+            lane.leases_nothing(lane.desktop, "@helper still waits for @claude")
+                .await?;
+            lane.idles(lane.desktop, "@helper still waits for @claude")
                 .await?;
             lane.end_job(claude_job).await?;
-            lane.lease_one(lane.second_desktop, worker_job).await?;
+            lane.lease_one(lane.desktop, helper_job).await?;
             Ok(())
         },
     )
@@ -3479,71 +3520,103 @@ async fn only_a_ready_computer_of_its_persons_own_leases_a_lane_turn_once() -> a
     .await
 }
 
-/// One lane turn runs at a time on each Claude Code login, on any of its
-/// person's computers (docs/Local-Engine-Turns.md 11.8, 11.19): while one of
-/// the owner's turns runs on their first login on their second computer,
-/// neither computer leases their next on the same login, and the index
-/// refuses a second running one on it; another person's turn runs
-/// meanwhile; and once the first ends, the other computer takes the next.
+/// A Claude Code login runs as many turns at once as the computers running
+/// them allow (docs/Local-Engine-Turns.md 11.23, D54, D56):
+/// - a computer that attests no number runs one turn at a time, and meanwhile
+///   another computer of its person's takes their next turn on the same login;
+/// - a computer that attests 2 runs two at once, and its third waits until one
+///   of them ends;
+/// - a number out of range, or not a whole number, counts as 1;
+/// - a computer running Claude Code turns takes no other work meanwhile, and
+///   the idle poll agrees.
 #[tokio::test]
-async fn one_lane_turn_runs_at_a_time_on_each_login_on_any_of_its_persons_computers(
-) -> anyhow::Result<()> {
+async fn a_login_runs_several_turns_at_once_as_its_computers_allow() -> anyhow::Result<()> {
     with_lane(
-        "lane-one-running",
+        "lane-turns-at-once",
         |_, _| {},
         |lane| async move {
             let space = lane.space();
             let login = first_login_of(space.owner);
             let (_, first) = lane.lane_turn().await?;
-            let (_, next) = lane.lane_turn().await?;
-            // Either computer of the person's takes their oldest waiting turn.
+            let (_, second) = lane.lane_turn().await?;
+            let (_, third) = lane.lane_turn().await?;
+            let (_, fourth) = lane.lane_turn().await?;
+            // The second desktop attests no number: one at a time there.
             lane.lease_one(lane.second_desktop, first).await?;
-            for computer in [lane.desktop, lane.second_desktop] {
-                lane.leases_nothing(computer, "one runs at a time on the login")
+            lane.leases_nothing(
+                lane.second_desktop,
+                "one at a time on a computer that attests no number",
+            )
+            .await?;
+            // The desktop, which attests 2, takes the next two on the same
+            // login meanwhile, and a third waits for one of them.
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready_at_once(&[login], json!(2))),
+            )
+            .await?;
+            lane.lease_one(lane.desktop, second).await?;
+            lane.lease_one(lane.desktop, third).await?;
+            lane.leases_nothing(lane.desktop, "two at once on a computer that attests 2")
+                .await?;
+            let running_on_the_login: i64 = sql_one(
+                lane.pool(),
+                "select count(*) from agent_jobs
+                  where engine = 'claude-code' and status = 'leased'
+                    and claude_code_login_id = $1",
+                &[&login],
+            )
+            .await?;
+            assert_eq!(running_on_the_login, 3, "no limit per login");
+            // Other work for the desktop waits while it runs Claude Code
+            // turns, and its idle poll finds nothing to wait for.
+            let other_work = lane
+                .queue_codex_job(lane.desktop, lane.chat().await?, 0, json!({}))
+                .await?;
+            lane.leases_nothing(lane.desktop, "no other work beside Claude Code turns")
+                .await?;
+            lane.idles(lane.desktop, "the idle poll leaves other work out too")
+                .await?;
+            // A number out of range, or not a whole number, counts as 1.
+            for number in [json!(4), json!(0), json!(2.5), json!("2"), json!(null)] {
+                lane.set_capabilities(
+                    lane.desktop,
+                    capabilities(
+                        Some(space.owner),
+                        lane_ready_at_once(&[login], number.clone()),
+                    ),
+                )
+                .await?;
+                lane.leases_nothing(lane.desktop, &format!("{number} counts as 1"))
                     .await?;
             }
-            assert_eq!(lane.job(next).await?.status, "queued");
-            // The index agrees: a second running turn on the login fails.
-            let refused = sql(
-                lane.pool(),
-                "update agent_jobs set status = 'leased', lease_attempts = 1,
-                        leased_by_runtime_id = $2, leased_at = now(),
-                        lease_expires_at = now() + interval '2 minutes',
-                        claude_code_login_id = $3
-                  where id = $1",
-                &[&next, &lane.desktop, &login],
+            lane.set_capabilities(
+                lane.desktop,
+                capabilities(Some(space.owner), lane_ready_at_once(&[login], json!(2))),
             )
-            .await
-            .expect_err("a second running turn on the login");
-            let refused = refused
-                .downcast_ref::<tokio_postgres::Error>()
-                .expect("a database error");
-            assert!(
-                claude_code_lane::is_second_running_turn(refused),
-                "{refused}"
-            );
-            // Another person's turn runs meanwhile, on their own login.
-            let member_turn = lane
-                .admitted_as(
-                    &lane.token(space.member),
-                    lane.chat().await?,
-                    &lane_send(lane_metadata(json!({}))),
-                )
-                .await?;
-            let leased = lane.lease_one(lane.member_desktop, member_turn).await?;
-            assert_eq!(
-                leased["claude_code_login_id"],
-                json!(first_login_of(space.member).to_string())
-            );
-            // The first ends: the other computer takes the next.
-            lane.harness
-                .complete(
-                    lane.second_desktop,
-                    first,
-                    json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
-                )
-                .await?;
-            lane.lease_one(lane.desktop, next).await?;
+            .await?;
+            // One of the desktop's turns ends: it takes the fourth, and then
+            // the other work only once its last Claude Code turn has ended.
+            for (computer, job) in [(lane.desktop, second), (lane.second_desktop, first)] {
+                lane.harness
+                    .complete(
+                        computer,
+                        job,
+                        json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                    )
+                    .await?;
+            }
+            lane.lease_one(lane.desktop, fourth).await?;
+            for job in [third, fourth] {
+                lane.harness
+                    .complete(
+                        lane.desktop,
+                        job,
+                        json!({ "outcome": "succeeded", "summary": "Fixed the build." }),
+                    )
+                    .await?;
+            }
+            lane.lease_one(lane.desktop, other_work).await?;
             Ok(())
         },
     )
@@ -3556,8 +3629,8 @@ async fn one_lane_turn_runs_at_a_time_on_each_login_on_any_of_its_persons_comput
 /// first runs, by a computer that attests the second ready, and the job
 /// keeps the login each lease took. A computer that attests only the first
 /// login never takes a turn on the second, nor one attesting no login, and
-/// a computer that runs a lane turn takes no second one, whatever logins it
-/// attests (D47).
+/// a computer that runs a lane turn and attests no number of turns at once
+/// takes no second one, whatever logins it attests (D54).
 #[tokio::test]
 async fn turns_on_two_logins_of_one_person_run_at_once() -> anyhow::Result<()> {
     with_lane(
@@ -3878,12 +3951,13 @@ async fn a_version_1_runtime_leases_no_lane_turn() -> anyhow::Result<()> {
 
 /// A runtime's poll idles while each lane turn of its space waits for what
 /// this computer cannot give it, by the lease's own lane conditions
-/// (docs/Local-Engine-Turns.md 11.7, 11.19): its person's only login held at
-/// its plan's limit here, a login set up only on another computer, a
-/// capability of version 1, a login another turn holds, or this computer
-/// running a lane turn already. Such a poll runs no lease transaction and is
-/// held for its whole wait; once the computer can take the turn, its poll
-/// leases it at once.
+/// (docs/Local-Engine-Turns.md 11.7, 11.19, 11.23): its person's only login
+/// held at its plan's limit here, a login set up only on another computer, a
+/// capability of version 1, or this computer running as many lane turns as it
+/// attests already. Such a poll runs no lease transaction and is held for its
+/// whole wait; once the computer can take the turn, its poll leases it at
+/// once. Another turn on the same login holds nothing (D56): the person's
+/// other computer takes their next turn on it.
 #[tokio::test]
 async fn a_poll_idles_while_its_persons_turn_waits_for_what_its_computer_cannot_give(
 ) -> anyhow::Result<()> {
@@ -3942,105 +4016,24 @@ async fn a_poll_idles_while_its_persons_turn_waits_for_what_its_computer_cannot_
             assert_eq!(body["jobs"][0]["id"], json!(job), "{body}");
             assert!(body.get("waited").is_none(), "{body}");
 
-            // While it runs, the person's next turn waits: its login is held,
-            // and the desktop runs a lane turn already. Both of their
-            // computers' polls idle.
+            // While it runs, the person's next turn waits for the desktop,
+            // which attests no number and so runs one at a time: its poll
+            // idles. Their second desktop's poll takes it on the same login.
             let (_, next) = lane.lane_turn().await?;
-            lane.idles(lane.desktop, "the computer runs a lane turn")
-                .await?;
-            lane.idles(lane.second_desktop, "another turn holds its login")
-                .await?;
-            assert_eq!(lane.job(next).await?.status, "queued");
-            Ok(())
-        },
-    )
-    .await
-}
-
-/// A lane turn a controller older than the logins leased holds no login, so
-/// it holds every login of its person's until it ends
-/// (docs/Local-Engine-Turns.md 11.19): meanwhile none of their computers
-/// takes their next turn, on any of their logins, and their polls idle,
-/// while another person's turn runs. Once it ends, their next turns run.
-#[tokio::test]
-async fn a_turn_leased_with_no_login_holds_every_login_of_its_persons() -> anyhow::Result<()> {
-    with_lane(
-        "lane-loginless-lease",
-        |_, _| {},
-        |lane| async move {
-            let space = lane.space();
-            let first_login = first_login_of(space.owner);
-            let work = Uuid::new_v4();
-            sql(
-                lane.pool(),
-                "insert into claude_code_logins (id, user_id, label) values ($1, $2, 'Work')",
-                &[&work, &space.owner],
-            )
-            .await?;
-            let worker = lane.claude_code_agent(space.owner, "worker").await?;
-            sql(
-                lane.pool(),
-                "update user_agents set claude_code_login_id = $2 where id = $1",
-                &[&worker, &work],
-            )
-            .await?;
-            // The older controller's turn, on the second desktop, leased with
-            // no login.
-            let (_, old) = lane.lane_turn().await?;
-            lane.lease_one(lane.second_desktop, old).await?;
-            sql(
-                lane.pool(),
-                "update agent_jobs set claude_code_login_id = null where id = $1",
-                &[&old],
-            )
-            .await?;
-            // The person's next turns, on either login, wait for it, on a
-            // computer of theirs ready on both.
-            let (_, next) = lane.lane_turn().await?;
-            let on_work = lane
-                .admitted(
-                    lane.chat().await?,
-                    &lane_send(metadata_for(&["worker"], json!({}))),
-                )
-                .await?;
-            lane.set_capabilities(
+            lane.idles(
                 lane.desktop,
-                capabilities(Some(space.owner), lane_ready_on(&[first_login, work])),
+                "the computer runs as many lane turns as it attests",
             )
             .await?;
-            lane.leases_nothing(lane.desktop, "a turn leased with no login runs")
+            let (body, _) = lane
+                .held_poll(lane.second_desktop, std::time::Duration::from_millis(1_000))
                 .await?;
-            lane.idles(lane.desktop, "a turn leased with no login runs")
-                .await?;
-            // Another person's turn runs meanwhile.
-            let member_turn = lane
-                .admitted_as(
-                    &lane.token(space.member),
-                    lane.chat().await?,
-                    &lane_send(lane_metadata(json!({}))),
-                )
-                .await?;
-            lane.lease_one(lane.member_desktop, member_turn).await?;
-            // It ends: the next turns run, one on each computer.
-            lane.harness
-                .complete(
-                    lane.second_desktop,
-                    old,
-                    json!({ "outcome": "succeeded", "summary": "Done." }),
-                )
-                .await?;
-            let leased = lane.lease_one(lane.desktop, next).await?;
+            assert_eq!(body["jobs"][0]["id"], json!(next), "{body}");
             assert_eq!(
-                leased["claude_code_login_id"],
-                json!(first_login.to_string())
+                body["jobs"][0]["claude_code_login_id"],
+                json!(login.to_string()),
+                "{body}"
             );
-            lane.set_capabilities(
-                lane.second_desktop,
-                capabilities(Some(space.owner), lane_ready_on(&[work])),
-            )
-            .await?;
-            let leased = lane.lease_one(lane.second_desktop, on_work).await?;
-            assert_eq!(leased["claude_code_login_id"], json!(work.to_string()));
             Ok(())
         },
     )

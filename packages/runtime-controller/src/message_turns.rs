@@ -6,6 +6,12 @@
 //! they ended. So no two of them change the space at once, and each starts
 //! from the space as the ones before it left it.
 //!
+//! The exception is a message's Claude Code agents (11.23, D57): each works
+//! in a folder of its own whose save merges into the space's folder, so a
+//! Claude Code agent's turn waits only for the earlier agents on other AIs
+//! ([`waited_for`]), and its computer runs it beside the others as far as it
+//! can.
+//!
 //! - Dispatch decides it with the write scopes
 //!   (`agent_write_scopes::build_agent_write_scope_plan`), records on each
 //!   later job the jobs it waits for ([`wait_for`], `agent_jobs.after_job_ids`):
@@ -47,6 +53,19 @@ macro_rules! waits_for_an_earlier_turn {
     };
 }
 pub(crate) use waits_for_an_earlier_turn;
+
+/// Of a message's earlier turns, each with whether it is a Claude Code
+/// turn, the ones a turn waits for (11.22, 11.23): every one, unless the turn
+/// is a Claude Code turn, which waits only for the turns of agents on other
+/// AIs. Claude Code turns work in folders of their own, merged back as each
+/// saves (D55, D57), so they run beside each other.
+pub(crate) fn waited_for<T: Copy>(earlier: &[(T, bool)], claude_code: bool) -> Vec<T> {
+    earlier
+        .iter()
+        .filter(|(_, earlier_claude_code)| !(claude_code && *earlier_claude_code))
+        .map(|(turn, _)| *turn)
+        .collect()
+}
 
 /// Records that `job_id`'s turn waits for those of `earlier_job_ids`, in
 /// the dispatch transaction that queued them all, so no lease sees the later
@@ -102,6 +121,16 @@ pub(crate) fn strip_client_marks(metadata: &mut JsonValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_code_turn_waits_only_for_the_earlier_agents_on_other_ais() {
+        // "@claude1 do x, @codex do y, @claude2 do z, @helper do w"
+        let earlier = [(1, true), (2, false), (3, true)];
+        assert_eq!(waited_for(&earlier, true), vec![2]);
+        assert_eq!(waited_for(&earlier, false), vec![1, 2, 3]);
+        assert!(waited_for(&[(1, true)], true).is_empty());
+        assert!(waited_for::<u8>(&[], false).is_empty());
+    }
 
     #[test]
     fn the_lease_clause_reads_the_earlier_job_by_the_alias_given() {

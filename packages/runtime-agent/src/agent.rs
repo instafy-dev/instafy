@@ -1027,6 +1027,11 @@ impl RuntimeAgent {
                 .as_ref()
                 .and_then(|service| service.unsaved_put_back()),
         );
+        executor.set_turn_folders(
+            origin_service
+                .as_ref()
+                .and_then(|service| service.turn_folders()),
+        );
 
         let tunnel_refresh = tunnel_lifecycle
             .as_ref()
@@ -1083,6 +1088,8 @@ impl RuntimeAgent {
         // listener before it is torn down below.
         executor.set_local_origin_sync(None);
         executor.set_unsaved_put_back(None);
+        // The capability keeps its number: the next cycle's origin sets it again.
+        executor.processor().set_turn_folders(None);
 
         // Stop periodic snapshots before the clean shutdown snapshot so they do
         // not read/upload the live profile concurrently, and so an error path
@@ -1178,6 +1185,12 @@ impl RuntimeAgent {
     ///
     /// Renewal is only observed at the idle points between jobs, so adopting a
     /// renewed registration never interrupts an in-flight job.
+    ///
+    /// A Claude Code turn runs in the background, and the loop goes on leasing:
+    /// the controller hands this runtime more of them while it holds fewer than
+    /// its capability attests, and no other work (docs/Local-Engine-Turns.md
+    /// 11.23, D54). Other work, a re-registration and a stop each wait for the
+    /// running Claude Code turns first.
     async fn lease_loop(
         client: Arc<ControllerClient>,
         executor: Arc<AgentExecutor>,
@@ -1190,21 +1203,35 @@ impl RuntimeAgent {
         let poll_interval = client.poll_interval();
         let heartbeat_seconds = client.heartbeat_seconds().max(30);
         let mut early_repolls = 0;
+        // The Claude Code turns running in the background (11.23).
+        let mut lane_turns: JoinSet<Result<()>> = JoinSet::new();
+
+        // Every way out of the loop waits for its running Claude Code turns first: each ends on
+        // its own, or at the shutdown it sees itself.
+        macro_rules! leave {
+            ($outcome:expr) => {{
+                Self::wait_for_lane_turns(&mut lane_turns).await;
+                return $outcome;
+            }};
+        }
 
         loop {
+            if let Some(error) = Self::reap_lane_turns(&mut lane_turns) {
+                leave!(Err(error));
+            }
             if !runtime_reuse_is_safe() {
                 warn!("AI worker cleanup requires attention; no more jobs will be leased");
-                return Ok(true);
+                leave!(Ok(true));
             }
             let lease_started = std::time::Instant::now();
             let jobs = tokio::select! {
                 _ = shutdown.cancelled() => {
                     info!("shutdown requested; exiting lease loop");
-                    return Ok(true);
+                    leave!(Ok(true));
                 }
                 _ = Self::wait_for_refresh(refresh.clone()) => {
                     info!("tunnel refresh requested; exiting lease loop");
-                    return Ok(false);
+                    leave!(Ok(false));
                 }
                 result = client.lease_once(registration) => result,
             };
@@ -1213,11 +1240,11 @@ impl RuntimeAgent {
                 Ok(leased) => (leased.jobs, leased.waited),
                 Err(LeaseError::Unauthorized) => {
                     warn!("lease request returned 401; agent token expired. Re-registering.");
-                    return Err(anyhow!("agent token expired"));
+                    leave!(Err(anyhow!("agent token expired")));
                 }
                 Err(LeaseError::SpaceDeleted) => {
                     info!("lease refused: this runtime's space was deleted");
-                    return Err(SpaceDeleted.into());
+                    leave!(Err(SpaceDeleted.into()));
                 }
                 Err(LeaseError::Other(error)) => {
                     warn!(?error, "lease request failed; retrying");
@@ -1231,17 +1258,17 @@ impl RuntimeAgent {
                     {
                         LoopSignal::Shutdown => {
                             info!("shutdown requested during retry backoff; exiting lease loop");
-                            return Ok(true);
+                            leave!(Ok(true));
                         }
                         LoopSignal::Refresh => {
                             info!(
                                 "tunnel refresh requested during retry backoff; exiting lease loop"
                             );
-                            return Ok(false);
+                            leave!(Ok(false));
                         }
                         LoopSignal::Renew => {
                             info!("registration renewed during retry backoff; exiting lease loop");
-                            return Ok(false);
+                            leave!(Ok(false));
                         }
                         LoopSignal::Completed => {}
                     }
@@ -1259,7 +1286,7 @@ impl RuntimeAgent {
                 ) {
                     if Self::renewal_pending(renewal) {
                         info!("registration renewed while waiting for work; exiting lease loop");
-                        return Ok(false);
+                        leave!(Ok(false));
                     }
                     continue;
                 }
@@ -1273,15 +1300,15 @@ impl RuntimeAgent {
                 {
                     LoopSignal::Shutdown => {
                         info!("shutdown requested during idle backoff; exiting lease loop");
-                        return Ok(true);
+                        leave!(Ok(true));
                     }
                     LoopSignal::Refresh => {
                         info!("tunnel refresh requested during idle backoff; exiting lease loop");
-                        return Ok(false);
+                        leave!(Ok(false));
                     }
                     LoopSignal::Renew => {
                         info!("registration renewed during idle backoff; exiting lease loop");
-                        return Ok(false);
+                        leave!(Ok(false));
                     }
                     LoopSignal::Completed => {}
                 }
@@ -1289,6 +1316,41 @@ impl RuntimeAgent {
             }
 
             early_repolls = 0;
+            // A Claude Code turn, which the controller leases alone, runs beside this runtime's
+            // others, and the loop asks for the next at once (11.23).
+            if jobs.len() == 1 && crate::claude_code::job::has_engine(&jobs[0]) {
+                let job = jobs.into_iter().next().expect("one job");
+                info!(
+                    job_id = %job.id,
+                    running = lane_turns.len(),
+                    "leased job; its Claude Code turn runs beside this runtime's others"
+                );
+                let client = client.clone();
+                let executor = executor.clone();
+                let registration = registration.clone();
+                let secret_env_keys = secret_env_keys.clone();
+                lane_turns.spawn(async move {
+                    Self::handle_job(
+                        client,
+                        executor,
+                        &registration,
+                        job,
+                        heartbeat_seconds,
+                        secret_env_keys,
+                    )
+                    .await
+                });
+                continue;
+            }
+            // Other work never runs beside Claude Code turns (D54): the controller leases none to
+            // a runtime that holds one, and should some come all the same, it waits for them.
+            if !lane_turns.is_empty() {
+                warn!(
+                    running = lane_turns.len(),
+                    "other work was leased while Claude Code turns run; it waits for them"
+                );
+                Self::wait_for_lane_turns(&mut lane_turns).await;
+            }
             Self::handle_job_batch(
                 client.clone(),
                 executor.clone(),
@@ -1310,17 +1372,48 @@ impl RuntimeAgent {
             {
                 LoopSignal::Shutdown => {
                     info!("shutdown requested during post-job backoff; exiting lease loop");
-                    return Ok(true);
+                    leave!(Ok(true));
                 }
                 LoopSignal::Refresh => {
                     info!("tunnel refresh requested during post-job backoff; exiting lease loop");
-                    return Ok(false);
+                    leave!(Ok(false));
                 }
                 LoopSignal::Renew => {
                     info!("registration renewed during post-job backoff; exiting lease loop");
-                    return Ok(false);
+                    leave!(Ok(false));
                 }
                 LoopSignal::Completed => {}
+            }
+        }
+    }
+
+    /// The first error of the background Claude Code turns that have ended, as the lease loop
+    /// would have taken it from a batch (a cleanup that could not be confirmed, say); the turns
+    /// that ended well are forgotten.
+    fn reap_lane_turns(lane_turns: &mut JoinSet<Result<()>>) -> Option<anyhow::Error> {
+        let mut first_error = None;
+        while let Some(ended) = lane_turns.try_join_next() {
+            let error = match ended {
+                Ok(Ok(())) => continue,
+                Ok(Err(error)) => error,
+                Err(error) => anyhow!("a Claude Code turn's task failed: {error}"),
+            };
+            warn!(
+                ?error,
+                "a Claude Code turn ended with an error that stops leasing"
+            );
+            first_error.get_or_insert(error);
+        }
+        first_error
+    }
+
+    /// Waits for every background Claude Code turn to end, logging the errors.
+    async fn wait_for_lane_turns(lane_turns: &mut JoinSet<Result<()>>) {
+        while let Some(ended) = lane_turns.join_next().await {
+            match ended {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!(?error, "a Claude Code turn ended with an error"),
+                Err(error) => warn!(%error, "a Claude Code turn's task failed"),
             }
         }
     }
@@ -1635,7 +1728,10 @@ impl RuntimeAgent {
             && executor
                 .processor()
                 .can_run_parallel_scoped_worker(registration, &job);
-        let _job_process_env_guard = if parallel_scoped {
+        // A local-engine turn sets nothing in this process's environment: its `claude` gets an
+        // environment of its own (docs/Local-Engine-Turns.md 3.4), so it runs beside the
+        // runtime's other Claude Code turns (11.23).
+        let _job_process_env_guard = if parallel_scoped || local_engine {
             None
         } else {
             Some(JOB_PROCESS_ENV_LOCK.lock().await)
@@ -1692,7 +1788,7 @@ impl RuntimeAgent {
             if let Some(task) = periodic_heartbeat.take() {
                 task.shutdown().await;
             }
-            if !parallel_scoped {
+            if !parallel_scoped && !local_engine {
                 apply_job_secrets(
                     &secret_env_keys,
                     &JobSecrets {
@@ -1849,7 +1945,7 @@ impl RuntimeAgent {
                                 if let Some(task) = periodic_secrets_refresh.take() {
                                     task.shutdown().await;
                                 }
-                                if !parallel_scoped {
+                                if !parallel_scoped && !local_engine {
                                     let empty = JobSecrets {
                                         env: HashMap::new(),
                                         inventory: Vec::new(),
@@ -1962,7 +2058,8 @@ impl RuntimeAgent {
             task.shutdown().await;
         }
 
-        if !parallel_scoped {
+        // A local-engine turn installed none.
+        if !parallel_scoped && !local_engine {
             let empty = JobSecrets {
                 env: HashMap::new(),
                 inventory: Vec::new(),

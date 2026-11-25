@@ -2413,20 +2413,24 @@ pub(crate) async fn process_dispatch_prompt_timed(
 
     insert_prompt_record(&transaction, &project, context, &request, &prompt_id).await?;
 
-    // The runs of the agents named before each, while the agents take turns.
-    let mut earlier_turn_runs: Vec<(Uuid, &str)> = Vec::new();
+    // The runs of the agents named before each, and whether each is a Claude
+    // Code turn, while the agents take turns: a Claude Code agent's waits only
+    // for the agents on other AIs (crate::message_turns::waited_for, 11.23).
+    let mut earlier_turn_runs: Vec<((Uuid, &str), bool)> = Vec::new();
     for (run_id, target) in agent_runs.iter() {
         let mut run_request = request.clone();
         apply_agent_prompt_segment(&mut run_request, &prompt_segments, target, &message_handles);
         inject_agent_target_metadata(&mut run_request.metadata, target);
         if takes_turns {
-            if !earlier_turn_runs.is_empty() {
+            let waited_for =
+                crate::message_turns::waited_for(&earlier_turn_runs, target.claude_code);
+            if !waited_for.is_empty() {
                 crate::message_turns::stamp_run(
                     ensure_object(&mut run_request.metadata),
-                    &earlier_turn_runs,
+                    &waited_for,
                 );
             }
-            earlier_turn_runs.push((*run_id, target.handle.as_str()));
+            earlier_turn_runs.push(((*run_id, target.handle.as_str()), target.claude_code));
         }
         if target.claude_code {
             crate::claude_code_lane::stamp(
@@ -3141,8 +3145,9 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
 
     let mut research_dispatch_parent = None;
-    // The jobs of the agents named before each, while the agents take turns.
-    let mut earlier_turn_jobs: Vec<Uuid> = Vec::new();
+    // The jobs of the agents named before each, and whether each is a Claude
+    // Code turn, while the agents take turns.
+    let mut earlier_turn_jobs: Vec<(Uuid, bool)> = Vec::new();
     for (run_id, target) in agent_runs.iter() {
         if is_skipped(run_id) {
             continue;
@@ -3334,18 +3339,22 @@ pub(crate) async fn process_dispatch_prompt_timed(
         .await?;
         if let Some(job_uuid) = job_id {
             // Each agent's turn after the first waits, queued, until the turns
-            // of every agent named before it have ended (crate::message_turns).
+            // of every agent named before it have ended, and a Claude Code
+            // agent's until those of the agents on other AIs have
+            // (crate::message_turns).
             if takes_turns {
-                if !earlier_turn_jobs.is_empty() {
+                let waited_for =
+                    crate::message_turns::waited_for(&earlier_turn_jobs, target.claude_code);
+                if !waited_for.is_empty() {
                     crate::message_turns::wait_for(
                         &transaction,
                         &project.id,
                         &job_uuid,
-                        &earlier_turn_jobs,
+                        &waited_for,
                     )
                     .await?;
                 }
-                earlier_turn_jobs.push(job_uuid);
+                earlier_turn_jobs.push((job_uuid, target.claude_code));
             }
             research_dispatch_parent.get_or_insert(job_uuid);
             // The run is the frontend's authoritative live-activity record,

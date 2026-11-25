@@ -53,6 +53,8 @@ const CLAUDE_CODE_CAPABILITY_VERSION: u64 = runtime_contracts::claude_code_lane:
 const CLAUDE_CODE_LOGINS: &str = "logins";
 /// The most logins a capability lists, as a grant carries at most.
 const CLAUDE_CODE_MAX_LOGINS: usize = runtime_contracts::claude_code_lane::MAX_LOGINS;
+/// The most Claude Code turns a runtime attests it runs at once (11.23).
+const CLAUDE_CODE_MAX_TURNS_AT_ONCE: u64 = runtime_contracts::claude_code_lane::MAX_TURNS_AT_ONCE;
 /// Why the `claude` program cannot take a turn, as runtime-agent's probe
 /// reports it (docs/Local-Engine-Turns.md 3.2, 11.19): runtime-contracts'
 /// list, which the runtime and Studio are tested against too.
@@ -90,6 +92,10 @@ pub(super) struct ClaudeCodeCapability {
     pub(super) verified: Option<bool>,
     /// Whether the runtime streams partial messages.
     pub(super) partial_messages: Option<bool>,
+    /// How many Claude Code turns the runtime runs at once, each in a folder
+    /// of its own (11.23): 1 to [`CLAUDE_CODE_MAX_TURNS_AT_ONCE`]; none when
+    /// it reported no such whole number, which the lease reads as 1.
+    pub(super) turns_at_once: Option<u64>,
     /// The Claude Code logins the runtime's grant holds, at most
     /// [`CLAUDE_CODE_MAX_LOGINS`], by id, as the runtime listed them.
     pub(super) logins: Vec<(Uuid, ClaudeCodeLoginCapability)>,
@@ -152,6 +158,10 @@ impl ClaudeCodeCapability {
             cli,
             verified: flag("verified"),
             partial_messages: flag("partialMessages"),
+            turns_at_once: reported
+                .get("turnsAtOnce")
+                .and_then(JsonValue::as_u64)
+                .filter(|turns| (1..=CLAUDE_CODE_MAX_TURNS_AT_ONCE).contains(turns)),
             logins,
         })
     }
@@ -175,6 +185,9 @@ impl ClaudeCodeCapability {
             if let Some(value) = value {
                 capability.insert(key.to_string(), JsonValue::Bool(value));
             }
+        }
+        if let Some(turns) = self.turns_at_once {
+            capability.insert("turnsAtOnce".to_string(), json!(turns));
         }
         capability.insert(
             CLAUDE_CODE_LOGINS.to_string(),
