@@ -41,6 +41,8 @@ ARG PCRE2_MIN_VERSION=10.46-1~deb13u2
 ARG SQLITE3_MIN_VERSION=3.46.1-7+deb13u2
 # Trixie ships apt 3.0.3; 3.0.4 fixes CVE-2026-109518.
 ARG APT_MIN_VERSION=3.0.4
+# Trixie ships libzstd1 1.5.7+dfsg-1; 1.5.7+dfsg-1+deb13u1 fixes CVE-2026-124851.
+ARG ZSTD_MIN_VERSION=1.5.7+dfsg-1+deb13u1
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 # The pinned Playwright base ships OpenSSL 3.0.13-0ubuntu3.11; 3.0.13-0ubuntu3.16 fixes CVE-2026-84782.
 ARG WEBDEV_OPENSSL_MIN_VERSION=3.0.13-0ubuntu3.16
@@ -354,6 +356,7 @@ ARG GZIP_MIN_VERSION
 ARG PCRE2_MIN_VERSION
 ARG SQLITE3_MIN_VERSION
 ARG APT_MIN_VERSION
+ARG ZSTD_MIN_VERSION
 ARG RATHOLE_VERSION=0.5.0
 ARG RATHOLE_SHA256_AMD64
 ARG RATHOLE_SHA256_ARM64
@@ -386,6 +389,7 @@ RUN test -n "${CHROMIUM_MIN_VERSION}" && \
       libapt-pkg7.0 \
       libpcre2-8-0 \
       libsqlite3-0 \
+      libzstd1 \
       login \
       mount \
       procps \
@@ -405,12 +409,13 @@ RUN test -n "${CHROMIUM_MIN_VERSION}" && \
     && dpkg --compare-versions \
       "$(dpkg-query -W -f='${Version}' chromium)" ge "${CHROMIUM_MIN_VERSION}" \
     && test -n "${GZIP_MIN_VERSION}" && test -n "${PCRE2_MIN_VERSION}" && test -n "${SQLITE3_MIN_VERSION}" \
-    && test -n "${APT_MIN_VERSION}" \
+    && test -n "${APT_MIN_VERSION}" && test -n "${ZSTD_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' gzip)" ge "${GZIP_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libsqlite3-0)" ge "${SQLITE3_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge "${APT_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libzstd1)" ge "${ZSTD_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
