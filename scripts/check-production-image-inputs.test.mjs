@@ -176,7 +176,7 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/net v0\.62\.0 \/\/ indirect$/mu);
 });
 
-test("base runtime explicitly refreshes inherited gzip, PCRE2, SQLite and apt and rejects obsolete versions", () => {
+test("base runtime explicitly refreshes inherited gzip, PCRE2, SQLite, apt and zstd and rejects obsolete versions", () => {
   const source = read("docker/runtime/Dockerfile");
   const defaults = argumentDefaults(source);
   const runtime = dockerfileStage(source, "runtime");
@@ -186,6 +186,7 @@ test("base runtime explicitly refreshes inherited gzip, PCRE2, SQLite and apt an
     ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
     ["apt", "APT_MIN_VERSION", "3.0.4"],
     ["libapt-pkg7.0", "APT_MIN_VERSION", "3.0.4"],
+    ["libzstd1", "ZSTD_MIN_VERSION", "1.5.7+dfsg-1+deb13u1"],
   ];
   for (const [name, argument, minimum] of packages) {
     assert.equal(defaults.get(argument), minimum);
@@ -212,6 +213,7 @@ test("every published Debian service refreshes inherited packages at its release
     ["apt", "APT_MIN_VERSION", "3.0.4"],
     ["libapt-pkg7.0", "APT_MIN_VERSION", "3.0.4"],
     ["zlib1g", "ZLIB_MIN_VERSION", "1:1.3.dfsg+really1.3.1-1+deb13u1"],
+    ["libzstd1", "ZSTD_MIN_VERSION", "1.5.7+dfsg-1+deb13u1"],
   ];
   const expected = new Map([
     ["packages/runtime-controller/Dockerfile", ["bookworm", bookwormPackages]],

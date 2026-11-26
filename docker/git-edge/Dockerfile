@@ -32,6 +32,8 @@ ARG PERL_BASE_MIN_VERSION=5.40.1-6+deb13u1
 ARG APT_MIN_VERSION=3.0.4
 # zlib1g 1:1.3.dfsg+really1.3.1-1+deb13u1 fixes CVE-2026-85091 and CVE-2026-76844.
 ARG ZLIB_MIN_VERSION=1:1.3.dfsg+really1.3.1-1+deb13u1
+# libzstd1 1.5.7+dfsg-1+deb13u1 fixes CVE-2026-124851.
+ARG ZSTD_MIN_VERSION=1.5.7+dfsg-1+deb13u1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       apt \
       bsdutils \
@@ -40,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libapt-pkg7.0 \
       libpcre2-8-0 \
       libsqlite3-0 \
+      libzstd1 \
       login \
       mount \
       perl-base \
@@ -48,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && test -n "${GZIP_MIN_VERSION}" && test -n "${PCRE2_MIN_VERSION}" \
     && test -n "${SQLITE3_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
     && test -n "${APT_MIN_VERSION}" && test -n "${ZLIB_MIN_VERSION}" \
+    && test -n "${ZSTD_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' gzip)" ge "${GZIP_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libsqlite3-0)" ge "${SQLITE3_MIN_VERSION}" \
@@ -55,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg7.0)" ge "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" ge "${ZLIB_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libzstd1)" ge "${ZSTD_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/git-service/target/${BUILD_ARTIFACT_DIR}/git-edge /usr/local/bin/git-edge
