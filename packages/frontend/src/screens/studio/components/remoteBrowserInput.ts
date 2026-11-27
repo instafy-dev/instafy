@@ -49,7 +49,7 @@ export type RemoteBrowserVirtualInputMessage = Extract<
 const REMOTE_BROWSER_VIRTUAL_INPUT_EVENT = "instafy:remote-browser-virtual-input";
 const TOUCH_SCROLL_THRESHOLD_PX = 8;
 
-export function remoteBrowserKeyDownText(key: string, modifiers = 0, altGraph = false): string {
+export function remoteBrowserKeyDownText(key: string, modifiers = 0, composed = false): string {
   // CDP modifiers: Alt=1, Control=2, Meta=4, Shift=8. Shift changes the
   // character supplied by the keyboard; ordinary shortcuts must not type.
   const shortcutModifiers = modifiers & 7;
@@ -58,9 +58,23 @@ export function remoteBrowserKeyDownText(key: string, modifiers = 0, altGraph = 
     // and software keyboards need the carriage return for submit/newline.
     return shortcutModifiers === 0 ? "\r" : "";
   }
-  return key.length === 1 && !(modifiers & 4) && (altGraph || shortcutModifiers === 0)
+  return key.length === 1 && !(modifiers & 4) && (composed || shortcutModifiers === 0)
     ? key
     : "";
+}
+
+/**
+ * How Alt composed this key's character, when it did and is not making a
+ * shortcut of it. "option" is Option on a Mac, an iPad or an iPhone, where a
+ * Swedish keyboard types "@" as Option+2 and a German one as Option+L, and
+ * which Chromium and WebKit report as a plain Alt. "altgr" is AltGr on
+ * Windows and Linux.
+ */
+function altComposition(event: KeyboardEvent): "option" | "altgr" | null {
+  if (/Mac|iPhone|iPad|iPod/i.test(navigator.platform)) {
+    return event.altKey && !event.ctrlKey && !event.metaKey ? "option" : null;
+  }
+  return event.getModifierState("AltGraph") ? "altgr" : null;
 }
 
 /**
@@ -400,12 +414,31 @@ export function attachRemoteBrowserInput(
     });
     event.preventDefault();
   };
+  const keyTextAndModifiers = (event: KeyboardEvent) => {
+    const modifiers = cdpScreencastModifiers(event);
+    const composition = altComposition(event);
+    const text = remoteBrowserKeyDownText(event.key, modifiers, composition !== null);
+    if (!text || composition === null) {
+      return { text, modifiers };
+    }
+    if (composition === "altgr") {
+      // Windows reports AltGr as Control+Alt, and the remote browser, on
+      // Linux, types nothing while Control is held. Its own AltGr holds
+      // neither, so the character goes alone.
+      return { text, modifiers: modifiers & ~3 };
+    }
+    // An ASCII character on Option ("@", "[", "|") is one its layout types no
+    // other way, so it goes alone: the remote page takes Alt and a digit or a
+    // letter for a shortcut. Any other one (Option+Z is "Ω" on a US keyboard)
+    // keeps Alt, so the page still gets Alt+Z, and types the character when it
+    // has no use for the shortcut, as a page on the Mac itself would.
+    return { text, modifiers: text.charCodeAt(0) < 0x80 ? modifiers & ~1 : modifiers };
+  };
   const onKeyDown = (event: KeyboardEvent) => {
     if (!enabled() || event.isComposing || event.key === "Process") {
       return;
     }
-    const modifiers = cdpScreencastModifiers(event);
-    const text = remoteBrowserKeyDownText(event.key, modifiers, event.getModifierState("AltGraph"));
+    const { text, modifiers } = keyTextAndModifiers(event);
     send({
       type: "key",
       kind: text ? "keyDown" : "rawKeyDown",
@@ -436,7 +469,7 @@ export function attachRemoteBrowserInput(
       key: event.key.slice(0, 128),
       code: event.code.slice(0, 128),
       text: "",
-      modifiers: cdpScreencastModifiers(event),
+      modifiers: keyTextAndModifiers(event).modifiers,
       autoRepeat: false,
       ...(keyCode(event) === undefined
         ? {}
