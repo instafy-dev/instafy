@@ -888,14 +888,22 @@ fn commit_staged(workspace_root: &Path, message: &str) -> Result<(), OriginError
         .map_err(|error| OriginError::internal(error.to_string()))
 }
 
-/// Unstage what a sync never commits, and list what stays staged. Local
-/// git only: no credential goes with it.
+/// Unstage what a sync never commits, and list what stays staged, each name
+/// followed by a NUL. Local git only: no credential goes with it.
+///
+/// The names are asked for with `-z`: without it git prints a name that holds
+/// a letter outside ASCII in quotes, with escapes, which no reserved path
+/// matched, so such a file stayed staged and was committed.
 fn unstage_sync_reserved_paths(workspace_root: &Path) -> Result<String, OriginError> {
-    let staged = git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
+    let staged = git_stdout(
+        workspace_root,
+        &["diff", "--cached", "--name-only", "-z"],
+        None,
+    )
+    .map_err(|error| OriginError::internal(error.to_string()))?;
     let reserved = staged
-        .lines()
-        .filter(|path| is_sync_reserved_path(path))
+        .split('\0')
+        .filter(|path| !path.is_empty() && is_sync_reserved_path(path))
         .collect::<Vec<_>>();
     if reserved.is_empty() {
         return Ok(staged);
@@ -912,8 +920,12 @@ fn unstage_sync_reserved_paths(workspace_root: &Path) -> Result<String, OriginEr
             .map_err(|error| OriginError::internal(error.to_string()))?;
     }
 
-    git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
-        .map_err(|error| OriginError::internal(error.to_string()))
+    git_stdout(
+        workspace_root,
+        &["diff", "--cached", "--name-only", "-z"],
+        None,
+    )
+    .map_err(|error| OriginError::internal(error.to_string()))
 }
 
 pub(crate) fn looks_like_transient_http_error(stderr: &str) -> bool {
@@ -1840,40 +1852,41 @@ pub struct GitHistoryHeadRef {
     pub head_ref: Option<String>,
 }
 
-fn parse_porcelain_status_lines(
+/// The paths of `git status --porcelain=v1 -z` and their two-letter codes.
+/// With `-z` every name is printed as it is on disk and ends with a NUL;
+/// without it git prints a name that holds a space, a quote or a letter
+/// outside ASCII in quotes, with escapes. A rename's or a copy's entry is
+/// followed by a second one, the path it came from, which gets the same code.
+fn parse_porcelain_status_records(
     status: &str,
     skip: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
     let mut entries: BTreeMap<String, String> = BTreeMap::new();
+    let mut records = status.split('\0');
 
-    for line in status.lines() {
-        if line.len() < 4 {
+    while let Some(record) = records.next() {
+        let (Some(code), Some(" "), Some(path)) =
+            (record.get(..2), record.get(2..3), record.get(3..))
+        else {
             continue;
-        }
-
-        let code = line[..2].to_string();
-        let raw = line[3..].trim();
-        if raw.is_empty() {
-            continue;
-        }
+        };
 
         let mut record_path = |candidate: &str| {
-            let normalized = candidate.trim().trim_end_matches('/');
+            let normalized = candidate.trim_end_matches('/');
             if normalized.is_empty() || skip(normalized) {
                 return;
             }
             entries
                 .entry(normalized.to_string())
-                .or_insert_with(|| code.clone());
+                .or_insert_with(|| code.to_string());
         };
 
-        if let Some((before, after)) = raw.split_once(" -> ") {
-            record_path(before);
-            record_path(after);
-            continue;
+        if code.contains(['R', 'C']) {
+            if let Some(source) = records.next() {
+                record_path(source);
+            }
         }
-
-        record_path(raw);
+        record_path(path);
     }
 
     entries
@@ -1936,6 +1949,7 @@ pub fn list_dirty_files(
         &[
             "status",
             "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
             "--ignore-submodules=all",
         ],
@@ -1946,7 +1960,7 @@ pub fn list_dirty_files(
         return Ok(Vec::new());
     }
 
-    let mut entries = parse_porcelain_status_lines(&status, is_sync_reserved_path);
+    let mut entries = parse_porcelain_status_records(&status, is_sync_reserved_path);
     let mut embedded_roots = entries
         .keys()
         .filter_map(|path| find_embedded_repo_root(workspace_root, path))
@@ -2193,6 +2207,7 @@ pub fn list_commit_files(
             "show",
             "--format=",
             "--name-status",
+            "-z",
             "--find-renames",
             "--find-copies",
             "--end-of-options",
@@ -2202,14 +2217,13 @@ pub fn list_commit_files(
     )
     .map_err(|error| OriginError::internal(error.to_string()))?;
 
+    // With `-z` each field ends with a NUL and every name is printed as it
+    // is on disk: a status, then its path, and for a rename or a copy the
+    // path it came from first and the path it has now second.
     let mut entries = Vec::new();
-    for raw_line in stdout.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut fields = line.split('\t');
-        let raw_code = fields.next().map(str::trim).unwrap_or("");
+    let mut fields = stdout.split('\0');
+    while let Some(raw_code) = fields.next() {
+        let raw_code = raw_code.trim();
         if raw_code.is_empty() {
             continue;
         }
@@ -2218,10 +2232,9 @@ pub fn list_commit_files(
             .next()
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let first_path = fields.next().map(str::trim).unwrap_or("");
-        let second_path = fields.next().map(str::trim).unwrap_or("");
+        let first_path = fields.next().unwrap_or("");
         let path = if raw_code.starts_with('R') || raw_code.starts_with('C') {
-            second_path
+            fields.next().unwrap_or("")
         } else {
             first_path
         };
@@ -3285,6 +3298,136 @@ mod tests {
         assert_eq!(
             git_config_get(&config_path, "core.worktree")?,
             workspace_dir.to_string_lossy()
+        );
+        Ok(())
+    }
+
+    /// A space's folder with one commit, in the layout the origin keeps
+    /// (`.instafy/.git`), holding `README.md` and `old name.md`.
+    fn committed_workspace(sandbox: &Path) -> anyhow::Result<PathBuf> {
+        let workspace_dir = sandbox.join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            &workspace_dir,
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace_dir.join("README.md"), "hello\n")?;
+        fs::write(workspace_dir.join("old name.md"), "moved\n")?;
+        run_git(&workspace_dir, &["add", "-A"])?;
+        run_git(&workspace_dir, &["commit", "-m", "init"])?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        Ok(workspace_dir)
+    }
+
+    /// Unless it is asked for `-z`, git prints a name that holds a space, a
+    /// quote or a letter outside ASCII in quotes, with escapes
+    /// (`"my notes.md"`, `"\303\274bersicht.md"`). The dirty list named such
+    /// a file with the quotes and escapes, so nothing that looked the file up
+    /// by its path found it.
+    #[test]
+    fn list_dirty_files_names_files_as_they_are_on_disk() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = committed_workspace(sandbox.path())?;
+        fs::write(workspace_dir.join("my notes.md"), "a\n")?;
+        fs::write(workspace_dir.join("übersicht.md"), "b\n")?;
+        fs::create_dir_all(workspace_dir.join("docs"))?;
+        fs::write(workspace_dir.join("docs").join("a \"quoted\" é.md"), "c\n")?;
+        // A staged rename is one entry that names both paths.
+        run_git_ok(&workspace_dir, &["mv", "old name.md", "new name.md"], None)?;
+
+        let dirty = list_dirty_files(&workspace_dir, None)?;
+        let listed = dirty
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.code.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![
+                ("docs/a \"quoted\" é.md", "??"),
+                ("my notes.md", "??"),
+                ("new name.md", "R "),
+                ("old name.md", "R "),
+                ("übersicht.md", "??"),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A commit's files are named as they are too, a renamed one by its new
+    /// name.
+    #[test]
+    fn list_commit_files_names_files_as_they_are_on_disk() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = committed_workspace(sandbox.path())?;
+        fs::write(workspace_dir.join("my notes.md"), "a\n")?;
+        fs::write(workspace_dir.join("übersicht.md"), "b\n")?;
+        run_git_ok(
+            &workspace_dir,
+            &["mv", "old name.md", "neuer näme.md"],
+            None,
+        )?;
+        run_git_ok(&workspace_dir, &["add", "-A"], None)?;
+        run_git_ok(&workspace_dir, &["commit", "-m", "second"], None)?;
+
+        let head = super::git_stdout(&workspace_dir, &["rev-parse", "HEAD"], None)?;
+        let files = list_commit_files(&workspace_dir, &head, None)?;
+        let listed = files
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.code.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![
+                ("my notes.md", "A"),
+                ("neuer näme.md", "R"),
+                ("übersicht.md", "A"),
+            ]
+        );
+        Ok(())
+    }
+
+    /// What a sync never commits is unstaged whatever its name: a reserved
+    /// file whose name git would quote stayed staged, and was committed.
+    #[test]
+    fn unstaging_reserved_paths_reads_names_as_they_are_on_disk() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = committed_workspace(sandbox.path())?;
+        fs::create_dir_all(workspace_dir.join("node_modules").join("pkg"))?;
+        fs::write(
+            workspace_dir.join("node_modules").join("pkg").join("é.js"),
+            "x\n",
+        )?;
+        fs::write(workspace_dir.join("übersicht.md"), "b\n")?;
+        run_git_ok(
+            &workspace_dir,
+            &["add", "-f", "--", "node_modules/pkg/é.js", "übersicht.md"],
+            None,
+        )?;
+
+        let staged = unstage_sync_reserved_paths(&workspace_dir)?;
+        assert_eq!(
+            staged
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>(),
+            vec!["übersicht.md"]
+        );
+        assert_eq!(
+            super::git_stdout(
+                &workspace_dir,
+                &["diff", "--cached", "--name-only", "-z"],
+                None
+            )?
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>(),
+            vec!["übersicht.md"]
         );
         Ok(())
     }
