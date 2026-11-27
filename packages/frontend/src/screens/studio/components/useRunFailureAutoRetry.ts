@@ -18,6 +18,7 @@ import {
   wasRunStartedByPromptSentFromThisPage,
 } from "../../../conversations/sentPromptRegistry";
 import type { ChatMessage } from "../types";
+import { isRecord } from "../../../utils/isRecord";
 
 const TERMINAL_OUTCOMES = new Set([
   "succeeded",
@@ -30,10 +31,6 @@ const TERMINAL_OUTCOMES = new Set([
   "canceled",
   "cancelled",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * A message that carries a terminal run outcome — the signal that the

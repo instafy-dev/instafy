@@ -10,6 +10,7 @@ import type {
   ChatMessageUnsavedReason,
 } from "../screens/studio/types";
 import type { ControllerConversationMessage } from "../sdk/instafy";
+import { isRecord } from "../utils/isRecord";
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -35,20 +36,16 @@ function normalizeMessageTypeValue(value: unknown): string | null {
   return trimmed.toLowerCase();
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function resolvePromptMetadataRecord(
   metadata: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (!metadata) {
     return null;
   }
-  if (isPlainObject(metadata["prompt_metadata"])) {
+  if (isRecord(metadata["prompt_metadata"])) {
     return metadata["prompt_metadata"] as Record<string, unknown>;
   }
-  if (isPlainObject(metadata["promptMetadata"])) {
+  if (isRecord(metadata["promptMetadata"])) {
     return metadata["promptMetadata"] as Record<string, unknown>;
   }
   return metadata;
@@ -195,7 +192,7 @@ function resolveNestedDetailsRecord(metadata: Record<string, unknown> | null): R
     return null;
   }
 
-  const details = isPlainObject(metadata["details"]) ? (metadata["details"] as Record<string, unknown>) : null;
+  const details = isRecord(metadata["details"]) ? (metadata["details"] as Record<string, unknown>) : null;
   if (!details) {
     return null;
   }
@@ -203,7 +200,7 @@ function resolveNestedDetailsRecord(metadata: Record<string, unknown> | null): R
   let resolved: Record<string, unknown> = details;
   // Runtime/controller updates can wrap detail payloads in runtime-selection envelopes.
   for (let depth = 0; depth < 3; depth += 1) {
-    const nested = isPlainObject(resolved["details"]) ? (resolved["details"] as Record<string, unknown>) : null;
+    const nested = isRecord(resolved["details"]) ? (resolved["details"] as Record<string, unknown>) : null;
     if (!nested) {
       break;
     }
@@ -267,8 +264,8 @@ function normalizeControllerMetadata(
     normalized["messageType"] = messageType;
   }
 
-  const details = isPlainObject(normalized["details"]) ? { ...(normalized["details"] as Record<string, unknown>) } : null;
-  const detailsEvent = details && isPlainObject(details["event"]) ? (details["event"] as Record<string, unknown>) : null;
+  const details = isRecord(normalized["details"]) ? { ...(normalized["details"] as Record<string, unknown>) } : null;
+  const detailsEvent = details && isRecord(details["event"]) ? (details["event"] as Record<string, unknown>) : null;
 
   if (details && messageType && !normalizeMessageTypeValue(details["messageType"]) && !normalizeMessageTypeValue(details["message_type"])) {
     details["messageType"] = messageType;
@@ -331,8 +328,8 @@ function mergeMessageMetadata(
   };
 
   for (const key of ["agent", "localCapability", "robotLearning", "cameraRequest"]) {
-    const existingNested = isPlainObject(existing?.[key]) ? (existing?.[key] as Record<string, unknown>) : null;
-    const incomingNested = isPlainObject(incoming?.[key]) ? (incoming?.[key] as Record<string, unknown>) : null;
+    const existingNested = isRecord(existing?.[key]) ? (existing?.[key] as Record<string, unknown>) : null;
+    const incomingNested = isRecord(incoming?.[key]) ? (incoming?.[key] as Record<string, unknown>) : null;
     if (existingNested || incomingNested) {
       merged[key] = {
         ...(existingNested ?? {}),
@@ -348,7 +345,7 @@ function isLocalCapabilityMetadata(value: Record<string, unknown> | null | undef
   if (!value) {
     return false;
   }
-  if (isPlainObject(value["localCapability"])) {
+  if (isRecord(value["localCapability"])) {
     return true;
   }
   const kind = normalizeMessageTypeValue(value["kind"]);
@@ -356,7 +353,7 @@ function isLocalCapabilityMetadata(value: Record<string, unknown> | null | undef
 }
 
 function isFailedOrCanceledOutcome(message: ChatMessage): boolean {
-  const outcome = isPlainObject(message.metadata)
+  const outcome = isRecord(message.metadata)
     ? normalizeMessageTypeValue(message.metadata["outcome"])
     : null;
   return outcome === "failed" || outcome === "canceled" || outcome === "cancelled";
@@ -442,12 +439,12 @@ function isReadFileReference(entry: Record<string, unknown>): boolean {
   return (
     marker(entry.changeType) ||
     marker(entry.change) ||
-    (isPlainObject(entry.change) && marker(entry.change.type))
+    (isRecord(entry.change) && marker(entry.change.type))
   );
 }
 
 function parseLineRangeValue(value: unknown): ChatMessageFileLineRange | null {
-  if (isPlainObject(value)) {
+  if (isRecord(value)) {
     const from = typeof value.from === "number" && Number.isFinite(value.from) ? Math.floor(value.from) : null;
     const to = typeof value.to === "number" && Number.isFinite(value.to) ? Math.floor(value.to) : null;
     if (from !== null && to !== null) {
@@ -478,7 +475,7 @@ function interpretRawChange(
   if (!value) {
     return null;
   }
-  if (isPlainObject(value)) {
+  if (isRecord(value)) {
     const changeType = parseChangeType(value.type);
     const lineRanges = parseLineRangesValue(value.lines);
     return { changeType, lineRanges };
@@ -491,7 +488,7 @@ function interpretRawChange(
 }
 
 function parseFileChange(value: unknown): ChatMessageFileChange | null {
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   const pathInput = value["path"];
@@ -556,7 +553,7 @@ export function extractFileChangesFromMetadata(
   }
   const filesArtifact = artifacts.find(
     (artifact): artifact is Record<string, unknown> =>
-      isPlainObject(artifact) && typeof artifact.kind === "string" && artifact.kind === "apply/files"
+      isRecord(artifact) && typeof artifact.kind === "string" && artifact.kind === "apply/files"
   );
   if (!filesArtifact) {
     return [];
@@ -567,7 +564,7 @@ export function extractFileChangesFromMetadata(
   }
   const folderUndoOf = readFolderUndo(filesArtifact["metadata"]);
   return filesValue
-    .filter((entry) => !(isPlainObject(entry) && isReadFileReference(entry)))
+    .filter((entry) => !(isRecord(entry) && isReadFileReference(entry)))
     .map((entry) => parseFileChange(entry))
     .filter((entry): entry is ChatMessageFileChange => entry !== null)
     .map((entry) => {
@@ -580,8 +577,8 @@ export function extractFileChangesFromMetadata(
 // `apply/files` artifact's metadata): the files Undo can put back with no
 // turn. A file it does not name has none.
 function readFolderUndo(metadata: unknown): (path: string) => ChatMessageFolderUndo | null {
-  const undo = isPlainObject(metadata) && isPlainObject(metadata["undo"]) ? metadata["undo"] : null;
-  const leftAs = undo && isPlainObject(undo["leftAs"]) ? undo["leftAs"] : null;
+  const undo = isRecord(metadata) && isRecord(metadata["undo"]) ? metadata["undo"] : null;
+  const leftAs = undo && isRecord(undo["leftAs"]) ? undo["leftAs"] : null;
   if (!undo || !leftAs) {
     return () => null;
   }
@@ -655,10 +652,10 @@ export function extractWorkspaceCommitRangeFromMetadata(
   // Prefer the newest apply artifact: retried runs append a fresh one.
   for (let index = artifacts.length - 1; index >= 0; index -= 1) {
     const artifact = artifacts[index];
-    if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
+    if (!isRecord(artifact) || artifact.kind !== "origin/apply") {
       continue;
     }
-    const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;
+    const artifactMetadata = isRecord(artifact["metadata"]) ? artifact["metadata"] : null;
     if (!artifactMetadata) {
       continue;
     }
@@ -705,10 +702,10 @@ function findTurnOriginApplyMetadata(
   }
   for (let index = artifacts.length - 1; index >= 0; index -= 1) {
     const artifact = artifacts[index];
-    if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
+    if (!isRecord(artifact) || artifact.kind !== "origin/apply") {
       continue;
     }
-    const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;
+    const artifactMetadata = isRecord(artifact["metadata"]) ? artifact["metadata"] : null;
     if (!artifactMetadata || typeof artifactMetadata["lane"] === "string") {
       continue;
     }
@@ -763,7 +760,7 @@ export function extractUnsavedPathsFromMetadata(
   const conflicted = artifactMetadata["conflictedPaths"];
   if (Array.isArray(conflicted)) {
     for (const entry of conflicted) {
-      const path = normalizeUnsavedPath(isPlainObject(entry) ? entry["path"] : entry);
+      const path = normalizeUnsavedPath(isRecord(entry) ? entry["path"] : entry);
       if (path && !byPath.has(path)) {
         byPath.set(path, { path, reason: "conflicted", keptSavedVersion: true });
       }
@@ -772,7 +769,7 @@ export function extractUnsavedPathsFromMetadata(
   const rejected = artifactMetadata["rejectedPaths"];
   if (Array.isArray(rejected)) {
     for (const entry of rejected) {
-      const record = isPlainObject(entry) ? entry : null;
+      const record = isRecord(entry) ? entry : null;
       const path = normalizeUnsavedPath(record ? record["path"] : entry);
       if (!path || byPath.has(path)) {
         continue;
@@ -820,7 +817,7 @@ function parseHistoryExcludedPaths(error: unknown): string | null {
   if (bodyStart >= 0) {
     try {
       const body: unknown = JSON.parse(error.slice(bodyStart));
-      if (isPlainObject(body) && typeof body["error"] === "string") {
+      if (isRecord(body) && typeof body["error"] === "string") {
         message = body["error"];
       }
     } catch {
@@ -885,7 +882,7 @@ export function extractUnsavedReasonFromMetadata(
   // a fresh one.
   for (let index = artifacts.length - 1; index >= 0; index -= 1) {
     const artifact = artifacts[index];
-    if (!isPlainObject(artifact)) {
+    if (!isRecord(artifact)) {
       continue;
     }
     // The save failed before it reached the space (the controller refused
@@ -899,7 +896,7 @@ export function extractUnsavedReasonFromMetadata(
     if (artifact.kind !== "origin/apply") {
       continue;
     }
-    const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;
+    const artifactMetadata = isRecord(artifact["metadata"]) ? artifact["metadata"] : null;
     const gitSyncStatus = normalizeMessageTypeValue(artifactMetadata?.["gitSyncStatus"]);
     if (!gitSyncStatus) {
       continue;
@@ -922,9 +919,9 @@ export function extractUnsavedReasonFromMetadata(
   }
   const stoppedBeforeSave = artifacts.some(
     (artifact) =>
-      isPlainObject(artifact) &&
+      isRecord(artifact) &&
       artifact.kind === "apply/files" &&
-      isPlainObject(artifact["metadata"]) &&
+      isRecord(artifact["metadata"]) &&
       artifact["metadata"]["stoppedBeforeSave"] === true,
   );
   return stoppedBeforeSave ? "stopped_before_save" : null;
@@ -948,7 +945,7 @@ function serializeFileChanges(files: ChatMessage["files"]): string {
 
 export function mapControllerMessageToChat(message: ControllerConversationMessage): ChatMessage {
   const timestamp = Date.parse(message.createdAt);
-  const rawMetadata = isPlainObject(message.metadata) ? (message.metadata as Record<string, unknown>) : null;
+  const rawMetadata = isRecord(message.metadata) ? (message.metadata as Record<string, unknown>) : null;
   const messageTypeRaw = resolveMessageTypeFromMetadata(rawMetadata);
   let metadata = normalizeControllerMetadata(rawMetadata, messageTypeRaw);
   const runId = typeof message.runId === "string" ? message.runId.trim() : "";

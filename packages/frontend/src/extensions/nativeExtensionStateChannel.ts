@@ -1,4 +1,5 @@
 import type { CameraStatusSnapshot } from "../camera/types";
+import { isRecord } from "../utils/isRecord";
 
 export const NATIVE_EXTENSION_STATE_UPDATED_EVENT = "instafy:native-extension-state:updated";
 
@@ -8,10 +9,6 @@ export type NativeExtensionStateUpdateDetail = {
   cameraStatus?: CameraStatusSnapshot | null;
   integrationUpdated?: boolean;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function normalizeCameraStatus(value: unknown): CameraStatusSnapshot | null {
   if (!isRecord(value)) {

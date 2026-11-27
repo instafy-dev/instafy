@@ -3,6 +3,7 @@ import type { RunRecord } from "../../../types";
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { runIdsEndedByStop } from "./controllerConversationNotice";
+import { isRecord } from "../../../utils/isRecord";
 
 /**
  * Switches to the Browser view once for each request to show it (a press,
@@ -21,10 +22,6 @@ export function useShowBrowserOnRequest(open: boolean, requestToken: number, sho
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

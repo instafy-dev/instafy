@@ -6,10 +6,7 @@ import {
   type ProviderExecutionContext,
 } from "@instafy/provider-contract";
 import type { CameraCaptureMetadata } from "../camera/types";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../utils/isRecord";
 
 function serializeEventIdentity(value: Record<string, unknown>): string {
   try {

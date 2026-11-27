@@ -1,4 +1,5 @@
 import type { RunRecord } from "../types";
+import { isRecord } from "../utils/isRecord";
 
 /**
  * The key, on a run's metadata, of the runs and the agents whose turns it
@@ -12,10 +13,6 @@ type RunsById<Fields extends keyof RunRecord> =
   | Readonly<Record<string, Pick<RunRecord, Fields>>>
   | null
   | undefined;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * The runs and agents a queued turn waits for, in the order the message

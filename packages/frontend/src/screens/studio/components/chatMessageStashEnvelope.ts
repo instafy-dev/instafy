@@ -1,5 +1,6 @@
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
 import type { BrowserSessionPageTarget } from "./browserSessionPages";
+import { isRecord } from "../../../utils/isRecord";
 
 export type ChatMessageStashEnvelope = {
   targetAgentHandles: string[];
@@ -8,10 +9,6 @@ export type ChatMessageStashEnvelope = {
   metadata: Record<string, unknown> | null;
   runtimeOverride: SubmitConversationRuntimeOverride | null;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function readNullableRecord(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;

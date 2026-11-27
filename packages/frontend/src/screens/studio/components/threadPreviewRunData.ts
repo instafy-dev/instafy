@@ -3,12 +3,9 @@ import { isAwaitingLeaseRunStale, isRunActivelyProgressing } from "../../../conv
 import type { RunRecord } from "../../../types";
 import { extractControllerConversationNoticeStatus } from "./controllerConversationNotice";
 import type { ChatMessage } from "../types";
+import { isRecord } from "../../../utils/isRecord";
 
 const THREAD_TERMINAL_RUN_STATUSES = new Set(["success", "failed", "canceled", "merged"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parseTimestamp(value: string | null | undefined): number {
   if (typeof value !== "string" || value.trim().length === 0) {

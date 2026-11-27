@@ -22,6 +22,7 @@ import {
   shouldApplyConversationGoalSnapshot,
   type ConversationGoal,
 } from "./conversationGoals";
+import { isRecord } from "../utils/isRecord";
 
 export interface ConversationState {
   localId: string;
@@ -329,10 +330,6 @@ function normalizePendingRunSubmittedAt(
   return normalized;
 }
 
-function isMetadataRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function firstText(values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value !== "string") {
@@ -347,11 +344,11 @@ function firstText(values: unknown[]): string | null {
 }
 
 function resolveAppendClientMessageId(message: ChatMessage): string | null {
-  const metadata = isMetadataRecord(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const promptMetadata =
-    metadata && isMetadataRecord(metadata.promptMetadata)
+    metadata && isRecord(metadata.promptMetadata)
       ? metadata.promptMetadata
-      : metadata && isMetadataRecord(metadata.prompt_metadata)
+      : metadata && isRecord(metadata.prompt_metadata)
         ? metadata.prompt_metadata
         : metadata;
   return firstText([

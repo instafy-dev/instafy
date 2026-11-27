@@ -1,6 +1,4 @@
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+import { isRecord } from "../utils/isRecord";
 
 function hasOwnKey(map: Record<string, unknown>, keys: string[]): boolean {
   return keys.some((key) => Object.prototype.hasOwnProperty.call(map, key));

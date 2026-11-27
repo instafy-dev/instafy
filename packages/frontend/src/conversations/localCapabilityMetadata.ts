@@ -1,10 +1,4 @@
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function isMetadataRecord(value: unknown): value is Record<string, unknown> {
-  return isRecord(value);
-}
+import { isRecord } from "../utils/isRecord";
 
 export function mergeLocalCapabilityMetadata(
   ...sources: Array<Record<string, unknown> | null | undefined>

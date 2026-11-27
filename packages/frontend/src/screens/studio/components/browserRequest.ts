@@ -3,6 +3,7 @@ import { didSendFailForPromptSentFromThisPage } from "../../../conversations/sen
 import type { ChatMessage } from "../types";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { BrowserTransport } from "./usePersonalBrowserBridge";
+import { isRecord } from "../../../utils/isRecord";
 
 export type BrowserRequest = {
   task: string;
@@ -220,10 +221,6 @@ export const BROWSER_HANDS_BACK_METADATA_KEY = "browserHandsBack";
  * and the page itself).
  */
 export const BROWSER_CONTINUES_RUN_METADATA_KEY = "browserContinuesRunId";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function promptMetadataRecords(metadata: unknown): Record<string, unknown>[] {
   if (!isRecord(metadata)) return [];

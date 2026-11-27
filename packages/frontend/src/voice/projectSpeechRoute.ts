@@ -17,6 +17,7 @@ import {
   type SpeechRoute,
   type SpeechRouteHostMode,
 } from "./speechRoute";
+import { isRecord } from "../utils/isRecord";
 
 export type ProjectSpeechRouteHostMode = SpeechRouteHostMode;
 
@@ -28,10 +29,6 @@ export type ProjectSpeechRouteInput = {
   hostMode?: ProjectSpeechRouteHostMode | null;
   updatedAt?: string | null;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function findSpeechIntegration(integrations: ControllerProjectIntegration[]) {
   return (

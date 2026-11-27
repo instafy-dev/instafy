@@ -13,6 +13,7 @@ import { readChangeUndone } from "./chatLaterChanges";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import { isLetOctoContinuePrompt } from "./useBrowserHumanInput";
 import type { SubmitMessageFn } from "./useChatSubmitFlow";
+import { isRecord } from "../../../utils/isRecord";
 
 /**
  * How long after a browser turn its build can still be started from what it
@@ -37,10 +38,6 @@ type Options = {
    */
   resendHandBack?: (handBack: ChatMessage, metadata: Record<string, unknown>) => Promise<boolean>;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** A prompt's own metadata and its stored prompt's, which a reload brings back. */
 function promptRecords(message: Pick<ChatMessage, "metadata">): Record<string, unknown>[] {

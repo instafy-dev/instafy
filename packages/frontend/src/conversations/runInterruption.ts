@@ -1,4 +1,5 @@
 import type { RunRecord } from "../types";
+import { isRecord } from "../utils/isRecord";
 
 /** A stop that put a running turn back in the queue, as the controller records it. */
 export interface RunInterruption {
@@ -9,10 +10,6 @@ export interface RunInterruption {
    * the record has no readable one.
    */
   resumeByMs: number | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

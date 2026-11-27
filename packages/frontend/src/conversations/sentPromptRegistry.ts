@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { ChatMessage } from "../screens/studio/types";
 import { readRunFailureRetryOf } from "./runFailurePresentation";
+import { isRecord } from "../utils/isRecord";
 
 /**
  * The prompts this page sent, and the runs each one started, held in module
@@ -82,10 +83,6 @@ function changeEntry(entry: SentPrompt, change: () => void): void {
   for (const listener of Array.from(sendFailureListeners)) {
     listener();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function clientMessageIds(metadata: unknown): string[] {

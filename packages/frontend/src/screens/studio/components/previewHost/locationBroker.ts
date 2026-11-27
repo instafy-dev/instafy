@@ -7,6 +7,7 @@ import {
   subscribeLocationSites,
   type LocationSiteMeta,
 } from "./locationSites";
+import { isRecord } from "../../../../utils/isRecord";
 
 /**
  * Studio is the only thing that calls the browser's geolocation. A site shown
@@ -51,9 +52,6 @@ export type LocationCoords = {
 
 /** A short opaque id the site picks; it only comes back to that site. */
 const REQUEST_ID = /^[A-Za-z0-9:._-]{1,64}$/;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Reads a site's location message (shape only; the caller checks where it came from). */
 export function parseLocationMessage(data: unknown): LocationSiteMessage | null {

@@ -11,10 +11,7 @@ import { continuePromptIds, getControllerConversationNoticeKind, readChatRunStop
 import { isGenericProgressLabel, THREAD_ACTION_CARD_TYPES } from "./threadPreviewHelpers";
 import { readEarlierAttempts, readPendingRetry, resolveAutomaticRetryFold } from "./automaticRetryFold";
 import { resolveRoutedBrowserFold } from "./routedBrowserFold";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function isLocalCapabilityStatusMessage(message: ChatMessage): boolean {
   const metadata = message.metadata && isRecord(message.metadata)

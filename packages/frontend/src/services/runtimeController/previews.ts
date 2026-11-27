@@ -4,6 +4,7 @@ import {
   resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
+import { isRecord } from "../../utils/isRecord";
 
 /** The broker's probe of the site behind a preview. `status` is the HTTP status it answered with, when it did. */
 export type SitePreviewHealth = { listening: boolean; status: number | null };
@@ -119,10 +120,6 @@ export function isSitePreviewRateLimited(cause: unknown): boolean {
 
 export function isSitePreviewsUnavailable(cause: unknown): boolean {
   return sitePreviewProblem(cause) === "unavailable";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const readString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;

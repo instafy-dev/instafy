@@ -34,6 +34,7 @@ import {
 } from "./chatAssistantIdentity";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
 import { formatRuntimeResourcesSummary } from "./chatRuntimeResources";
+import { isRecord } from "../../../utils/isRecord";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const { list: listMyAgents } = controllerClient.agents;
@@ -41,10 +42,6 @@ const { list: listMyAgents } = controllerClient.agents;
 type ShowStatus = (message: string, intent: StatusIntent, durationMs?: number) => void;
 type RuntimeLike = { label: string; state: string; resources?: unknown | null };
 type RuntimeOptionLike = { label: string; state: string; resources?: unknown | null };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 export function useChatAgentRoster({
   activeConversationId,

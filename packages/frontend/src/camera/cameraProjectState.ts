@@ -1,14 +1,11 @@
 import type { ControllerProjectIntegration } from "../services/runtimeController/integrations";
 import type { CameraCaptureMetadata, CameraLensId } from "./types";
+import { isRecord } from "../utils/isRecord";
 
 export interface ProjectProviderCameraState {
   selectedLens: CameraLensId | null;
   lastCapture: CameraCaptureMetadata | null;
   updatedAt: string | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeLensId(value: unknown): CameraLensId | null {

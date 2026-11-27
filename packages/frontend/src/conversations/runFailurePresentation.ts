@@ -18,6 +18,7 @@ import { resolveProxyUpstreamErrorGuidance } from "../screens/studio/components/
 import type { ChatMessage } from "../screens/studio/types";
 import type { ControllerRuntimeStatusEntry } from "../services/runtimeController/runtimes";
 import { usageLimitResetTimeForReader } from "./usageLimitReset";
+import { isRecord } from "../utils/isRecord";
 
 /**
  * Presentation helpers for failed agent runs.
@@ -595,10 +596,6 @@ export function nextSignInForViewer(
 }
 
 export const RETRYING_STATUS_DISPLAY_TEXT = "Trying again…";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizedStringField(metadata: Record<string, unknown> | null, key: string): string {
   const value = metadata?.[key];

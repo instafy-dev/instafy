@@ -9,16 +9,13 @@ import { extractMessageDetails } from "./chatMessageMetadata";
 import { CommandOutputBlock } from "./CommandOutputBlock";
 import { renderThreadCompactEventIcon, stripShellWrapperFromCommand } from "./threadPreviewHelpers";
 import { isBrowserToolStep, turnStepFromMessage, type DetailItem, type StepState, type TurnStep } from "./turnActivity";
+import { isRecord } from "../../../utils/isRecord";
 
 /** Details lists at most this many rows before "Show earlier steps". */
 export const TURN_ACTIVITY_DETAILS_ROW_CAP = 60;
 
 const ROW_CLASS = "flex min-h-6 min-w-0 items-center gap-1.5 rounded-lg pr-1 text-xs pointer-coarse:min-h-11";
 const ICON_CLASS = "h-3.5 w-3.5 flex-none text-slate-400 dark:text-slate-500";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function StepStateGlyph({ state }: { state: StepState }) {
   if (state === "running") {

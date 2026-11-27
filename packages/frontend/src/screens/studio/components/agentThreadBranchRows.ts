@@ -9,6 +9,7 @@ import {
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
 import { isGenericProgressLabel } from "./threadPreviewHelpers";
+import { isRecord } from "../../../utils/isRecord";
 
 /** One AI in a thread, as its face resolves it (utils/aiFace.ts); the handle is normalized. */
 export type AgentThreadBranchParticipant = AiFaceIdentity & { handle: string };
@@ -27,10 +28,6 @@ type ThreadReference = {
 };
 
 const THREAD_REFERENCE_REGEX = /\[\[thread:([^\]|]+)(?:\|([^\]]*))?\]\]/g;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeHandle(value: unknown): string | null {
   if (typeof value !== "string") {

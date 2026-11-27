@@ -25,7 +25,6 @@ import {
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
   hasRecommendationOrigin,
-  isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
   resolveConversationVisibilityCandidate,
@@ -40,6 +39,7 @@ import {
   type ConversationsAction,
   type ConversationsState,
 } from "./conversationState";
+import { isRecord } from "../utils/isRecord";
 
 interface PendingConversationEffectsArgs {
   state: ConversationsState;
@@ -447,7 +447,7 @@ export function usePendingConversationEffects({
         });
       }
       // Only an update that carries metadata can say who wrote the row; one without it keeps the current value.
-      if (isPlainObject(update.metadata)) {
+      if (isRecord(update.metadata)) {
         const nextToolSource = toolSourceOf(update.metadata);
         if ((conversation.toolSource ?? null) !== nextToolSource) {
           dispatch({ type: "SET_TOOL_SOURCE", id: localId, toolSource: nextToolSource });

@@ -17,6 +17,7 @@ import { ChatActionCard, type ChatActionCardAction } from "./ChatActionCard";
 import { TurnActivityLine } from "./TurnActivityLine";
 import { THINKING_LINE, WORKING_LINE } from "./turnActivity";
 import type { ChatMessage } from "../types";
+import { isRecord } from "../../../utils/isRecord";
 
 type ParsedActionRequest = {
   testId: string | null;
@@ -53,10 +54,6 @@ type ParsedActionRequestAction = {
   successToast: string | null;
   testId: string | null;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function readString(record: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {

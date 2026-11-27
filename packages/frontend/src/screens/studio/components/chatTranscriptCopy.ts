@@ -10,6 +10,7 @@ import { viewerSignInsSnapshot } from "../../../conversations/aiSignIns";
 import type { ControllerRuntimeStatusEntry } from "../../../services/runtimeController/runtimes";
 import type { ChatMessage, ChatMessageFileChange } from "../types";
 import { readRowStopNotice, rowWentOnFromStop } from "./chatMessagePresentation";
+import { isRecord } from "../../../utils/isRecord";
 
 /**
  * Who copies the chat, as its rows word a failed turn for them: a failed
@@ -32,10 +33,6 @@ const THREAD_COPY_EXCLUDED_TYPES = new Set([
   "runtime_switch",
   "reasoning",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeMessageType(message: ChatMessage): string {
   const directType =

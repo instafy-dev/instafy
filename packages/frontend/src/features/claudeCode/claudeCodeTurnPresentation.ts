@@ -19,6 +19,7 @@ import {
   subscribeClaudeCodeLogins,
   type ClaudeCodeLogin,
 } from "./claudeCodeLoginsStore";
+import { isRecord } from "../../utils/isRecord";
 
 /**
  * How a Claude Code turn reads in the chat (docs/Local-Engine-Turns.md 5.5,
@@ -296,10 +297,6 @@ export function claudeCodeSpeakerLine(
 function possessive(name: string | null): string {
   const trimmed = name?.trim() ?? "";
   return trimmed ? `${trimmed}'s` : "the sender's";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isFailureCode(value: string): value is ClaudeCodeFailureCode {

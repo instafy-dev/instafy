@@ -48,6 +48,7 @@ import { isInProgressRunStale, isQueuedRunStale } from "../../../conversations/r
 import { earlierTurnWaitingLine } from "../../../conversations/messageTurns";
 import { readTurnReplyDraft } from "../../../conversations/replyDrafts";
 import { useRunFailureRetry } from "./RunFailureNotice";
+import { isRecord } from "../../../utils/isRecord";
 
 const CHAT_SPINE_GUTTER_PX = 26;
 // Steps are the activity line's and Details'; they are never update rows.
@@ -56,10 +57,6 @@ const STEP_MESSAGE_TYPES = new Set(["command_execution", "mcp_tool_call", "web_s
 // the turn's default view, never behind Details.
 const CARD_MESSAGE_TYPES = new Set([...THREAD_ACTION_CARD_TYPES, "multi_agent_plan"]);
 const CANCELLED_STATUSES = new Set(["canceled", "cancelled"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 type ConversationMessagesLike = { messages?: readonly ChatMessage[] } | null | undefined;
 

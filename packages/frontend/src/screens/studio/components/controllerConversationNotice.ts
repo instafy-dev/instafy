@@ -1,11 +1,8 @@
 import type { ChatMessage } from "../types";
 import { isRecoverableRuntimeStartAlert, isRuntimeLimitWaitAlert } from "./runtimeAlertPresentation";
+import { isRecord } from "../../../utils/isRecord";
 
 export type ControllerConversationNoticeKind = "runtime_alert" | "run_cancellation";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeString(value: unknown): string | null {
   if (typeof value !== "string") {

@@ -9,6 +9,7 @@ import type {
 import { registeredTurnEngines } from "../features/turnEngineRegistry";
 import type { ControllerCredentialListItem } from "../services/runtimeController/credentials";
 import { resolveCredentialLabel } from "../utils/credentialFormatting";
+import { isRecord } from "../utils/isRecord";
 
 /**
  * Which of a person's own sign-ins a turn ran on (docs/Local-Engine-Turns.md
@@ -38,10 +39,6 @@ export type AiSignInStamp = {
   /** It was one of the agent's backups, not its first AI. */
   backup: boolean;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** The stamp under `key` of a message's metadata, or null when it names no sign-in as the controller does. */
 export function readAiSignInStamp(

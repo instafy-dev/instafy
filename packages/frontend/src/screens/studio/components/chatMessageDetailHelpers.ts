@@ -13,13 +13,10 @@ import type { SemanticTone } from "../../../theme/semanticTones";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import { parseCommandExecutionOutput } from "./chatContentHelpers";
 import { extractAgentJobId } from "./chatMessagePresentation";
+import { isRecord } from "../../../utils/isRecord";
 
 const MAX_UI_SUGGESTED_REPLIES = 3;
 const MAX_UI_SUGGESTED_REPLY_CHARS = 160;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 export function isCurrentUserChatMessage(
   message: ChatMessage,

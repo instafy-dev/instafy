@@ -18,6 +18,8 @@
  * and nothing else the line says.
  */
 
+import { isRecord } from "../../../../utils/isRecord";
+
 export type SiteAsk = {
   /** The page's id for this click; answers (`ask-status`) name it. */
   id: string;
@@ -57,9 +59,6 @@ const ASK_PARAMS_MAX_DEPTH = 3;
 /** The chat line before " · via <site>", and the whole message. */
 export const ASK_LINE_MAX_CHARS = 140;
 export const ASK_MESSAGE_MAX_CHARS = 200;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const byteLength = (text: string) => new TextEncoder().encode(text).length;
 

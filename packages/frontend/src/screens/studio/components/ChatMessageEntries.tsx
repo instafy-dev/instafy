@@ -64,13 +64,10 @@ import { useAgentJobThreadPreviewState } from "./useAgentJobThreadPreviewState";
 import { useAuthorizedImage, useNearViewport } from "./useAuthorizedImage";
 import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
 import "./ChatIdentityLayout.css";
+import { isRecord } from "../../../utils/isRecord";
 
 const { getRawUrl: getWorkspaceFileRawUrl } = controllerClient.workspace.files;
 const CHAT_LEFT_SPINE_OFFSET_CLASS = "chat-message-gutter-spine left-[-26px]";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function handleChatMessageCopy(event: ReactClipboardEvent<HTMLDivElement>) {
   sanitizeChatMessageCopyEvent(event.nativeEvent);
