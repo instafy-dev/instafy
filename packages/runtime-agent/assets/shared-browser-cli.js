@@ -6063,8 +6063,12 @@ async function clickLanding(target) {
 // link's LINK_CLICK_MS), bounds how long the page has to take the click, in
 // view and still, before the click is made; the click's own wait for the
 // load it starts is the click's as ever. A page that does not take it in
-// that time throws ClickNotTaken.
-async function clickControlItself(page, target, wait = {}, { keepFocus = false } = {}) {
+// that time throws ClickNotTaken. `shown` writes the click to the action feed
+// (its pointer, ripple and ticker line), and runs only once the click is
+// known to land, right before it is made: written before this look, a click a
+// cover kept from its control drew a pointer and a ripple on the control and
+// was listed as a click, though nothing was clicked (Nov 22).
+async function clickControlItself(page, target, wait = {}, { keepFocus = false, shown = () => {} } = {}) {
   await refuseUnlandableClick(page, target, wait);
   await pointAtControl(target, { keepFocus });
   const before = await readingBefore(page);
@@ -6073,6 +6077,7 @@ async function clickControlItself(page, target, wait = {}, { keepFocus = false }
       throw notTaken(error);
     });
   }
+  shown(target);
   await target.locator.click();
   return before;
 }
@@ -9283,30 +9288,33 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     documents?.limitFormPosts(consentRejection || freeSearch
       ? FREE_SEARCH_POST_ORIGINS
       : stepPostOrigins(readingStep, sourceOrigin, clickSubmission, destination));
-    const box = target.description.box;
     const size = await viewport(page);
     assertStepOnTime();
-    emitAction({
-      type: "click",
-      label: `Click ${quotedControlLabel(target.description)}`,
-      url: page.url(),
-      x: box.x + box.width / 2,
-      y: box.y + box.height / 2,
-      ...size,
-    });
     const beforeUrl = page.url();
     // The field whose own suggestions the control is one of: the click
     // leaves the focus there (pointAtControl), and answers with them when the
     // option is gone before the click comes (goneSuggestionResult). Looked
     // at before the pointer moves, which may redraw the list.
     const suggestionField = await suggestionFieldOf(target);
-    const keepFocus = { keepFocus: suggestionField !== null };
+    // The click is written to the action feed by the control it is made on,
+    // once it is known to land (clickControlItself).
+    const clicking = {
+      keepFocus: suggestionField !== null,
+      shown: ({ description }) => emitAction({
+        type: "click",
+        label: `Click ${quotedControlLabel(description)}`,
+        url: page.url(),
+        x: description.box.x + description.box.width / 2,
+        y: description.box.y + description.box.height / 2,
+        ...size,
+      }),
+    };
     // The dialogs and lists a person sees before the click, for what its
     // result says opened (clickedLine).
     const partsBefore = await shownPartsOf(page);
     let before;
     try {
-      before = await clickControlItself(page, target, linkWait, keepFocus);
+      before = await clickControlItself(page, target, linkWait, clicking);
     } catch (error) {
       const opened = await openedInstead(error);
       if (opened) return opened;
@@ -9327,7 +9335,7 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
       approvalProtocol.authority();
       assertStepOnTime();
       try {
-        before = await clickControlItself(page, target, linkWait, keepFocus);
+        before = await clickControlItself(page, target, linkWait, clicking);
       } catch (retryError) {
         if (suggestionField && (await controlLeftThePage(target, retryError))) {
           return await goneSuggestionResult(page, target, suggestionField, withholding);

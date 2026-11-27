@@ -2909,7 +2909,10 @@ Studio nor the runtime opens a card's site on its own; the card's hosts are only
 shown to the person.
 
 Every high-level snapshot/action appends the cursor/action-ticker telemetry
-owned by the Shared Browser shell. The runtime records the action-log position
+owned by the Shared Browser shell. A click is appended once the browser has
+seen that it lands on its control, right before it is made: a click a cover
+keeps from its control draws no cursor and lists no click. The runtime records
+the action-log position
 before the turn and accepts completion only when it sees both a completed call
 from the exact `instafy_shared_browser` server and new action evidence, or a
 `navigate`, `open_tab`, `click`, `type` or `press` from that server that the
