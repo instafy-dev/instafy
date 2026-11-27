@@ -250,10 +250,14 @@ fn validate_control_url(raw: &str) -> Result<Url> {
     Ok(url)
 }
 
+/// `Url::host_str` writes an IPv6 address in brackets (`[::1]`), which is no
+/// `IpAddr`: read as one with them, the IPv6 loopback address was refused.
 fn is_loopback_host(url: &Url) -> bool {
     match url.host_str() {
         Some(host) if host.eq_ignore_ascii_case("localhost") => true,
         Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .parse::<IpAddr>()
             .map(|address| address.is_loopback())
             .unwrap_or(false),
@@ -455,6 +459,39 @@ mod tests {
             "http://127.0.0.1:43127/v1/status"
         );
         assert_eq!(config.project_id.to_string(), PROJECT_ID);
+    }
+
+    #[test]
+    fn takes_every_spelling_of_this_machine_and_no_other_address() {
+        for control_url in [
+            "http://localhost:43127",
+            "http://LOCALHOST:43127",
+            "http://127.0.0.1:43127",
+            "http://[::1]:43127",
+        ] {
+            let config = PersonalBrowserConfig::from_values(control_url, "token", PROJECT_ID)
+                .unwrap_or_else(|error| panic!("{control_url}: {error}"));
+            assert!(
+                config
+                    .endpoint("/v1/status")
+                    .expect("status URL")
+                    .as_str()
+                    .ends_with(":43127/v1/status"),
+                "{control_url}"
+            );
+        }
+        for control_url in [
+            "http://192.168.1.20:43127",
+            "http://[::2]:43127",
+            "http://[fe80::1]:43127",
+            "http://localhost.example.com:43127",
+            "http://127.0.0.1.example.com:43127",
+        ] {
+            assert!(
+                PersonalBrowserConfig::from_values(control_url, "token", PROJECT_ID).is_err(),
+                "{control_url}"
+            );
+        }
     }
 
     #[test]
