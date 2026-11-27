@@ -151,9 +151,9 @@ mod tests_provider_request_lifecycle;
 #[cfg(test)]
 mod tests_provider_space;
 #[cfg(test)]
-mod tests_runtime_stop_fence;
+mod tests_round_trips;
 #[cfg(test)]
-mod tests_send_round_trips;
+mod tests_runtime_stop_fence;
 #[cfg(test)]
 mod tests_stopped_turn_report;
 #[cfg(test)]

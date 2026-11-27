@@ -31,6 +31,7 @@ use crate::config::PgPool;
 use crate::credential_keys::CredentialKeyRing;
 use crate::model_defaults::{resolve_agent_model_for_provider, DEFAULT_MANAGED_AI_PROVIDER_ID};
 use crate::projects::load_project_record;
+use crate::typed_sql::typed;
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
     unauthorized, ApiError, AppState,
@@ -388,6 +389,24 @@ async fn lock_secret_table_initialization(
             &[],
         )
         .await?;
+    Ok(())
+}
+
+/// Set once this process has created and hardened the secret tables for a
+/// runtime's secrets request. Every job asks for its secrets, and the schema
+/// pass takes a connection, a lock and `ALTER TABLE`'s lock on
+/// `project_secrets`: eight round trips and a moment where no request can read
+/// a secret. Once per process keeps the hardening without that cost on every turn.
+static AGENT_SECRET_TABLES_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+async fn ensure_secret_tables_once_for_agents(pool: &PgPool) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
+    if AGENT_SECRET_TABLES_READY.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    ensure_secret_tables(pool).await?;
+    AGENT_SECRET_TABLES_READY.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -1396,7 +1415,7 @@ async fn agent_secrets(
         .as_ref()
         .ok_or_else(|| internal_error("credential encryption key missing"))?;
 
-    if let Err(error) = ensure_secret_tables(&state.pool).await {
+    if let Err(error) = ensure_secret_tables_once_for_agents(&state.pool).await {
         tracing::warn!(
             ?error,
             "failed to ensure secret tables before agent secrets"
@@ -1417,13 +1436,13 @@ async fn agent_secrets(
         .await?;
 
     let row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id,
                     intent, run_id, engine
              from agent_jobs
              where id = $1 and project_id = $2
              for share",
-            &[&job_id, &project_id],
+            typed![&job_id, &project_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to load agent job: {error}")))?;

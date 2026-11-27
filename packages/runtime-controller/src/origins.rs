@@ -49,6 +49,7 @@ use crate::tokens::{
     decode_scoped_token, mint_scoped_token, mint_scoped_token_expires_no_later_than,
     mint_scoped_token_with_browser_actor, ScopedTokenRequest,
 };
+use crate::typed_sql::typed;
 use runtime_contracts::{
     AccessTokenClaims, GIT_DELETE_SCOPE, GIT_DELETE_TOKEN_SUBJECT, GIT_DELETE_TOKEN_TTL_SECONDS,
 };
@@ -828,7 +829,7 @@ async fn authorize_job_capability(
         .await
         .map_err(|error| internal_error(format!("failed to validate active job: {error}")))?;
     let job = transaction
-        .query_opt(
+        .query_typed_opt(
             "select j.id, j.payload, j.plan_group_id, r.provider, r.capabilities,
                     r.active_lease_id,
                     rl.project_id as runtime_lease_project_id,
@@ -845,7 +846,7 @@ async fn authorize_job_capability(
                and r.status in ('ready', 'running', 'draining')
              order by j.leased_at desc nulls last
              limit 1",
-            &[
+            typed![
                 project_id,
                 &run_id,
                 &runtime_id,
@@ -2080,12 +2081,12 @@ async fn runtime_provider_for_project(
         .context("failed to acquire connection for runtime project validation")?;
 
     let row = connection
-        .query_opt(
+        .query_typed_opt(
             "select provider, capabilities
              from runtimes
              where id = $1
                and project_id = $2",
-            &[runtime_id, project_id],
+            typed![runtime_id, project_id],
         )
         .await
         .context("failed to validate preferred runtime project")?;
@@ -2917,15 +2918,15 @@ async fn acquire_lease_with_policy(
     // two devices to both observe an empty set and become writers. The project
     // row serializes that empty-set transition as well as renew/takeover.
     transaction
-        .query_one(
+        .query_typed_one(
             "select id from projects where id = $1 for update",
-            &[project_id],
+            typed![project_id],
         )
         .await
         .context("failed to lock project for workspace lease acquisition")?;
 
     let existing_row = transaction
-        .query_opt(
+        .query_typed_opt(
             "select *
              from workspace_leases
              where project_id = $1
@@ -2933,7 +2934,7 @@ async fn acquire_lease_with_policy(
                and expires_at > now()
              order by expires_at desc
              for update",
-            &[project_id],
+            typed![project_id],
         )
         .await
         .context("failed to load active workspace lease")?;
@@ -3029,11 +3030,11 @@ async fn insert_granted_lease(
     metadata: &Option<JsonValue>,
 ) -> Result<LeaseAcquireOutcome> {
     let inserted_row = transaction
-        .query_one(
+        .query_typed_one(
             "insert into workspace_leases (project_id, user_id, runtime_id, status, acquired_at, expires_at, metadata)
              values ($1, $2, $3, 'active', now(), $4, $5)
              returning *",
-            &[project_id, &user_id, &runtime_id, expires_at, metadata],
+            typed![project_id, &user_id, &runtime_id, expires_at, metadata],
         )
         .await
         .context("failed to insert new workspace lease")?;
@@ -3194,13 +3195,13 @@ pub(crate) async fn load_active_lease_by_id(
         .context("failed to acquire connection for load_active_lease_by_id")?;
 
     let row = connection
-        .query_opt(
+        .query_typed_opt(
             "select *
              from workspace_leases
              where id = $1
                and status = 'active'
                and expires_at > now()",
-            &[lease_id],
+            typed![lease_id],
         )
         .await
         .context("failed to query workspace lease by id")?;
@@ -3285,7 +3286,7 @@ pub(crate) async fn release_lease(
         .context("failed to acquire connection for release_lease")?;
 
     let row = connection
-        .query_opt(
+        .query_typed_opt(
             "update workspace_leases
              set status = $1,
                  released_at = now(),
@@ -3295,7 +3296,7 @@ pub(crate) async fn release_lease(
                and ($4::uuid is null or coalesce(user_id, $4::uuid) = $4)
                and ($5::uuid is null or coalesce(runtime_id, $5::uuid) = $5)
              returning *",
-            &[&status, lease_id, project_id, &user_id, &runtime_id],
+            typed![&status, lease_id, project_id, &user_id, &runtime_id],
         )
         .await
         .context("failed to release workspace lease")?;
