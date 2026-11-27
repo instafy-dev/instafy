@@ -174,10 +174,14 @@ struct ProviderUpsertRequest {
     id: String,
     display_name: Option<String>,
     kind: String,
-    #[serde(default)]
-    owner_org_id: Option<Uuid>,
-    #[serde(default)]
-    allowed_org_ids: Vec<Uuid>,
+    /// Which organizations may use the provider. A request that leaves a
+    /// field out keeps what is stored, as a provider service's own
+    /// registration does: it never sends either field. `null` clears it, as
+    /// does `[]` for `allowedOrgIds`.
+    #[serde(default, deserialize_with = "double_option")]
+    owner_org_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "double_option")]
+    allowed_org_ids: Option<Option<Vec<Uuid>>>,
     #[serde(default)]
     endpoint: Option<String>,
     #[serde(default)]
@@ -253,6 +257,51 @@ fn provider_route_id_conflicts(existing_id: Option<&str>, requested_id: &str) ->
     existing_id.is_some_and(|existing_id| existing_id != requested_id)
 }
 
+/// Tells a field left out (`None`) from one sent as `null` (`Some(None)`).
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+/// Who may use a provider once a registration is applied. A field the
+/// request leaves out keeps its stored value, so a provider service
+/// registering itself, which never sends either field, cannot clear an
+/// owner or allow-list an operator set: with neither, every organization
+/// could launch runtimes on that provider.
+fn resolve_provider_ownership(
+    stored: Option<(Option<Uuid>, Vec<Uuid>)>,
+    requested_owner_org_id: Option<Option<Uuid>>,
+    requested_allowed_org_ids: Option<Option<Vec<Uuid>>>,
+) -> (Option<Uuid>, Vec<Uuid>) {
+    let (stored_owner_org_id, stored_allowed_org_ids) = stored.unwrap_or_default();
+    (
+        requested_owner_org_id.unwrap_or(stored_owner_org_id),
+        requested_allowed_org_ids
+            .map(Option::unwrap_or_default)
+            .unwrap_or(stored_allowed_org_ids),
+    )
+}
+
+/// Whether registering `requested` in place of the stored credential
+/// changes how the controller authenticates to a provider's route, which a
+/// route in use may not do. Adding a credential to a route stored without
+/// one is not such a change. The controller called that route without a
+/// provider credential, so its provider either checked none, and ignores the
+/// new one, or refused those calls already; on its own Instafy Cloud route
+/// the controller still falls back to its own credentials when the new one
+/// is refused. A provider that starts requiring a token can therefore
+/// register it while its runtimes run, rather than being cut off from its
+/// controller until they stop.
+fn provider_route_credential_changed(stored: Option<&str>, requested: Option<&str>) -> bool {
+    match stored.filter(|token| !token.trim().is_empty()) {
+        None => false,
+        Some(stored) => Some(stored) != requested,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +356,287 @@ mod tests {
         assert!(error
             .to_string()
             .contains("normalize to the same identity 'instafy_cloud'"));
+    }
+
+    /// The body a provider service sends when it registers itself on start
+    /// (`ProviderRegistrationRequest` in runtime-provider-service): it never
+    /// names an owner or an allow-list.
+    fn self_registration_body(provider_id: &str, auth_token: Option<&str>) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "id": provider_id,
+            "displayName": "Provider",
+            "kind": "external_http",
+        });
+        if let Some(auth_token) = auth_token {
+            body["authToken"] = auth_token.into();
+        }
+        body
+    }
+
+    #[test]
+    fn provider_registration_keeps_ownership_it_leaves_out() {
+        let owner = Uuid::new_v4();
+        let guest = Uuid::new_v4();
+        let stored = Some((Some(owner), vec![guest]));
+
+        let request: ProviderUpsertRequest =
+            serde_json::from_value(self_registration_body("provider", Some("provider-token")))
+                .expect("self-registration body");
+        assert_eq!(request.owner_org_id, None);
+        assert_eq!(request.allowed_org_ids, None);
+        assert_eq!(
+            resolve_provider_ownership(
+                stored.clone(),
+                request.owner_org_id,
+                request.allowed_org_ids
+            ),
+            (Some(owner), vec![guest])
+        );
+
+        let cleared: ProviderUpsertRequest = serde_json::from_value(serde_json::json!({
+            "id": "provider",
+            "kind": "external_http",
+            "ownerOrgId": null,
+            "allowedOrgIds": null,
+        }))
+        .expect("explicit clear");
+        assert_eq!(cleared.owner_org_id, Some(None));
+        assert_eq!(cleared.allowed_org_ids, Some(None));
+        assert_eq!(
+            resolve_provider_ownership(
+                stored.clone(),
+                cleared.owner_org_id,
+                cleared.allowed_org_ids
+            ),
+            (None, vec![])
+        );
+        assert_eq!(
+            resolve_provider_ownership(stored, None, Some(Some(vec![]))),
+            (Some(owner), vec![])
+        );
+
+        let other = Uuid::new_v4();
+        assert_eq!(
+            resolve_provider_ownership(None, Some(Some(other)), Some(Some(vec![guest]))),
+            (Some(other), vec![guest])
+        );
+        assert_eq!(resolve_provider_ownership(None, None, None), (None, vec![]));
+    }
+
+    #[test]
+    fn adding_a_credential_to_a_route_without_one_is_not_a_rotation() {
+        assert!(!provider_route_credential_changed(None, None));
+        assert!(!provider_route_credential_changed(None, Some("new-token")));
+        assert!(!provider_route_credential_changed(
+            Some(" "),
+            Some("new-token")
+        ));
+        assert!(!provider_route_credential_changed(
+            Some("token"),
+            Some("token")
+        ));
+        assert!(provider_route_credential_changed(
+            Some("token"),
+            Some("rotated")
+        ));
+        assert!(provider_route_credential_changed(Some("token"), None));
+        assert!(provider_route_credential_changed(Some("token"), Some("")));
+    }
+
+    /// The controller's internal token in `build_app_config`: a service
+    /// credential, which is what a provider service registers with.
+    const SERVICE_BEARER: &str = "Bearer internal";
+
+    fn provider_test_app(pool: crate::config::PgPool, label: &str) -> (AppState, Router) {
+        let state = crate::tests::build_test_state(
+            pool,
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                label,
+            ),
+        );
+        (state.clone(), router().with_state(state))
+    }
+
+    async fn register(
+        app: &Router,
+        body: serde_json::Value,
+    ) -> anyhow::Result<(axum::http::StatusCode, serde_json::Value)> {
+        crate::tests::call_router(
+            app,
+            Some(SERVICE_BEARER),
+            "POST",
+            "/providers".to_string(),
+            Some(body),
+        )
+        .await
+    }
+
+    async fn stored_provider(
+        pool: &crate::config::PgPool,
+        provider_id: &str,
+    ) -> anyhow::Result<(Option<Uuid>, Vec<Uuid>, Option<String>)> {
+        let row = pool
+            .get()
+            .await?
+            .query_one(
+                "select owner_org_id, allowed_org_ids, auth_token
+                 from runtime_providers where id = $1",
+                &[&provider_id],
+            )
+            .await?;
+        Ok((row.get(0), row.get(1), row.get(2)))
+    }
+
+    /// A provider service registers itself on every start, and its body has
+    /// no owner or allow-list. That used to clear both, which opened a
+    /// provider an operator had kept to some organizations to every one.
+    #[tokio::test]
+    async fn provider_self_registration_keeps_its_owner_and_allow_list() -> anyhow::Result<()> {
+        let pool = crate::tests::require_origin_test_pool("provider ownership test").await?;
+        let (state, app) = provider_test_app(pool.clone(), "provider-ownership");
+        // No endpoint, so a row left behind by a failed run can never
+        // become another test's default provider.
+        let provider_id = format!("ownership-test-{}", Uuid::new_v4().simple());
+        let owner = Uuid::new_v4();
+        let guest = Uuid::new_v4();
+
+        let outcome = async {
+            let (status, body) = register(
+                &app,
+                serde_json::json!({
+                    "id": provider_id,
+                    "kind": "external_http",
+                    "ownerOrgId": owner,
+                    "allowedOrgIds": [guest],
+                    "authToken": "provider-token",
+                }),
+            )
+            .await?;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+            let (status, body) = register(
+                &app,
+                self_registration_body(&provider_id, Some("provider-token")),
+            )
+            .await?;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["ownerOrgId"], serde_json::json!(owner));
+            assert_eq!(body["allowedOrgIds"], serde_json::json!([guest]));
+            assert_eq!(
+                stored_provider(&pool, &provider_id).await?,
+                (Some(owner), vec![guest], Some("provider-token".to_string()))
+            );
+            let registered = state
+                .provider_registry
+                .provider_config(&provider_id)
+                .expect("the registered provider");
+            assert_eq!(registered.owner_org_id, Some(owner));
+            assert_eq!(registered.allowed_org_ids, vec![guest]);
+
+            // An operator still clears them by saying so.
+            let (status, body) = register(
+                &app,
+                serde_json::json!({
+                    "id": provider_id,
+                    "kind": "external_http",
+                    "authToken": "provider-token",
+                    "ownerOrgId": null,
+                    "allowedOrgIds": [],
+                }),
+            )
+            .await?;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(
+                stored_provider(&pool, &provider_id).await?,
+                (None, vec![], Some("provider-token".to_string()))
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        crate::tests::sql(
+            &pool,
+            "delete from runtime_providers where id = $1",
+            &[&provider_id],
+        )
+        .await?;
+        outcome
+    }
+
+    /// A provider stored without a credential may get its first one while
+    /// its runtimes run: that is how a provider that starts requiring a
+    /// token stays reachable. Changing or removing a credential is still a
+    /// rotation, which waits until its runtimes stop.
+    #[tokio::test]
+    async fn a_route_in_use_takes_its_first_credential_but_no_other() -> anyhow::Result<()> {
+        let pool = crate::tests::require_origin_test_pool("provider credential test").await?;
+        let (_state, app) = provider_test_app(pool.clone(), "provider-credential");
+        let provider_id = format!("credential-test-{}", Uuid::new_v4().simple());
+        let project_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+
+        let outcome = crate::tests::with_shared_db_fixture(fixture, async {
+            let (status, body) = register(&app, self_registration_body(&provider_id, None)).await?;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            crate::tests::sql(
+                &pool,
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+            crate::tests::sql(
+                &pool,
+                "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
+                 values ($1, $2, $3, 'requested', 600)",
+                &[&runtime_id, &project_id, &provider_id],
+            )
+            .await?;
+            crate::tests::sql(
+                &pool,
+                "insert into runtime_leases (project_id, runtime_id, status, requested_at)
+                 values ($1, $2, 'active', now())",
+                &[&project_id, &runtime_id],
+            )
+            .await?;
+
+            let (status, body) = register(
+                &app,
+                self_registration_body(&provider_id, Some("provider-token")),
+            )
+            .await?;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(
+                stored_provider(&pool, &provider_id).await?.2.as_deref(),
+                Some("provider-token")
+            );
+
+            for rotation in [Some("rotated-token"), None] {
+                let (status, body) =
+                    register(&app, self_registration_body(&provider_id, rotation)).await?;
+                assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+                assert_eq!(
+                    stored_provider(&pool, &provider_id).await?.2.as_deref(),
+                    Some("provider-token")
+                );
+            }
+            Ok(())
+        })
+        .await;
+
+        crate::tests::sql(
+            &pool,
+            "delete from runtime_providers where id = $1",
+            &[&provider_id],
+        )
+        .await?;
+        outcome
     }
 
     #[test]
@@ -554,7 +884,7 @@ async fn upsert_provider(
 
     let existing = transaction
         .query_opt(
-            "select id, kind, endpoint, auth_token, metadata
+            "select id, kind, endpoint, auth_token, metadata, owner_org_id, allowed_org_ids
              from runtime_providers
              where btrim(lower(regexp_replace(btrim(id), '[-_[:space:]]+', '_', 'g')), '_') = $1
              for update",
@@ -583,6 +913,17 @@ async fn upsert_provider(
         .metadata
         .clone()
         .unwrap_or_else(|| existing_metadata.clone());
+    let (owner_org_id, allowed_org_ids) = resolve_provider_ownership(
+        existing.as_ref().map(|row| {
+            (
+                row.get::<_, Option<Uuid>>("owner_org_id"),
+                row.get::<_, Option<Vec<Uuid>>>("allowed_org_ids")
+                    .unwrap_or_default(),
+            )
+        }),
+        payload.owner_org_id,
+        payload.allowed_org_ids.clone(),
+    );
     let route_changed = existing.as_ref().is_some_and(|row| {
         let existing_kind: String = row.get("kind");
         let existing_endpoint: Option<String> = row.get("endpoint");
@@ -590,7 +931,10 @@ async fn upsert_provider(
         existing_kind != kind
             || existing_endpoint.as_deref().map(str::trim)
                 != payload.endpoint.as_deref().map(str::trim)
-            || existing_auth_token != payload.auth_token
+            || provider_route_credential_changed(
+                existing_auth_token.as_deref(),
+                payload.auth_token.as_deref(),
+            )
             || (payload.metadata.is_some() && existing_metadata != metadata)
     });
 
@@ -621,8 +965,8 @@ async fn upsert_provider(
                 &[
                     &display_name,
                     &kind,
-                    &payload.owner_org_id,
-                    &payload.allowed_org_ids,
+                    &owner_org_id,
+                    &allowed_org_ids,
                     &payload.endpoint,
                     &payload.auth_token,
                     &metadata,
@@ -641,8 +985,8 @@ async fn upsert_provider(
                     &id,
                     &display_name,
                     &kind,
-                    &payload.owner_org_id,
-                    &payload.allowed_org_ids,
+                    &owner_org_id,
+                    &allowed_org_ids,
                     &payload.endpoint,
                     &payload.auth_token,
                     &metadata,
@@ -664,8 +1008,8 @@ async fn upsert_provider(
         id: id.to_string(),
         display_name,
         kind,
-        owner_org_id: payload.owner_org_id,
-        allowed_org_ids: payload.allowed_org_ids,
+        owner_org_id,
+        allowed_org_ids,
         endpoint: payload.endpoint,
         auth_token: payload.auth_token,
         metadata: Some(metadata),
