@@ -3,6 +3,7 @@ import { Capacitor } from "@capacitor/core";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Eye, EyeClosed, NavArrowLeft, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../components/Button";
+import { Field } from "../components/Field";
 import { Heading } from "../components/Heading";
 import { GitHubIcon } from "../components/IntegrationIcons";
 import { Input } from "../components/Input";
@@ -60,6 +61,18 @@ type PendingControl = LoginOAuthProvider | "submit" | "forgot" | "startOtp" | "r
 
 const INVALID_CREDENTIALS_MESSAGE =
   "That email and password don't match. New here, or no password yet? We'll email you a code.";
+
+const INVALID_OTP_MESSAGE =
+  "That code has expired or isn't valid. Select Resend email to get a new one.";
+
+function isInvalidOtp(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && typeof error.code === "string") {
+    return error.code === "otp_expired";
+  }
+  // Older auth servers may omit the machine-readable code.
+  return "message" in error && error.message === "Token has expired or is invalid";
+}
 
 function isInvalidCredentials(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -282,6 +295,7 @@ export function LoginPage() {
   );
   const [email, setEmail] = useState("");
   const [otpCode, setOtpCode] = useState("");
+  const [invalidOtp, setInvalidOtp] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
@@ -471,6 +485,7 @@ export function LoginPage() {
     resetNativeAuthState();
     setError(null);
     setInvalidCredentials(false);
+    setInvalidOtp(false);
     setMessage(null);
     setAwaitingBrowser(null);
     setPendingControl(null);
@@ -675,7 +690,11 @@ export function LoginPage() {
         finishLogin();
       }
     } catch (err) {
-      const details = err instanceof Error ? err.message : "Unable to verify code.";
+      const invalid = isInvalidOtp(err);
+      setInvalidOtp(invalid);
+      const details = invalid
+        ? INVALID_OTP_MESSAGE
+        : err instanceof Error ? err.message : "Unable to verify code.";
       setError(details);
     } finally {
       setPendingControl(null);
@@ -692,7 +711,8 @@ export function LoginPage() {
     try {
       await sendEmailOtp(nextEmail);
       setOtpCode("");
-      setMessage("Resent the verification email.");
+      setMessage("New code sent. Use the latest email.");
+      otpRef.current?.focus();
     } catch (err) {
       const details = err instanceof Error ? err.message : "Unable to resend code.";
       setError(details);
@@ -1009,7 +1029,7 @@ export function LoginPage() {
       return (
         <div className={compact ? "mt-4 space-y-4" : "mt-8 space-y-6"}>
           <div>
-            <Text variant="overline" tone="muted">
+            <Text variant="fieldLabel" tone="secondary">
               Email address
             </Text>
             <div className="mt-2 flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-3 text-sm dark:border-slate-800 dark:bg-slate-950/40">
@@ -1036,7 +1056,7 @@ export function LoginPage() {
               </InlineNotice>
             ) : null}
             <div>
-              <Text as="label" htmlFor="password" variant="overline" tone="muted" className="sr-only">
+              <Text as="label" htmlFor="password" variant="bodyStrong" className="sr-only">
                 Password
               </Text>
               <div className="relative mt-2">
@@ -1085,6 +1105,11 @@ export function LoginPage() {
                 >
                   Forgot password?
                 </Button>
+                {message ? (
+                  <Text role="status" tone="muted" className="mt-2" data-testid="login-message">
+                    {message}
+                  </Text>
+                ) : null}
               </div>
             </div>
 
@@ -1138,9 +1163,14 @@ export function LoginPage() {
                 id="otp"
                 aria-describedby={error ? "login-error" : undefined}
                 value={otpCode}
-                onChange={(event) => setOtpCode(event.target.value)}
+                onChange={(event) => {
+                  setOtpCode(event.target.value);
+                  setError(null);
+                  setInvalidOtp(false);
+                }}
                 required
                 aria-label="Verification code"
+                aria-invalid={invalidOtp || undefined}
                 radius="full"
                 size="lg"
                 placeholder="Enter the code"
@@ -1162,18 +1192,25 @@ export function LoginPage() {
             </Button>
           </form>
 
-          <Button
-            onPress={handleResendOtp}
-            isPending={pendingControl === "resend"}
-            isDisabled={isBlocked("resend")}
-            variant="text"
-            tone="neutral"
-            size="sm"
-            radius="full"
-            fullWidth
-          >
-            Resend email
-          </Button>
+          <div className="space-y-2">
+            <Button
+              onPress={handleResendOtp}
+              isPending={pendingControl === "resend"}
+              isDisabled={isBlocked("resend")}
+              variant="text"
+              tone="neutral"
+              size="sm"
+              radius="full"
+              fullWidth
+            >
+              Resend email
+            </Button>
+            {message ? (
+              <Text role="status" tone="muted" className="text-center" data-testid="login-message">
+                {message}
+              </Text>
+            ) : null}
+          </div>
 
           <OrDivider compact={compact} />
 
@@ -1200,11 +1237,8 @@ export function LoginPage() {
                 {error}
               </InlineNotice>
             ) : null}
-            <div>
-              <Text as="label" htmlFor="password" variant="overline" tone="muted">
-                New password
-              </Text>
-              <div className="relative mt-2">
+            <Field label="New password" htmlFor="password" hint="Use at least 8 characters.">
+              <div className="relative">
                 <Input
                   ref={passwordRef}
                   id="password"
@@ -1237,15 +1271,9 @@ export function LoginPage() {
                   )}
                 </ToggleIconButton>
               </div>
-              <Text variant="caption" tone="muted" className="mt-2">
-                Use at least 8 characters.
-              </Text>
-            </div>
+            </Field>
 
-            <div>
-              <Text as="label" htmlFor="passwordConfirm" variant="overline" tone="muted">
-                Confirm password
-              </Text>
+            <Field label="Confirm password" htmlFor="passwordConfirm">
               <Input
                 id="passwordConfirm"
                 aria-describedby={error ? "login-error" : undefined}
@@ -1258,7 +1286,7 @@ export function LoginPage() {
                 placeholder="Repeat your password"
                 autoComplete="new-password"
               />
-            </div>
+            </Field>
 
             <Button
               type="submit"
@@ -1297,7 +1325,7 @@ export function LoginPage() {
         <form onSubmit={handleContinueFromEmail} className={compact ? "space-y-3" : "space-y-5"}>
           {error ? <InlineNotice tone="danger" role="alert" id="login-error" data-testid="login-error">{error}</InlineNotice> : null}
           <div>
-            <Text as="label" htmlFor="email" variant="overline" tone="muted" className="sr-only">
+            <Text as="label" htmlFor="email" variant="bodyStrong" className="sr-only">
               Email address
             </Text>
             <Input
@@ -1488,7 +1516,7 @@ export function LoginPage() {
             <div className={compact ? "mt-3" : "mt-6"}>
               {renderBody()}
 
-              {message ? (
+              {message && step !== "otp" && step !== "password" ? (
                 <InlineNotice tone="success" role="status" className="mt-6" data-testid="login-message">
                   {message}
                 </InlineNotice>
