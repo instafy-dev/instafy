@@ -16066,10 +16066,21 @@ fn normalize_codex_read_files(
 /// own files. Each save used to copy every changed file there too (a map at
 /// `/workspace/sites/<site>`, beside the space's folder, that nothing served), a delete removed
 /// the same path there, and a reported file missing from the space was moved in from there.
+///
+/// A reported deletion is left out where the disk takes its path for a file the reply keeps
+/// under another spelling ([`name_kept_under_another_spelling`]). On a disk that ignores case, as
+/// a Mac's does, a reply that renamed `Foo.txt` to `foo.txt` and wrote its new content deleted
+/// that content with `Foo.txt`. The file keeps the name the disk holds it by, and the reply's
+/// file is listed by that name ([`list_kept_files_by_held_names`]): the save then writes the file
+/// the folder and `HEAD` know, where a write of `foo.txt` would be refused for it. Where the disk
+/// tells the two names apart they are two files, and the deletion goes ahead.
 fn normalize_codex_files(
     workspace_dir: &Path,
     files: Vec<CodexFileDescriptor>,
 ) -> Result<Vec<CodexFileDescriptor>> {
+    let kept = kept_paths(workspace_dir, &files);
+    // By folded name, the name the disk holds each file under that a deletion was left out for.
+    let mut held_names = HashMap::new();
     let mut normalized = Vec::new();
 
     for mut file in files {
@@ -16091,6 +16102,20 @@ fn normalize_codex_files(
         let has_inline_content = file.content.is_some() || file.content_base64.is_some();
 
         if matches!(change_kind, Some(FileChangeKind::Deleted)) {
+            if let Some(held) =
+                name_kept_under_another_spelling(workspace_dir, &sanitized_rel, &kept)
+            {
+                tracing::info!(
+                    workspace_path = %file.workspace_path,
+                    held = %held.display(),
+                    "leaving out a reported deletion of a file the reply keeps under another spelling"
+                );
+                held_names.insert(
+                    origin_http_server::apply::portable_key(&held.to_string_lossy()),
+                    held,
+                );
+                continue;
+            }
             delete_path_if_exists(&target_path)
                 .with_context(|| format!("failed to delete workspace path {:?}", target_path))?;
         } else if has_inline_content {
@@ -16114,6 +16139,7 @@ fn normalize_codex_files(
         normalized.push(file);
     }
 
+    list_kept_files_by_held_names(workspace_dir, &mut normalized, &held_names);
     Ok(normalized)
 }
 
@@ -16288,6 +16314,129 @@ fn write_inline_file_change(
     fs::write(target_path, bytes)
         .with_context(|| format!("failed to write file {:?}", target_path))?;
     Ok(())
+}
+
+/// The paths a reply keeps in the space's folder (all it reports but its deletions and read
+/// references), each with its folded name ([`origin_http_server::apply::portable_key`]). None
+/// when it deletes nothing.
+fn kept_paths(workspace_dir: &Path, files: &[CodexFileDescriptor]) -> Vec<(PathBuf, String)> {
+    let deletes = |file: &CodexFileDescriptor| {
+        matches!(
+            file.change.as_ref().map(|change| &change.kind),
+            Some(FileChangeKind::Deleted)
+        )
+    };
+    if !files.iter().any(deletes) {
+        return Vec::new();
+    }
+    files
+        .iter()
+        .filter(|file| !file.is_read_reference() && !deletes(file))
+        .filter_map(|file| sanitize_codex_workspace_path(workspace_dir, &file.workspace_path))
+        .map(|path| {
+            let key = origin_http_server::apply::portable_key(&path.to_string_lossy());
+            (path, key)
+        })
+        .collect()
+}
+
+/// The name the disk holds the file at `deleted` under, when the disk takes a path in `kept`
+/// (with its folded name) spelled otherwise for that same file, as a disk that ignores case
+/// takes `foo.txt` for `Foo.txt`: deleting the one deletes the other. A folder or a link at
+/// `deleted` is never such a file, so a reply can still replace either with a file the disk
+/// takes for it.
+fn name_kept_under_another_spelling(
+    workspace_dir: &Path,
+    deleted: &Path,
+    kept: &[(PathBuf, String)],
+) -> Option<PathBuf> {
+    let key = origin_http_server::apply::portable_key(&deleted.to_string_lossy());
+    let mut spellings = kept
+        .iter()
+        .filter(|(path, kept_key)| *kept_key == key && path != deleted)
+        .peekable();
+    spellings.peek()?;
+    fs::symlink_metadata(workspace_dir.join(deleted))
+        .ok()
+        .filter(fs::Metadata::is_file)?;
+    let held = path_as_listed(workspace_dir, deleted)?;
+    spellings
+        .any(|(path, _)| path_as_listed(workspace_dir, path).as_ref() == Some(&held))
+        .then_some(held)
+}
+
+/// `relative` in the folder at `root` as the disk lists it: each name as its folder lists it. A
+/// disk that ignores case or Unicode form takes a name for the entry it lists under another
+/// spelling of the same folded name ([`origin_http_server::apply::portable_key`]), as it takes
+/// `foo.txt` for `Foo.txt`. None when nothing is there, or when a folder lists more than one
+/// entry the name could be and none spelled exactly so.
+fn path_as_listed(root: &Path, relative: &Path) -> Option<PathBuf> {
+    fs::symlink_metadata(root.join(relative)).ok()?;
+    let mut listed = PathBuf::new();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        let key = origin_http_server::apply::portable_key(&name.to_string_lossy());
+        let mut spellings = Vec::new();
+        for entry in fs::read_dir(root.join(&listed)).ok()?.flatten() {
+            let entry_name = entry.file_name();
+            if entry_name.as_os_str() == name {
+                spellings = vec![entry_name];
+                break;
+            }
+            if origin_http_server::apply::portable_key(&entry_name.to_string_lossy()) == key {
+                spellings.push(entry_name);
+            }
+        }
+        let [spelling] = spellings.as_slice() else {
+            return None;
+        };
+        listed.push(spelling);
+    }
+    Some(listed)
+}
+
+/// Lists each file of `files` the reply keeps, that the disk holds under one of `held_names` (by
+/// folded name: the names a reported deletion was left out for), by that name: the folder holds
+/// it so, as `HEAD` does when the disk already held it before the reply. It is changed then
+/// where the reply said created, since the file was there already.
+fn list_kept_files_by_held_names(
+    workspace_dir: &Path,
+    files: &mut [CodexFileDescriptor],
+    held_names: &HashMap<String, PathBuf>,
+) {
+    if held_names.is_empty() {
+        return;
+    }
+    for file in files {
+        let kind = file.change.as_ref().map(|change| &change.kind);
+        let created = matches!(kind, Some(FileChangeKind::Created));
+        if matches!(kind, Some(FileChangeKind::Deleted)) {
+            continue;
+        }
+        let key = origin_http_server::apply::portable_key(&file.workspace_path);
+        let Some(held) = held_names.get(&key) else {
+            continue;
+        };
+        if path_as_listed(workspace_dir, Path::new(&file.workspace_path)).as_ref() != Some(held) {
+            continue;
+        }
+        let held = held.to_string_lossy().to_string();
+        if held == file.workspace_path {
+            continue;
+        }
+        tracing::info!(
+            workspace_path = %file.workspace_path,
+            held = %held,
+            "listing a kept file by the name the disk holds it by"
+        );
+        file.workspace_path = held.clone();
+        file.path = held;
+        if created {
+            file.change = FileChangeDescriptor::parse(json!({ "type": "changed" }));
+        }
+    }
 }
 
 fn is_retryable_codex_upstream_summary(summary: &str) -> bool {
@@ -44769,6 +44918,110 @@ mod tests {
             fs::read_to_string(project_dir.join("notes.txt")).unwrap(),
             "updated from final json\n"
         );
+    }
+
+    /// Each file's path and what it says happened to it.
+    fn reported_changes(files: &[CodexFileDescriptor]) -> Vec<(String, &'static str)> {
+        files
+            .iter()
+            .map(|file| {
+                let kind = match file.change.as_ref().map(|change| &change.kind) {
+                    Some(FileChangeKind::Created) => "created",
+                    Some(FileChangeKind::Deleted) => "deleted",
+                    Some(FileChangeKind::Changed) => "changed",
+                    _ => "other",
+                };
+                (file.workspace_path.clone(), kind)
+            })
+            .collect()
+    }
+
+    /// The names a folder lists, sorted.
+    fn listed_names(folder: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    /// A reply that renames `Foo.txt` to `foo.txt` and gives it new content reports `foo.txt`
+    /// created with that content and `Foo.txt` deleted, in either order, here beside the
+    /// deletion of `old.md`. A disk that ignores case, as a Mac's does, takes the two names for
+    /// one file: the write went into `Foo.txt`, and a deletion after it deleted the new content;
+    /// a deletion before it left the file under the new name, which the save could not write
+    /// beside the deletion of the old one. The deletion of `Foo.txt` is left out there, and the
+    /// file keeps the name the disk holds it by, with the new content, listed as changed. A disk
+    /// that tells case apart holds two files, and the rename goes ahead. `old.md` is deleted on
+    /// either disk.
+    #[test]
+    fn a_reported_case_only_rename_keeps_the_written_content() {
+        let created = CodexFileDescriptor {
+            content: Some("new\n".to_string()),
+            ..changed_file("foo.txt", Some(FileChangeKind::Created))
+        };
+        let deleted = changed_file("Foo.txt", Some(FileChangeKind::Deleted));
+        let other = changed_file("old.md", Some(FileChangeKind::Deleted));
+        for files in [
+            vec![created.clone(), deleted.clone(), other.clone()],
+            vec![other.clone(), deleted.clone(), created.clone()],
+        ] {
+            let tmp = tempdir().unwrap();
+            let ws = tmp.path();
+            fs::write(ws.join("Foo.txt"), "old\n").unwrap();
+            fs::write(ws.join("old.md"), "gone\n").unwrap();
+            let ignores_case = ws.join("FOO.TXT").exists();
+            let reported = reported_changes(&files);
+
+            let normalized = normalize_codex_files(ws, files).unwrap();
+
+            let (kept, listed) = if ignores_case {
+                let listed = reported
+                    .iter()
+                    .filter(|(path, _)| path != "Foo.txt")
+                    .map(|(path, kind)| match path.as_str() {
+                        "foo.txt" => ("Foo.txt".to_string(), "changed"),
+                        _ => (path.clone(), *kind),
+                    })
+                    .collect::<Vec<_>>();
+                ("Foo.txt", listed)
+            } else {
+                ("foo.txt", reported.clone())
+            };
+            assert_eq!(listed_names(ws), [kept], "{reported:?}");
+            assert_eq!(fs::read_to_string(ws.join(kept)).unwrap(), "new\n");
+            assert_eq!(reported_changes(&normalized), listed, "{reported:?}");
+        }
+    }
+
+    /// A turn that renamed `Foo.txt` to `foo.txt` with its tools, and reports `foo.txt` created
+    /// and `Foo.txt` deleted. On a disk that ignores case `Foo.txt` names the renamed file, and
+    /// the reported deletion deleted it; it stays now, under the name the turn gave it. On a disk
+    /// that tells case apart nothing holds `Foo.txt`, and both are listed as reported.
+    #[test]
+    fn a_reported_deletion_of_a_renamed_files_old_name_keeps_the_file() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path();
+        fs::write(ws.join("Foo.txt"), "renamed\n").unwrap();
+        let ignores_case = ws.join("FOO.TXT").exists();
+        fs::rename(ws.join("Foo.txt"), ws.join("foo.txt")).unwrap();
+        let files = vec![
+            changed_file("Foo.txt", Some(FileChangeKind::Deleted)),
+            changed_file("foo.txt", Some(FileChangeKind::Created)),
+        ];
+        let reported = reported_changes(&files);
+
+        let normalized = normalize_codex_files(ws, files).unwrap();
+
+        assert_eq!(listed_names(ws), ["foo.txt"]);
+        assert_eq!(fs::read_to_string(ws.join("foo.txt")).unwrap(), "renamed\n");
+        let listed = if ignores_case {
+            vec![("foo.txt".to_string(), "created")]
+        } else {
+            reported
+        };
+        assert_eq!(reported_changes(&normalized), listed);
     }
 
     #[test]

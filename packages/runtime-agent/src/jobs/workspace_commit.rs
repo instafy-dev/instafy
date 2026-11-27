@@ -3807,6 +3807,139 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// A reply on a hosted space that renames `Foo.txt` to `foo.txt` with new content: it reports
+    /// `foo.txt` created with that content, then `Foo.txt` deleted, and its checkpoint goes to the
+    /// space's real origin, which this runtime hosts. On a disk that ignores case the write went
+    /// into `Foo.txt` and the deletion took it, so the folder lost the new content and the save
+    /// deleted `Foo.txt` from `main`. The folder keeps the file now, by the name it has there, and
+    /// the save writes the new content to that name. On a disk that tells case apart the folder
+    /// holds the renamed file, and `main` keeps a version of it: the rename's, or the old one
+    /// where the origin refuses a deletion beside a write of the same name in another case.
+    #[tokio::test]
+    async fn a_reported_case_only_rename_keeps_its_content_through_a_real_origin() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed)?;
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("README.md"), "seed\n")?;
+        std::fs::write(seed.join("Foo.txt"), "old\n")?;
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        let origin_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = listener.local_addr()?.port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{origin_port}");
+        let controller_address =
+            spawn_controller_for_real_origin(project_id, origin_id, endpoint.clone()).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let config = origin_http_server::config::ServerConfig {
+            project_id,
+            origin_id,
+            workspace_root: workspace.clone(),
+            git_remote_url: Some(format!("file://{}", remote.display())),
+            git_remote_base_url: None,
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "Instafy Origin".into(),
+            git_author_email: "origin@instafy.dev".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: origin_port,
+            controller_base_url: controller.clone(),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: controller.join("/.well-known/jwks.json")?,
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            max_archive_bytes: 1024 * 1024,
+            staging_base: None,
+            multi_tenant: false,
+            hosted_checkout: true,
+        };
+        origin_http_server::git::ensure_git_checkout(&config, None)
+            .map_err(|error| anyhow::anyhow!("checkout failed: {error:?}"))?;
+        let ignores_case = workspace.join("FOO.TXT").exists();
+        let before = super::super::collect_git_status_porcelain(&workspace)
+            .await
+            .context("status before the reply")?;
+
+        let reply = [
+            serde_json::json!({ "path": "foo.txt", "change": "created", "content": "new\n" }),
+            serde_json::json!({ "path": "Foo.txt", "change": "deleted" }),
+        ]
+        .iter()
+        .map(|value| super::super::parse_file_descriptor(value).context("a reported file"))
+        .collect::<Result<Vec<_>>>()?;
+        let files =
+            super::super::normalize_codex_files_for_commit(&workspace, reply, true, Some(&before))
+                .await?;
+        let files =
+            super::super::checkpoint_files_with_status_delta(&workspace, Some(&before), &files)
+                .await;
+        let mut server = origin_http_server::server::OriginHttpServer::new(config)?;
+        server.start().await?;
+        let saved = commit_to_hosted_origin(
+            &controller,
+            "workspace-token",
+            project_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &workspace,
+            &files,
+            Some(true),
+            None,
+            Some(LocalOriginSync {
+                origin_id,
+                endpoint,
+                read_only_refresh: None,
+                working_state: None,
+            }),
+            "The reply's request",
+        )
+        .await;
+        server.stop().await?;
+
+        let tree = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
+        let tree = tree.lines().collect::<Vec<_>>();
+        if ignores_case {
+            ensure!(tree == ["Foo.txt", "README.md"], "{tree:?}, save {saved:?}");
+            ensure!(git(&remote, &["show", "main:Foo.txt"]) == "new");
+            ensure!(std::fs::read_to_string(workspace.join("Foo.txt"))? == "new\n");
+            let saved = saved?.context("the checkpoint saved nothing")?;
+            ensure!(saved.git_sync_error.is_none(), "{:?}", saved.git_sync_error);
+            ensure!(saved.paths == ["Foo.txt"], "{:?}", saved.paths);
+        } else {
+            ensure!(std::fs::read_to_string(workspace.join("foo.txt"))? == "new\n");
+            ensure!(!workspace.join("Foo.txt").exists());
+            let (name, text) = match tree.as_slice() {
+                ["README.md", "foo.txt"] => ("foo.txt", "new"),
+                ["Foo.txt", "README.md"] => ("Foo.txt", "old"),
+                _ => anyhow::bail!("main lost the file: {tree:?}, save {saved:?}"),
+            };
+            ensure!(git(&remote, &["show", &format!("main:{name}")]) == text);
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn isolated_checkpoint_rejects_a_different_origin_before_source_mutation() -> Result<()> {
         let workspace = tempfile::tempdir()?;
