@@ -172,6 +172,90 @@ export function desktopRuntimeExitedForDeletedSpace(
 }
 
 /**
+ * The exit status runtime-agent uses when the controller would not renew its
+ * machine token because the machine's lifetime ended
+ * (`MACHINE_LIFETIME_ENDED_EXIT_CODE` in packages/runtime-agent/src/agent.rs).
+ */
+export const DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE = 4;
+
+/** Whether the runtime process exited because its machine lifetime ended. */
+export function desktopRuntimeExitedForEndedLifetime(
+  exit: { code: number | null } | null,
+): boolean {
+  return exit?.code === DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE;
+}
+
+/**
+ * How long after one automatic restart for an ended lifetime Desktop refuses
+ * another for the same space. A new start begins a new lifetime, so a second
+ * end this soon means something else is wrong, and the person decides.
+ */
+export const DESKTOP_RUNTIME_LIFETIME_RESTART_SPACING_MS = 10 * 60 * 1000;
+
+export type DesktopRuntimeLifetimeRestartDecision<T> =
+  | { restart: true; restartOptions: T }
+  | {
+      restart: false;
+      reason: "quitting" | "personal_browser" | "restarted_recently" | "no_matching_session";
+    };
+
+/**
+ * Whether a runtime whose machine lifetime ended starts again, and from what.
+ * Only a new start mints a new lifetime, and only a person's own sign-in may
+ * ask for one: the runtime's own options, with the token of the session the
+ * Studio window shows now when that session is the user the start was bound
+ * to. A retained token is never replayed, and a Personal Browser runtime's
+ * control ended with its process, so both wait for the person.
+ */
+export function decideDesktopRuntimeLifetimeRestart<T extends { controllerAccessToken?: string }>(
+  options: {
+    restartOptions: T;
+    launchGrantUserId: string | null;
+    personalBrowser: boolean;
+    quitting: boolean;
+    lastRestartAtMs: number | null;
+    nowMs: number;
+    currentSession: { accessToken: string; userId: string } | null;
+  },
+): DesktopRuntimeLifetimeRestartDecision<T> {
+  if (options.quitting) {
+    return { restart: false, reason: "quitting" };
+  }
+  if (options.personalBrowser) {
+    return { restart: false, reason: "personal_browser" };
+  }
+  if (
+    options.lastRestartAtMs !== null &&
+    options.nowMs - options.lastRestartAtMs < DESKTOP_RUNTIME_LIFETIME_RESTART_SPACING_MS
+  ) {
+    return { restart: false, reason: "restarted_recently" };
+  }
+  const accessToken = boundSessionAccessToken(options.launchGrantUserId, options.currentSession);
+  if (!accessToken) {
+    return { restart: false, reason: "no_matching_session" };
+  }
+  return {
+    restart: true,
+    restartOptions: { ...options.restartOptions, controllerAccessToken: accessToken },
+  };
+}
+
+/**
+ * The token of the session the Studio window shows now, when that session is
+ * the user a runtime start was bound to; null for any other session, an
+ * unbound start or no session.
+ */
+function boundSessionAccessToken(
+  launchGrantUserId: string | null,
+  currentSession: { accessToken: string; userId: string } | null,
+): string | null {
+  const boundUserId = launchGrantUserId?.trim().toLowerCase() ?? "";
+  const accessToken = currentSession?.accessToken.trim() ?? "";
+  const userId = currentSession?.userId.trim().toLowerCase() ?? "";
+  return boundUserId && accessToken && userId === boundUserId ? accessToken : null;
+}
+
+/**
  * The user a runtime start's launch grants are resolved for (4.3): the
  * visible session's user when the start is bound to it. A Personal Browser
  * runtime never offers a local engine, so its starts are granted nothing.
@@ -198,10 +282,8 @@ export function buildConsentChangeRestartOptions<T extends { controllerAccessTok
     currentSession: { accessToken: string; userId: string } | null;
   },
 ): T {
-  const boundUserId = options.launchGrantUserId?.trim().toLowerCase() ?? "";
-  const accessToken = options.currentSession?.accessToken.trim() ?? "";
-  const userId = options.currentSession?.userId.trim().toLowerCase() ?? "";
-  if (!boundUserId || !accessToken || userId !== boundUserId) {
+  const accessToken = boundSessionAccessToken(options.launchGrantUserId, options.currentSession);
+  if (!accessToken) {
     return { ...options.restartOptions };
   }
   return { ...options.restartOptions, controllerAccessToken: accessToken };

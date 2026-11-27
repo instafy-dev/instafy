@@ -98,9 +98,11 @@ presenting a fresh Supabase access token, never its session token.
 Each session token is accepted until `USER_TOKEN_TTL_SECONDS` (default 900) plus 30 seconds after it
 was issued, so a session ends that long after the route last accepted a Supabase access token for its
 user. The controller accepts a Supabase access token until 60 seconds past its expiry and does not
-check Supabase sign-out. This bounds the session token itself: runtime tokens minted with it (renewed
-whenever their runtime registers), Git tokens (up to an hour) and `GET /events` streams opened with it
-keep their own lifetimes.
+check Supabase sign-out. This bounds the session token itself. A runtime token minted with it ends no
+later than the session does (`POST /projects/:project_id/runtime/token`, below); a machine's token is
+then renewed whenever its runtime registers, until the machine's lifetime
+(`SELF_HOSTED_MACHINE_LIFETIME_SECONDS`) ends. Git tokens (up to an hour) and `GET /events` streams
+opened with it keep their own lifetimes.
 
 ### Invalidation signals on `/events`
 
@@ -320,6 +322,7 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS` — optional, comma-separated base64-encoded 32-byte keys the controller only decrypts with, so rows sealed under an earlier `CREDENTIAL_ENCRYPTION_KEY` stay readable during a rotation. New values are always encrypted with `CREDENTIAL_ENCRYPTION_KEY`. The controller refuses to start when an entry is malformed, repeated or equal to `CREDENTIAL_ENCRYPTION_KEY`, or when more than 8 are listed, and warns on every start while one of them is the key derived from the published development value. The controller recognises that key by its one-way key id only; it does not know the key and never decrypts with it unless it is configured here or as `CREDENTIAL_ENCRYPTION_KEY`. It is a secret like the primary key: keep it out of runtime and agent environments.
 - `INSTAFY_AUTHOR_PSEUDONYM_KEYS` — versioned keys for the author of users' saves in a space's git history, as comma-separated `v<version>:<base64 key>` entries (for example `v1:<key>`; each key 32 to 64 bytes, generated with `openssl rand -base64 32`). A workspace-write token minted for a person who asked for it with their own session (never a job, agent or service-role token, and never the service runtime user) carries `author_name` (their `profiles.full_name` without control, bidirectional or other invisible format characters (the zero-width joiner and non-joiner are kept) and with git's end stripping applied, or `Instafy user`; never the account email) and `author_email`, a per-space pseudonym `p<version>-<20 base32 characters>@users.noreply.instafy.dev` that is an HMAC of the space and user ids under the highest version. No user id or email reaches history. Recommended wherever saves are committed for users, in particular with `HOSTED_ORIGIN_ENDPOINT`. When it is unset or blank the controller still starts, logs a warning on every start, mints no author claims and reports `x-instafy-has-author-pseudonym-keys: 0` on `/healthz`; commits then use each origin's own git identity, so no user id reaches history either way. To rotate, add a higher version and keep every older entry: an address stays resolvable only while the key that made it is configured, so keys are never removed or replaced. A value that is set but malformed (not UTF-8, an invalid entry, a repeated version, or two versions sharing a key) refuses startup, so a typo fails loudly; the keys are never logged. It is not an access credential: keep it in the controller's environment only, and keep it when retiring credentials.
 - `AGENT_LOGIN_KEY` — shared secret agents use to mint scoped tokens via `/agent/login`.
+- `SELF_HOSTED_MACHINE_LIFETIME_SECONDS` — how long, in seconds, a person's private self-hosted machine (Desktop, `instafy runtime start`) keeps renewing its credentials after its runtime token was minted. Unset, it is 604800 (seven days), or twice the renewed runtime token's lifetime (max(`AGENT_TOKEN_TTL_SECONDS`, 3600)) when that is longer. A set value must be a whole number from that twice up to 31536000 (365 days); anything else refuses startup. Once a renewed token would outlive it, registration answers 401 `runtime_machine_lifetime_ended` and the machine stops until the person's sign-in mints it a new token. The lifetime is signed into the runtime token at its mint, so a change applies to machines minted after it. See "Machine lifetime" in `docs/Self-Hosted-Runtime-Security.md`.
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_SIGNING_SECRET` — the HS256 secret the controller signs each job's grant for the Instafy proxy with, shared with the proxy. When it is unset the controller derives one from `CONTROLLER_INTERNAL_TOKEN`, as the proxy does. With neither, the controller refuses to start, in `DEV_MODE` too: every model call of a job goes through the proxy on the grant signed for that job and lease, and runtimes refuse a model job that comes without one (see [Model traffic goes through the Instafy proxy](../../docs/Self-Hosted-Runtime-Security.md#model-traffic-goes-through-the-instafy-proxy)). Set one of the two before upgrading a controller or its runtimes.
 - `PROXY_BASE_URL` — the proxy address the grants name (default `http://proxy:8789`).
@@ -522,7 +525,10 @@ A scope set that lacks any of the machine's `agent.*` and `origin.*` scopes abov
 `runtimeId`, names no runtime: such a token posts to and completes no job, since
 `/agent/message` and `/agent/complete` take only the runtime that leased the job.
 `ttlSeconds` must be between 60 and 3600 seconds inclusive; omitting it or sending `null`
-uses 3600 seconds, independently of the origin-token TTL configuration.
+uses 3600 seconds, independently of the origin-token TTL configuration. A person's mint never
+outlives the session that asks for it: the token ends when the session does, a `ttlSeconds`
+past the session's end is refused with 403, and a session with under a minute left gets 401
+(refresh it and mint again). Service-role mints are not capped.
 
 Ordinary callers must create projects through authenticated `POST /orgs/:org_id/projects`
 before dispatch.

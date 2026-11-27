@@ -236,6 +236,8 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         proxy_credential_lease_token: Some("credential-lease".to_string()),
         supabase_service_role_key: Some("service-role-token".to_string()),
         agent_token_ttl_seconds: 3600,
+        self_hosted_machine_lifetime_seconds:
+            crate::config::DEFAULT_SELF_HOSTED_MACHINE_LIFETIME_SECONDS,
         user_token_ttl_seconds: 900,
         user_token_secret: "secret".to_string(),
         lease_path: "/agent/lease".to_string(),

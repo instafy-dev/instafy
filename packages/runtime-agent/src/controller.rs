@@ -63,6 +63,9 @@ pub struct ControllerClient {
     // One profile baseline/writer survives registration and token renewals.
     pub(crate) browser_profile_session:
         tokio::sync::Mutex<crate::browser_profile::BrowserProfileSession>,
+    // Set once a registration was refused because this machine's lifetime
+    // ended; the lease loop stops at its next idle point.
+    machine_lifetime_ended: std::sync::atomic::AtomicBool,
 }
 
 /// A version belongs to these exact bytes, not merely to a GET request. Version
@@ -375,6 +378,22 @@ const SPACE_DELETED_CODE: &str = "space_deleted";
 #[error("the controller refused the runtime: its space was deleted")]
 pub struct SpaceDeleted;
 
+/// The code of the controller's 401 once a person's private machine reached
+/// the end of its lifetime.
+const MACHINE_LIFETIME_ENDED_CODE: &str = "runtime_machine_lifetime_ended";
+
+/// The controller stopped renewing this machine's credentials: the lifetime
+/// its person's mint gave it ended. The tokens it holds work until they
+/// expire, but no registration renews them, and no other credential is tried:
+/// the agent stops at its next idle point, and its person's sign-in mints it
+/// again (Desktop and the CLI do when the process exits with
+/// `MACHINE_LIFETIME_ENDED_EXIT_CODE`).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the controller stopped renewing this machine's credentials: their lifetime ended, so a new runtime token must be minted"
+)]
+pub struct MachineLifetimeEnded;
+
 /// The controller's answer that a job is not this runtime's to run any more: its secrets
 /// request came back 400 (the job is not leased: a Stop cancelled it), 401 (its lease ended, or
 /// is another runtime's, once a renewed agent token was tried) or 404 (no such job). Its words
@@ -401,6 +420,16 @@ fn is_space_deleted_refusal(status: StatusCode, body: &str) -> bool {
             .ok()
             .and_then(|refusal| refusal.code)
             .is_some_and(|code| code == SPACE_DELETED_CODE)
+}
+
+/// Whether `status` and `body` are the controller's `401` for a machine whose
+/// lifetime ended.
+fn is_machine_lifetime_ended_refusal(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::UNAUTHORIZED
+        && serde_json::from_str::<RefusalCode>(body)
+            .ok()
+            .and_then(|refusal| refusal.code)
+            .is_some_and(|code| code == MACHINE_LIFETIME_ENDED_CODE)
 }
 
 #[derive(Debug)]
@@ -438,7 +467,16 @@ impl ControllerClient {
             agent_tokens: AgentTokenVerifier::new(config.controller_jwks_url.clone()),
             resources: Mutex::new(ResourceSampler::new(config.workspace_root.clone())),
             browser_profile_session: tokio::sync::Mutex::new(Default::default()),
+            machine_lifetime_ended: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Whether a registration was refused because this machine's lifetime
+    /// ended ([`MachineLifetimeEnded`]). It stays set: only a new mint, and
+    /// so a new process, renews the machine.
+    pub fn machine_lifetime_ended(&self) -> bool {
+        self.machine_lifetime_ended
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn send_register_request(
@@ -592,6 +630,11 @@ impl ControllerClient {
             }
             if is_space_deleted_refusal(status, &text) {
                 return Err(SpaceDeleted.into());
+            }
+            if is_machine_lifetime_ended_refusal(status, &text) {
+                self.machine_lifetime_ended
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(MachineLifetimeEnded.into());
             }
 
             last_error = Some((status, text.clone()));
@@ -1998,6 +2041,27 @@ mod tests {
             r#"{"message":"gone"}"#
         ));
         assert!(!is_space_deleted_refusal(StatusCode::GONE, "space_deleted"));
+    }
+
+    #[test]
+    fn only_a_401_with_the_lifetime_code_ends_a_machines_lifetime() {
+        let body = r#"{"message":"This machine's credentials reached the end of their lifetime; mint a new runtime token to keep it running.","code":"runtime_machine_lifetime_ended"}"#;
+        assert!(is_machine_lifetime_ended_refusal(
+            StatusCode::UNAUTHORIZED,
+            body
+        ));
+        assert!(!is_machine_lifetime_ended_refusal(
+            StatusCode::FORBIDDEN,
+            body
+        ));
+        assert!(!is_machine_lifetime_ended_refusal(
+            StatusCode::UNAUTHORIZED,
+            r#"{"message":"runtime token generation is no longer current"}"#
+        ));
+        assert!(!is_machine_lifetime_ended_refusal(
+            StatusCode::UNAUTHORIZED,
+            "runtime_machine_lifetime_ended"
+        ));
     }
 
     #[test]

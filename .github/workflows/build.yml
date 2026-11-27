@@ -664,6 +664,9 @@ jobs:
       - name: Test CLI tunnels against local servers
         run: pnpm --filter @instafy/cli exec vitest run test/tunnel-cli.e2e.spec.ts test/tunnel-managed.e2e.spec.ts test/tunnel-server-address.spec.ts
 
+      - name: Test CLI runtime lifetime restarts
+        run: pnpm --filter @instafy/cli exec vitest run test/runtime-lifetime.spec.ts test/runtime-lifetime-stop.e2e.spec.ts test/runtime-stale-pid.spec.ts
+
   javascript-desktop:
     name: JavaScript Desktop and runtime
     runs-on: >-

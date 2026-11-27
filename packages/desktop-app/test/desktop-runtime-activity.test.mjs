@@ -8,6 +8,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const modulePath = path.join(packageRoot, "dist", "desktopRuntimeActivity.js");
 const {
+  DESKTOP_RUNTIME_LIFETIME_RESTART_SPACING_MS,
+  DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE,
   DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE,
   DesktopRuntimeHttpError,
   assertDesktopRuntimeResumed,
@@ -18,7 +20,9 @@ const {
   canResumeDesktopRuntimeAfterFailedQuit,
   confirmDesktopRuntimeReplacement,
   createDesktopQuitWaitControl,
+  decideDesktopRuntimeLifetimeRestart,
   desktopRuntimeExitedForDeletedSpace,
+  desktopRuntimeExitedForEndedLifetime,
   readDesktopRuntimeActiveJobCount,
   resolveDesktopRuntimeControllerCredentialAction,
   resolveDesktopRuntimeLaunchGrantUserId,
@@ -552,4 +556,121 @@ test("a consent change's replacement starts with its bound user's current token,
   // The replaced runtime's own options are left as they were.
   assert.equal(restartOptions.controllerAccessToken, "retained-token");
   assert.notEqual(build(null), restartOptions);
+});
+
+test("the machine-lifetime exit status is the one runtime-agent exits with", () => {
+  const agentSource = fs.readFileSync(
+    path.resolve(packageRoot, "..", "runtime-agent", "src", "agent.rs"),
+    "utf8",
+  );
+  const declared = agentSource.match(/pub const MACHINE_LIFETIME_ENDED_EXIT_CODE: i32 = (\d+);/);
+  assert.ok(declared, "runtime-agent declares MACHINE_LIFETIME_ENDED_EXIT_CODE");
+  assert.equal(Number(declared[1]), DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE);
+  assert.notEqual(
+    DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE,
+    DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE,
+  );
+});
+
+test("only the runtime's machine-lifetime exit status reads as an ended lifetime", () => {
+  assert.equal(
+    desktopRuntimeExitedForEndedLifetime({
+      code: DESKTOP_RUNTIME_MACHINE_LIFETIME_ENDED_EXIT_CODE,
+      signal: null,
+    }),
+    true,
+  );
+  for (const exit of [
+    { code: 0, signal: null },
+    { code: 1, signal: null },
+    { code: DESKTOP_RUNTIME_SPACE_DELETED_EXIT_CODE, signal: null },
+    { code: null, signal: "SIGTERM" },
+    null,
+  ]) {
+    assert.equal(desktopRuntimeExitedForEndedLifetime(exit), false, JSON.stringify(exit));
+  }
+});
+
+test("a runtime whose lifetime ended starts again only with its bound user's current session", () => {
+  const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const otherUserId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const restartOptions = {
+    projectId: "space-1",
+    controllerUrl: "https://controller.example",
+    controllerAccessToken: "retained-token",
+  };
+  const nowMs = 1_800_000_000_000;
+  const decide = (overrides = {}) =>
+    decideDesktopRuntimeLifetimeRestart({
+      restartOptions,
+      launchGrantUserId: userId,
+      personalBrowser: false,
+      quitting: false,
+      lastRestartAtMs: null,
+      nowMs,
+      currentSession: { accessToken: "current-token", userId: userId.toUpperCase() },
+      ...overrides,
+    });
+
+  const restarted = decide();
+  assert.deepEqual(restarted, {
+    restart: true,
+    restartOptions: { ...restartOptions, controllerAccessToken: "current-token" },
+  });
+  // The ended runtime's own options are left as they were.
+  assert.equal(restartOptions.controllerAccessToken, "retained-token");
+  assert.notEqual(restarted.restartOptions, restartOptions);
+
+  // A retained token is never replayed: without the bound user's session, it waits.
+  for (const currentSession of [
+    null,
+    { accessToken: "other-token", userId: otherUserId },
+    { accessToken: " ", userId },
+  ]) {
+    assert.deepEqual(
+      decide({ currentSession }),
+      { restart: false, reason: "no_matching_session" },
+      JSON.stringify(currentSession),
+    );
+  }
+  // A start bound to nobody is never started again by Desktop.
+  assert.deepEqual(decide({ launchGrantUserId: null }), {
+    restart: false,
+    reason: "no_matching_session",
+  });
+  // A Personal Browser runtime's control ended with its process.
+  assert.deepEqual(decide({ personalBrowser: true, launchGrantUserId: null }), {
+    restart: false,
+    reason: "personal_browser",
+  });
+  assert.deepEqual(decide({ personalBrowser: true }), {
+    restart: false,
+    reason: "personal_browser",
+  });
+  // Nothing starts while the app quits.
+  assert.deepEqual(decide({ quitting: true }), { restart: false, reason: "quitting" });
+});
+
+test("a second ended lifetime soon after a restart waits for the person", () => {
+  const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const nowMs = 1_800_000_000_000;
+  const decide = (lastRestartAtMs) =>
+    decideDesktopRuntimeLifetimeRestart({
+      restartOptions: { controllerAccessToken: "retained-token" },
+      launchGrantUserId: userId,
+      personalBrowser: false,
+      quitting: false,
+      lastRestartAtMs,
+      nowMs,
+      currentSession: { accessToken: "current-token", userId },
+    });
+
+  assert.deepEqual(decide(nowMs - DESKTOP_RUNTIME_LIFETIME_RESTART_SPACING_MS + 1), {
+    restart: false,
+    reason: "restarted_recently",
+  });
+  // A clock that went backwards reads as recent, never as long ago.
+  assert.deepEqual(decide(nowMs + 60_000), { restart: false, reason: "restarted_recently" });
+  assert.equal(decide(nowMs - DESKTOP_RUNTIME_LIFETIME_RESTART_SPACING_MS).restart, true);
+  assert.equal(decide(null).restart, true);
 });
