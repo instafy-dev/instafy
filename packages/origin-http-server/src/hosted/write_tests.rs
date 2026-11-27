@@ -26,7 +26,7 @@ use super::tests::{
     decoded, get, post, runtime_push, serve, serve_with, Answer, HostedScenario, Served,
 };
 use super::write::NO_BASE_REV_TARGET;
-use crate::apply::{stage_archive, validate_apply_paths, ManifestFileEntry};
+use crate::apply::{stage_archive, validate_apply_paths, Destinations, ManifestFileEntry};
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
 use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
@@ -431,6 +431,7 @@ impl Direct {
             deletes.iter().map(|path| path.to_string()).collect(),
             archive.len() as u64,
             1 << 24,
+            Destinations::Apart,
         )
         .unwrap();
         let staged = stage_archive(Cursor::new(archive), paths, 1 << 24, &dir).unwrap();

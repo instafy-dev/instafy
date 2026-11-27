@@ -119,49 +119,86 @@ pub struct ApplySummary {
     pub deleted_paths: Vec<String>,
 }
 
-pub fn apply_changes_transactional(
+/// Write and delete what `manifest` names, all or nothing, and keep what
+/// it replaced until the returned transaction is finished or rolled back.
+///
+/// A delete that a write replaces (see [`Destinations::Replacing`]) runs
+/// first, as an apply of its own: then `after_deletes` runs, on the folder
+/// those deletes left, and the writes and the other deletes follow, only
+/// if it succeeds. Without such a delete, `after_deletes` runs before
+/// anything changes. An apply that commits (`autoCommitAfterApply`) keeps
+/// every path apart ([`Destinations::Apart`]): its commit stages the writes
+/// before it removes the deletes, which would take a write's place again.
+pub fn apply_changes_transactional<F>(
     config: &ServerConfig,
     workspace_root: &Path,
     manifest: ApplyManifest,
     archive_bytes: &[u8],
-) -> Result<(ApplySummary, ApplyTransaction), OriginError> {
+    after_deletes: F,
+) -> Result<(ApplySummary, ApplyTransaction), OriginError>
+where
+    F: FnOnce() -> Result<(), OriginError>,
+{
     apply_changes_transactional_reader(
         config,
         workspace_root,
         manifest,
         Cursor::new(archive_bytes),
         archive_bytes.len() as u64,
+        after_deletes,
     )
 }
 
-pub fn apply_changes_transactional_file(
+/// [`apply_changes_transactional`] with the archive in a file.
+pub fn apply_changes_transactional_file<F>(
     config: &ServerConfig,
     workspace_root: &Path,
     manifest: ApplyManifest,
     archive_file: File,
     archive_size: u64,
-) -> Result<(ApplySummary, ApplyTransaction), OriginError> {
-    apply_changes_transactional_reader(config, workspace_root, manifest, archive_file, archive_size)
+    after_deletes: F,
+) -> Result<(ApplySummary, ApplyTransaction), OriginError>
+where
+    F: FnOnce() -> Result<(), OriginError>,
+{
+    apply_changes_transactional_reader(
+        config,
+        workspace_root,
+        manifest,
+        archive_file,
+        archive_size,
+        after_deletes,
+    )
 }
 
-fn apply_changes_transactional_reader<R: Read + Seek>(
+fn apply_changes_transactional_reader<R: Read + Seek, F>(
     config: &ServerConfig,
     workspace_root: &Path,
     manifest: ApplyManifest,
     archive_reader: R,
     archive_size: u64,
-) -> Result<(ApplySummary, ApplyTransaction), OriginError> {
+    after_deletes: F,
+) -> Result<(ApplySummary, ApplyTransaction), OriginError>
+where
+    F: FnOnce() -> Result<(), OriginError>,
+{
     if let Some(project_id) = manifest.project_id.as_deref() {
         if project_id != config.project_id.to_string() {
             return Err(OriginError::bad_request("manifest project mismatch"));
         }
     }
 
+    let destinations = if manifest.auto_commit_after_apply {
+        Destinations::Apart
+    } else {
+        Destinations::Replacing
+    };
     let paths = validate_apply_paths(
         manifest.files,
         manifest.deletes,
         archive_size,
         config.max_archive_bytes,
+        destinations,
     )?;
     let rollback_dir_capability_limit = apply_rollback_dir_capability_limit();
     let validated_install_paths = paths.file_paths().collect::<Vec<_>>();
@@ -216,20 +253,60 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
         .iter()
         .map(|(path, _)| path.as_str())
         .collect::<Vec<_>>();
+    let (_, replaced) = writes_replacing_deletes(&install_paths, &delete_paths);
+    let (first_deletes, other_deletes): (Vec<_>, Vec<_>) = delete_paths
+        .iter()
+        .zip(&replaced)
+        .partition(|(_, replaced)| **replaced);
+    let first_deletes = first_deletes
+        .into_iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    // The deletes a write replaces go first, as an apply of their own. Their
+    // backups stay until the whole apply is finished, and their directory
+    // capabilities count against the one budget.
+    let mut deletes = if first_deletes.is_empty() {
+        None
+    } else {
+        Some(ApplyRollback::capture_with_limit(
+            &workspace,
+            &first_deletes,
+            &[],
+            rollback_dir_capability_limit,
+            config.origin_id,
+        )?)
+    };
+    let held = deletes.as_ref().map_or(0, |deletes| deletes.parents.len());
     let mutation_paths = install_paths
         .iter()
         .copied()
-        .chain(delete_paths.iter().map(String::as_str))
+        .chain(other_deletes.into_iter().map(|(path, _)| path.as_str()))
         .collect::<Vec<_>>();
-    let mut rollback = ApplyRollback::capture_with_limit(
-        &workspace,
-        &mutation_paths,
-        &install_paths,
-        rollback_dir_capability_limit,
-        config.origin_id,
-    )?;
-    if let Err(apply_error) = install_staged_files(temp_dir.dir(), &staged_files, &rollback) {
-        if let Err(rollback_error) = rollback.rollback() {
+    let writes = after_deletes().and_then(|()| {
+        ApplyRollback::capture_with_limit(
+            &workspace,
+            &mutation_paths,
+            &install_paths,
+            rollback_dir_capability_limit.saturating_sub(held),
+            config.origin_id,
+        )
+    });
+    let writes = match writes {
+        Ok(writes) => writes,
+        Err(error) => {
+            if let Some(Err(rollback_error)) = deletes.as_mut().map(ApplyRollback::rollback) {
+                return Err(OriginError::internal(format!(
+                    "apply failed ({error}); workspace rollback also failed ({rollback_error})"
+                )));
+            }
+            return Err(error);
+        }
+    };
+    let mut transaction = ApplyTransaction { writes, deletes };
+    if let Err(apply_error) =
+        install_staged_files(temp_dir.dir(), &staged_files, &transaction.writes)
+    {
+        if let Err(rollback_error) = transaction.rollback() {
             return Err(OriginError::internal(format!(
                 "apply failed ({apply_error}); workspace rollback also failed ({rollback_error})"
             )));
@@ -250,7 +327,7 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
             applied_paths: staged_files.into_iter().map(|(path, _)| path).collect(),
             deleted_paths: delete_paths,
         },
-        ApplyTransaction { rollback },
+        transaction,
     ))
 }
 
@@ -268,15 +345,85 @@ impl ApplyPaths {
     }
 }
 
+/// How the writes of an apply may meet its deletes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Destinations {
+    /// No write or delete takes another's name in any spelling, or lies
+    /// inside another. The hosted gateway's change is one edit of a tree,
+    /// which cannot delete a path and write in its place.
+    Apart,
+    /// A delete may also name what a write replaces: the write's own path
+    /// in another spelling (a rename by case only), a folder the write lies
+    /// in (a file that became a folder), or a path inside the write (a
+    /// folder that became a file). Such deletes run before every write
+    /// ([`apply_changes_transactional`]). Writes still never meet each
+    /// other, nor deletes each other, and no path is both written and
+    /// deleted.
+    Replacing,
+}
+
+/// Which of `writes` replace a delete, and which of `deletes` a write
+/// replaces, by [`Destinations::Replacing`]: the two take one name on a
+/// disk that ignores case or Unicode form ([`portable_key`]), or one lies
+/// inside the other. Each answer is in the order of its list.
+pub(crate) fn writes_replacing_deletes<W, D>(writes: &[W], deletes: &[D]) -> (Vec<bool>, Vec<bool>)
+where
+    W: AsRef<str>,
+    D: AsRef<str>,
+{
+    let write_keys: Vec<String> = writes
+        .iter()
+        .map(|path| portable_key(path.as_ref()))
+        .collect();
+    let delete_keys: Vec<String> = deletes
+        .iter()
+        .map(|path| portable_key(path.as_ref()))
+        .collect();
+    let write_at: HashMap<&str, usize> = write_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.as_str(), index))
+        .collect();
+    let delete_at: HashMap<&str, usize> = delete_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.as_str(), index))
+        .collect();
+    let mut replacing = vec![false; writes.len()];
+    let mut replaced = vec![false; deletes.len()];
+    // A delete of the write's own name, or of a folder the write lies in.
+    for (write, key) in write_keys.iter().enumerate() {
+        let folders = key.match_indices('/').map(|(end, _)| &key[..end]);
+        for name in folders.chain(std::iter::once(key.as_str())) {
+            if let Some(&delete) = delete_at.get(name) {
+                replacing[write] = true;
+                replaced[delete] = true;
+            }
+        }
+    }
+    // A delete inside the write.
+    for (delete, key) in delete_keys.iter().enumerate() {
+        for (end, _) in key.match_indices('/') {
+            if let Some(&write) = write_at.get(&key[..end]) {
+                replacing[write] = true;
+                replaced[delete] = true;
+            }
+        }
+    }
+    (replacing, replaced)
+}
+
 /// Check an apply request before anything is staged or changed: the
 /// archive's size, the number of entries, and every destination (forward
 /// slashes, no reserved or non-portable name, no case or Unicode alias of
-/// another destination, no destination inside another).
+/// another destination, no destination inside another, but for a delete a
+/// write replaces where `destinations` allows it).
 pub(crate) fn validate_apply_paths(
     files: Vec<ManifestFileEntry>,
     deletes: Vec<String>,
     archive_size: u64,
     max_archive_bytes: u64,
+    destinations: Destinations,
 ) -> Result<ApplyPaths, OriginError> {
     if archive_size > max_archive_bytes {
         return Err(OriginError::bad_request("archive exceeds size limit"));
@@ -294,7 +441,7 @@ pub(crate) fn validate_apply_paths(
     // Validate the entire destination set before staging or mutating anything.
     // This rejects portable case collisions and ancestor overlaps that would
     // otherwise make a sequential apply order-dependent.
-    let (files, deletes) = validate_manifest_destinations(files, deletes)?;
+    let (files, deletes) = validate_manifest_destinations(files, deletes, destinations)?;
     Ok(ApplyPaths { files, deletes })
 }
 
@@ -477,10 +624,15 @@ pub(crate) fn stage_archive<R: Read + Seek>(
 fn validate_manifest_destinations(
     files: Vec<ManifestFileEntry>,
     deletes: Vec<String>,
+    destinations: Destinations,
 ) -> Result<(Vec<(String, ManifestFileEntry)>, Vec<String>), OriginError> {
     let mut validated_files = Vec::with_capacity(files.len());
     let mut validated_deletes = Vec::with_capacity(deletes.len());
-    let mut portable_destinations = HashMap::<String, String>::new();
+    // Every destination by its portable key: all of them in one map, or the
+    // writes and the deletes each in their own when a delete may name what
+    // a write replaces.
+    let mut write_destinations = HashMap::<String, String>::new();
+    let mut delete_destinations = HashMap::<String, String>::new();
     let mut total_path_bytes = 0usize;
 
     for entry in files {
@@ -488,7 +640,7 @@ fn validate_manifest_destinations(
         total_path_bytes = total_path_bytes
             .checked_add(normalized.len())
             .ok_or_else(|| OriginError::bad_request("manifest path bytes overflow"))?;
-        insert_portable_destination(&mut portable_destinations, &normalized)?;
+        insert_portable_destination(&mut write_destinations, &normalized)?;
         validated_files.push((normalized, entry));
     }
     for entry in deletes {
@@ -496,7 +648,11 @@ fn validate_manifest_destinations(
         total_path_bytes = total_path_bytes
             .checked_add(normalized.len())
             .ok_or_else(|| OriginError::bad_request("manifest path bytes overflow"))?;
-        insert_portable_destination(&mut portable_destinations, &normalized)?;
+        let destinations_of_kind = match destinations {
+            Destinations::Apart => &mut write_destinations,
+            Destinations::Replacing => &mut delete_destinations,
+        };
+        insert_portable_destination(destinations_of_kind, &normalized)?;
         validated_deletes.push(normalized);
     }
     if total_path_bytes > MAX_APPLY_TOTAL_PATH_BYTES {
@@ -504,14 +660,24 @@ fn validate_manifest_destinations(
             "manifest exceeds total path-byte limit ({MAX_APPLY_TOTAL_PATH_BYTES})"
         )));
     }
+    // A path both written and deleted asks for two things at once.
+    for (path, _) in &validated_files {
+        if delete_destinations.get(&portable_key(path)) == Some(path) {
+            return Err(OriginError::bad_request(format!(
+                "manifest destinations collide: {path:?} and {path:?}"
+            )));
+        }
+    }
 
-    for (descendant_key, descendant_path) in &portable_destinations {
-        for (separator_index, _) in descendant_key.match_indices('/') {
-            let ancestor_key = &descendant_key[..separator_index];
-            if let Some(ancestor_path) = portable_destinations.get(ancestor_key) {
-                return Err(OriginError::bad_request(format!(
-                    "manifest destinations overlap: {ancestor_path:?} and {descendant_path:?}"
-                )));
+    for portable_destinations in [&write_destinations, &delete_destinations] {
+        for (descendant_key, descendant_path) in portable_destinations {
+            for (separator_index, _) in descendant_key.match_indices('/') {
+                let ancestor_key = &descendant_key[..separator_index];
+                if let Some(ancestor_path) = portable_destinations.get(ancestor_key) {
+                    return Err(OriginError::bad_request(format!(
+                        "manifest destinations overlap: {ancestor_path:?} and {descendant_path:?}"
+                    )));
+                }
             }
         }
     }
@@ -717,16 +883,27 @@ struct ApplyRollback {
 /// idempotency receipt. Known downstream failures can therefore restore the
 /// exact pre-apply workspace instead of exposing a partial import.
 pub struct ApplyTransaction {
-    rollback: ApplyRollback,
+    /// The writes and the deletes no write replaces. Undone (and dropped)
+    /// before `deletes`, which ran before them.
+    writes: ApplyRollback,
+    /// The deletes a write replaces, which ran first.
+    deletes: Option<ApplyRollback>,
 }
 
 impl ApplyTransaction {
     pub fn rollback(&mut self) -> Result<(), OriginError> {
-        self.rollback.rollback()
+        self.writes.rollback()?;
+        match self.deletes.as_mut() {
+            Some(deletes) => deletes.rollback(),
+            None => Ok(()),
+        }
     }
 
     pub fn finish(self) {
-        self.rollback.finish();
+        self.writes.finish();
+        if let Some(deletes) = self.deletes {
+            deletes.finish();
+        }
     }
 }
 
@@ -1002,6 +1179,7 @@ fn resolve_rollback_targets(
     let mut targets = Vec::new();
     let mut target_keys = HashSet::new();
     let mut install_plans = Vec::with_capacity(install_paths.len());
+    let mut folders_in_the_way = Vec::new();
 
     for relative in mutation_paths {
         let names = apply_path_names(relative)?;
@@ -1059,6 +1237,11 @@ fn resolve_rollback_targets(
                     leaf: leaf.clone(),
                 });
             }
+            if install_path_set.contains(relative)
+                && folder_holds_files(&parents[parent_index], leaf)
+            {
+                folders_in_the_way.push((*relative).to_string());
+            }
         }
         if install_path_set.contains(relative) {
             install_plans.push(PlannedInstallTarget {
@@ -1075,6 +1258,16 @@ fn resolve_rollback_targets(
             "install paths must be included in the apply mutation plan",
         ));
     }
+    // A file written where a folder is takes the folder's place, and the
+    // folder goes when the apply is finished: only a folder that holds no
+    // file or link (one a delete of this apply emptied, say) may go.
+    if !folders_in_the_way.is_empty() {
+        return Err(OriginError::conflict_paths(
+            "path_type_conflict",
+            "a file would take the place of a folder that still holds files",
+            folders_in_the_way,
+        ));
+    }
 
     Ok(ResolvedRollbackTargets {
         parents,
@@ -1083,6 +1276,43 @@ fn resolve_rollback_targets(
         target_keys,
         install_plans,
     })
+}
+
+/// How deep below a folder a write replaces, and how many entries in all,
+/// [`folder_holds_files`] looks for a file. A larger tree counts as holding
+/// one, as does an entry it cannot read.
+const MAX_REPLACED_FOLDER_DEPTH: usize = 64;
+const MAX_REPLACED_FOLDER_ENTRIES: usize = 10_000;
+
+/// Whether `parent` holds a real folder `name` (not a link to one) with a
+/// file, a link or any other entry that is not a folder in it, at any
+/// depth. Links are never followed.
+fn folder_holds_files(parent: &Dir, name: &OsStr) -> bool {
+    fn holds_files(folder: &Dir, depth: usize, seen: &mut usize) -> io::Result<bool> {
+        if depth > MAX_REPLACED_FOLDER_DEPTH {
+            return Ok(true);
+        }
+        for entry in folder.entries()? {
+            let entry = entry?;
+            *seen += 1;
+            if *seen > MAX_REPLACED_FOLDER_ENTRIES || !entry.file_type()?.is_dir() {
+                return Ok(true);
+            }
+            let inner = folder.open_dir_nofollow(entry.file_name())?;
+            if holds_files(&inner, depth + 1, seen)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if metadata.is_dir() && !metadata.is_symlink() => {}
+        _ => return false,
+    }
+    parent
+        .open_dir_nofollow(name)
+        .and_then(|folder| holds_files(&folder, 1, &mut 0))
+        .unwrap_or(true)
 }
 
 fn apply_path_names(relative: &str) -> Result<Vec<OsString>, OriginError> {
@@ -1269,8 +1499,9 @@ mod tests {
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
         portable_key, stage_archive, validate_apply_paths,
-        validate_install_parent_capability_limit, ApplyManifest, ApplyRollback, ApplySummary,
-        ManifestFileEntry, StagedArchive, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
+        validate_install_parent_capability_limit, writes_replacing_deletes, ApplyManifest,
+        ApplyRollback, ApplySummary, Destinations, ManifestFileEntry, StagedArchive,
+        MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
     };
     use crate::config::ServerConfig;
     use crate::error::OriginError;
@@ -1388,8 +1619,13 @@ mod tests {
         manifest: ApplyManifest,
         archive_bytes: &[u8],
     ) -> Result<ApplySummary, OriginError> {
-        let (summary, transaction) =
-            apply_changes_transactional(config, workspace_root, manifest, archive_bytes)?;
+        let (summary, transaction) = apply_changes_transactional(
+            config,
+            workspace_root,
+            manifest,
+            archive_bytes,
+            || Ok(()),
+        )?;
         transaction.finish();
         Ok(summary)
     }
@@ -1464,8 +1700,10 @@ mod tests {
             manifest(&config, &["\u{1fb7}.txt", "\u{1fbc}\u{342}.txt"], &[]),
             manifest(&config, &["a", "a/b"], &[]),
             manifest(&config, &["a", "a/b"], &["unrelated"]),
-            manifest(&config, &["tree/file"], &["tree"]),
+            manifest(&config, &[], &["tree", "tree/file"]),
+            manifest(&config, &[], &["Gone.txt", "gone.txt"]),
             manifest(&config, &["same"], &["same"]),
+            manifest(&config, &["tree/file"], &["tree/file"]),
             manifest(&config, &["trailing."], &[]),
             manifest(&config, &["trailing "], &[]),
             manifest(&config, &["stream:ads"], &[]),
@@ -1482,6 +1720,297 @@ mod tests {
             assert!(!workspace.path().join("same").exists());
             assert!(!workspace.path().join("tree").exists());
         }
+    }
+
+    /// The names in `dir`, sorted, without the origin's own `.instafy`.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name != ".instafy")
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn conflict(result: Result<impl Sized, OriginError>) -> (&'static str, Vec<String>) {
+        match result {
+            Err(OriginError::ConflictPaths { code, paths, .. }) => (code, paths),
+            Err(error) => panic!("not a conflict: {error:?}"),
+            Ok(_) => panic!("the apply went through"),
+        }
+    }
+
+    /// The swaps of a file and a folder, and a rename by case only, laid
+    /// out as each test below starts: `a` a file, `b/x` and `c/d/e` files
+    /// in folders, and `Foo.txt`.
+    fn swaps_workspace() -> (TempDir, ServerConfig) {
+        let workspace = TempDir::new().unwrap();
+        let config = test_config(&workspace, None, 1024 * 1024);
+        let root = workspace.path();
+        std::fs::write(root.join("a"), b"a file").unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("b/x"), b"in b").unwrap();
+        std::fs::create_dir_all(root.join("c/d")).unwrap();
+        std::fs::write(root.join("c/d/e"), b"deep in c").unwrap();
+        std::fs::write(root.join("Foo.txt"), b"old name").unwrap();
+        (workspace, config)
+    }
+
+    fn swaps(config: &ServerConfig) -> (ApplyManifest, Vec<u8>) {
+        (
+            manifest(
+                config,
+                &["a/x", "b", "c", "foo.txt"],
+                &["a", "b/x", "c/d/e", "Foo.txt"],
+            ),
+            zip_archive(&[
+                ("a/x", b"new in a"),
+                ("b", b"b is a file"),
+                ("c", b"c is a file"),
+                ("foo.txt", b"new name"),
+            ]),
+        )
+    }
+
+    /// A save may delete what one of its writes replaces: a file that
+    /// became a folder (`a` to `a/x`), a folder that became a file (`b/x`
+    /// to `b`, and `c/d/e` to `c`, which leaves only the empty folder `d`
+    /// in `c`), and a rename by case only (`Foo.txt` to `foo.txt`). Those
+    /// deletes run first, so each write meets the folder they left, on a
+    /// disk that tells case apart and on one that does not.
+    #[test]
+    fn a_save_deletes_what_its_writes_replace_first() {
+        let (workspace, config) = swaps_workspace();
+        let root = workspace.path();
+        let (manifest, archive) = swaps(&config);
+
+        let summary = apply_changes(&config, root, manifest, &archive).unwrap();
+
+        assert_eq!(summary.applied_paths, ["a/x", "b", "c", "foo.txt"]);
+        assert_eq!(summary.deleted_paths, ["a", "b/x", "c/d/e", "Foo.txt"]);
+        assert_eq!(names_in(root), ["a", "b", "c", "foo.txt"]);
+        assert_eq!(names_in(&root.join("a")), ["x"]);
+        assert_eq!(std::fs::read(root.join("a/x")).unwrap(), b"new in a");
+        assert_eq!(std::fs::read(root.join("b")).unwrap(), b"b is a file");
+        assert_eq!(std::fs::read(root.join("c")).unwrap(), b"c is a file");
+        assert_eq!(std::fs::read(root.join("foo.txt")).unwrap(), b"new name");
+    }
+
+    /// Undoing such an apply undoes its writes, then puts back what the
+    /// deletes before them took, under the names they had: so does
+    /// dropping it unfinished.
+    #[test]
+    fn undoing_a_save_puts_back_what_its_writes_replaced() {
+        for undo in ["rollback", "drop"] {
+            let (workspace, config) = swaps_workspace();
+            let root = workspace.path();
+            let (manifest, archive) = swaps(&config);
+
+            let (_, mut transaction) =
+                apply_changes_transactional(&config, root, manifest, &archive, || Ok(())).unwrap();
+            assert_eq!(names_in(root), ["a", "b", "c", "foo.txt"], "{undo}");
+            if undo == "rollback" {
+                transaction.rollback().unwrap();
+            }
+            drop(transaction);
+
+            assert_eq!(names_in(root), ["Foo.txt", "a", "b", "c"], "{undo}");
+            assert_eq!(std::fs::read(root.join("a")).unwrap(), b"a file");
+            assert_eq!(std::fs::read(root.join("b/x")).unwrap(), b"in b");
+            assert_eq!(std::fs::read(root.join("c/d/e")).unwrap(), b"deep in c");
+            assert_eq!(std::fs::read(root.join("Foo.txt")).unwrap(), b"old name");
+        }
+    }
+
+    /// `after_deletes` runs once, on the folder the replaced deletes left,
+    /// or before anything changes when no delete is replaced. When it
+    /// fails, the deletes are put back and nothing is written.
+    #[test]
+    fn the_check_after_the_deletes_sees_the_folder_they_left() {
+        let (workspace, config) = swaps_workspace();
+        let root = workspace.path();
+        let (manifest, archive) = swaps(&config);
+        let calls = std::cell::Cell::new(0);
+
+        let result = apply_changes_transactional(&config, root, manifest, &archive, || {
+            calls.set(calls.get() + 1);
+            assert_eq!(names_in(root), ["b", "c"]);
+            assert_eq!(names_in(&root.join("c")), ["d"]);
+            Err(OriginError::conflict_paths(
+                "path_alias",
+                "refused",
+                vec!["foo.txt".to_string()],
+            ))
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            conflict(result),
+            ("path_alias", vec!["foo.txt".to_string()])
+        );
+        assert_eq!(names_in(root), ["Foo.txt", "a", "b", "c"]);
+        assert_eq!(std::fs::read(root.join("a")).unwrap(), b"a file");
+        assert_eq!(std::fs::read(root.join("b/x")).unwrap(), b"in b");
+        assert_eq!(std::fs::read(root.join("c/d/e")).unwrap(), b"deep in c");
+
+        // Nothing replaced: the check runs before anything changes.
+        let calls = std::cell::Cell::new(0);
+        let (_, transaction) = apply_changes_transactional(
+            &config,
+            root,
+            manifest_with(&["new.txt"], &["a"]),
+            &zip_archive(&[("new.txt", b"new")]),
+            || {
+                calls.set(calls.get() + 1);
+                assert_eq!(names_in(root), ["Foo.txt", "a", "b", "c"]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        transaction.finish();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(names_in(root), ["Foo.txt", "b", "c", "new.txt"]);
+    }
+
+    /// A write never takes the place of a folder that still holds a file
+    /// or a link at any depth, whether or not the save deletes something
+    /// in it (409 `path_type_conflict`, and nothing changes, the deletes
+    /// before it included). A folder that holds only empty folders may go.
+    #[test]
+    fn a_write_never_replaces_a_folder_that_still_holds_files() {
+        let workspace = TempDir::new().unwrap();
+        let config = test_config(&workspace, None, 1024 * 1024);
+        let root = workspace.path();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("b/x"), b"in b").unwrap();
+        std::fs::write(root.join("b/keep"), b"not in the save").unwrap();
+        std::fs::create_dir_all(root.join("n/inner")).unwrap();
+        std::fs::write(root.join("n/inner/f"), b"deep").unwrap();
+        std::fs::create_dir_all(root.join("e/sub/sub")).unwrap();
+
+        let refused = [
+            (manifest(&config, &["b"], &["b/x"]), "b"),
+            (manifest(&config, &["n"], &[]), "n"),
+            (manifest(&config, &["n", "other"], &["unrelated"]), "n"),
+        ];
+        for (manifest, path) in refused {
+            let names: Vec<String> = manifest
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect();
+            let files: Vec<(&str, &[u8])> = names
+                .iter()
+                .map(|name| (name.as_str(), &b"a file"[..]))
+                .collect();
+            let result = apply_changes(&config, root, manifest, &zip_archive(&files));
+            assert_eq!(
+                conflict(result),
+                ("path_type_conflict", vec![path.to_string()])
+            );
+            assert_eq!(names_in(root), ["b", "e", "n"]);
+            assert_eq!(std::fs::read(root.join("b/x")).unwrap(), b"in b");
+            assert_eq!(
+                std::fs::read(root.join("b/keep")).unwrap(),
+                b"not in the save"
+            );
+            assert_eq!(std::fs::read(root.join("n/inner/f")).unwrap(), b"deep");
+        }
+
+        #[cfg(unix)]
+        {
+            std::fs::create_dir(root.join("s")).unwrap();
+            symlink("../b/keep", root.join("s/link")).unwrap();
+            let result = apply_changes(
+                &config,
+                root,
+                manifest(&config, &["s"], &[]),
+                &zip_archive(&[("s", b"a file")]),
+            );
+            assert_eq!(conflict(result), ("path_type_conflict", vec!["s".into()]));
+            assert!(std::fs::symlink_metadata(root.join("s/link"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            std::fs::remove_dir_all(root.join("s")).unwrap();
+        }
+
+        apply_changes(
+            &config,
+            root,
+            manifest(&config, &["e"], &[]),
+            &zip_archive(&[("e", b"e is a file")]),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(root.join("e")).unwrap(), b"e is a file");
+    }
+
+    /// Which deletes a write replaces: its own name in another spelling, a
+    /// folder it lies in, or a path inside it, never a path beside it.
+    #[test]
+    fn the_deletes_a_write_replaces() {
+        let writes = ["a/x", "b", "foo.txt", "new.md", "C/d", "e/f"];
+        let deletes = ["a", "b/x", "Foo.txt", "old.md", "b/y/z", "c", "e/g"];
+        let (replacing, replaced) = writes_replacing_deletes(&writes, &deletes);
+        assert_eq!(replacing, [true, true, true, false, true, false]);
+        assert_eq!(replaced, [true, true, true, false, true, true, false]);
+    }
+
+    /// A delete may name what a write replaces only on a single-tenant
+    /// origin's own save. The hosted gateway (one edit of a tree) and an
+    /// apply that commits (`autoCommitAfterApply`, whose commit stages the
+    /// writes before it removes the deletes) keep every path apart, and no
+    /// save writes and deletes one path or lets two writes or two deletes
+    /// meet.
+    #[test]
+    fn only_a_save_deletes_what_a_write_replaces() {
+        let workspace = TempDir::new().unwrap();
+        let config = test_config(&workspace, None, 1024 * 1024);
+        let entries = |paths: &[&str]| -> Vec<ManifestFileEntry> {
+            paths
+                .iter()
+                .map(|path| ManifestFileEntry {
+                    path: (*path).to_string(),
+                    size: None,
+                    encoding: None,
+                })
+                .collect()
+        };
+        let pairs: [(&[&str], &[&str]); 3] = [
+            (&["tree/file"], &["tree"]),
+            (&["tree"], &["tree/file"]),
+            (&["foo.txt"], &["Foo.txt"]),
+        ];
+        for (files, deletes) in pairs {
+            let deletes: Vec<String> = deletes.iter().map(|path| path.to_string()).collect();
+            let apart = validate_apply_paths(
+                entries(files),
+                deletes.clone(),
+                0,
+                1024,
+                Destinations::Apart,
+            );
+            assert!(apart.is_err(), "{files:?} {deletes:?}");
+            assert!(validate_apply_paths(
+                entries(files),
+                deletes.clone(),
+                0,
+                1024,
+                Destinations::Replacing
+            )
+            .is_ok());
+
+            let mut committing = manifest(&config, files, &[]);
+            committing.deletes = deletes;
+            committing.auto_commit_after_apply = true;
+            let result = apply_changes(&config, workspace.path(), committing, &zip_archive(&[]));
+            assert!(
+                matches!(result, Err(OriginError::BadRequest(ref message)) if message.contains("manifest destinations")),
+                "{result:?}"
+            );
+        }
+        assert_eq!(names_in(workspace.path()), Vec::<String>::new());
     }
 
     /// A disk that ignores case takes `STRASSE`, `Straße` and `STRAẞE` (a
@@ -1527,7 +2056,9 @@ mod tests {
                 size: Some(1),
                 encoding: None,
             }));
-            let Err(error) = validate_apply_paths(files, Vec::new(), 0, 1024) else {
+            let Err(error) =
+                validate_apply_paths(files, Vec::new(), 0, 1024, Destinations::Replacing)
+            else {
                 panic!("{small:?} and {capital:?} were both accepted");
             };
             assert!(
@@ -2285,6 +2816,7 @@ mod tests {
             deletes.iter().map(|path| path.to_string()).collect(),
             archive.len() as u64,
             max_archive_bytes,
+            Destinations::Apart,
         )
         .and_then(|paths| stage_archive(Cursor::new(archive), paths, max_archive_bytes, &dir));
         (staging, result)

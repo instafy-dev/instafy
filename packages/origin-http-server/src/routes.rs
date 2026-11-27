@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::apply::{
     apply_changes_transactional, apply_changes_transactional_file, normalize_relative_path,
-    portable_key, ApplyManifest, ApplySummary, PATH_ALIAS_MESSAGE,
+    portable_key, writes_replacing_deletes, ApplyManifest, ApplySummary, PATH_ALIAS_MESSAGE,
 };
 use crate::apply_idempotency::{
     abort_apply_idempotency_claim, claim_apply_idempotency, complete_apply_idempotency_claim,
@@ -1833,17 +1833,37 @@ async fn apply_manifest_archive(
     // A person's save (the controller's imports and managed-files bootstrap
     // commit theirs, `autoCommitAfterApply`) never writes or deletes a path
     // the folder holds under another spelling: see `check_destination_names`.
-    let person_destinations: Vec<String> = if auto_commit_after_apply {
-        Vec::new()
-    } else {
-        manifest
-            .files
-            .iter()
-            .map(|file| file.path.as_str())
-            .chain(manifest.deletes.iter().map(String::as_str))
-            .filter_map(normalize_relative_path)
-            .collect()
-    };
+    // A write that replaces one of the save's deletes (a rename by case
+    // only, a file and a folder that swapped) is checked once those deletes
+    // ran, on the folder they left, as a second save would be.
+    let (person_destinations, replacing_writes): (Vec<String>, Vec<String>) =
+        if auto_commit_after_apply {
+            (Vec::new(), Vec::new())
+        } else {
+            let writes: Vec<String> = manifest
+                .files
+                .iter()
+                .filter_map(|file| normalize_relative_path(&file.path))
+                .collect();
+            let deletes: Vec<String> = manifest
+                .deletes
+                .iter()
+                .filter_map(|path| normalize_relative_path(path))
+                .collect();
+            let (replaces, _) = writes_replacing_deletes(&writes, &deletes);
+            let (replacing, other): (Vec<_>, Vec<_>) = writes
+                .into_iter()
+                .zip(replaces)
+                .partition(|(_, replaces)| *replaces);
+            (
+                other
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .chain(deletes)
+                    .collect(),
+                replacing.into_iter().map(|(path, _)| path).collect(),
+            )
+        };
     // The version the client read at: it tells a link the client could
     // never have seen from one that changed since (see
     // `check_expected_blobs`).
@@ -1895,12 +1915,15 @@ async fn apply_manifest_archive(
                     read_at.as_deref(),
                 )?;
             }
+            let after_deletes =
+                || check_destination_names(blocking_workspace.as_path(), &replacing_writes);
             let (mut apply_result, mut apply_transaction) = match archive {
                 ApplyArchive::InMemory(archive_bytes) => apply_changes_transactional(
                     &config,
                     blocking_workspace.as_path(),
                     manifest,
                     &archive_bytes,
+                    after_deletes,
                 )?,
                 ApplyArchive::TempFile { file, size } => apply_changes_transactional_file(
                     &config,
@@ -1908,6 +1931,7 @@ async fn apply_manifest_archive(
                     manifest,
                     file,
                     size,
+                    after_deletes,
                 )?,
             };
             let mut apply_base_rev = None;

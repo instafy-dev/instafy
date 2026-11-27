@@ -1063,16 +1063,38 @@ impl<'a> Publisher<'a> {
             } else {
                 Some(EmbeddedGitDirGuard::hide(self.git.root(), &touched)?)
             };
-            let list = nul_list(&candidates);
-            self.git.ok_opts(
-                &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
-                &RunOpts {
-                    index_file: Some(&index),
-                    stdin: Some(&list),
-                    literal_pathspecs: true,
-                    ..RunOpts::default()
-                },
-            )?;
+            // `add -A` looks for new files at each path, and when that walk
+            // meets an entry `.gitignore` names at or above a path, it
+            // refuses the whole list ("paths are ignored"): `drafts/x`
+            // deleted where an ignored file `drafts` took its folder's
+            // place, or a tracked file edited inside a folder the space now
+            // ignores. A file `head` tracks that is not a folder now has no
+            // new file to find, so `add -u` records its edit, its new type or
+            // its deletion without that walk. It runs first, while each of
+            // its paths is still in the index: `add -A` may take one out (a
+            // new file `b` replaces `b/x`), and `add -u` refuses a path that
+            // matches nothing.
+            let (updated, walked): (Vec<&String>, Vec<&String>) =
+                candidates.iter().partition(|path| {
+                    in_head.get(*path).is_some_and(|entry| entry.kind == "blob")
+                        && !std::fs::symlink_metadata(self.git.root().join(path))
+                            .is_ok_and(|metadata| metadata.is_dir())
+                });
+            for (mode, paths) in [("-u", updated), ("-A", walked)] {
+                if paths.is_empty() {
+                    continue;
+                }
+                let list = nul_list(&paths);
+                self.git.ok_opts(
+                    &["add", mode, "--pathspec-from-file=-", "--pathspec-file-nul"],
+                    &RunOpts {
+                        index_file: Some(&index),
+                        stdin: Some(&list),
+                        literal_pathspecs: true,
+                        ..RunOpts::default()
+                    },
+                )?;
+            }
         }
 
         // Check what was actually staged (directories expand here) and put
