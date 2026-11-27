@@ -709,7 +709,7 @@ fn ensure_object(value: &mut JsonValue) -> &mut JsonMap<String, JsonValue> {
     value.as_object_mut().expect("value must be object")
 }
 
-fn normalize_agent_handle(raw: &str) -> Option<String> {
+pub(crate) fn normalize_agent_handle(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_start_matches('@').trim().to_lowercase();
     if trimmed.is_empty() || trimmed.len() > 20 {
         return None;

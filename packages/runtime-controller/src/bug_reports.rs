@@ -27,6 +27,7 @@ use crate::redaction::{
     is_sensitive_diagnostic_key, normalize_diagnostic_key, REDACTED_DIAGNOSTIC_VALUE,
 };
 use crate::state::{publish_controller_event_with_conversation, AppState};
+use crate::utils::double_option;
 
 const MAX_SCREENSHOTS: usize = 6;
 const MAX_SCREENSHOT_BYTES: usize = 4 * 1024 * 1024;
@@ -131,29 +132,18 @@ struct ListBugReportsQuery {
 struct UpdateBugReportRequest {
     status: Option<String>,
     priority: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(default, deserialize_with = "double_option")]
     assignee: Option<Option<String>>,
     labels: Option<JsonValue>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(default, deserialize_with = "double_option")]
     duplicate_of: Option<Option<String>>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[serde(default, deserialize_with = "double_option")]
     github_issue_url: Option<Option<String>>,
     resolved_at: Option<String>,
     updated_at: Option<String>,
     metadata: Option<JsonValue>,
     expected_updated_at: Option<String>,
     expected_customer_last_message_at: Option<String>,
-}
-
-/// Distinguish an omitted PATCH field (preserve) from an explicit JSON null
-/// (clear). Serde's ordinary nested Option handling otherwise maps both cases
-/// to the outer None.
-fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize)]

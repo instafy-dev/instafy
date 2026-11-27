@@ -16,6 +16,7 @@ use tokio_postgres::types::Json as PgJson;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::agent_write_scopes::normalize_agent_handle;
 use crate::auth::{authenticate_request, require_user_session, RequestContext};
 use crate::conversations::{
     build_dispatch_request_from_conversation, ensure_conversation_access,
@@ -108,28 +109,6 @@ struct SendQueueRestoreBody {
     target_agent_handles: Vec<String>,
     #[serde(default)]
     status: SendQueueRestoreStatus,
-}
-
-fn normalize_agent_handle(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_start_matches('@').trim().to_lowercase();
-    if trimmed.is_empty() || trimmed.len() > 20 {
-        return None;
-    }
-    if !trimmed
-        .chars()
-        .next()
-        .map(|ch| ch.is_ascii_alphanumeric())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    if !trimmed
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-    {
-        return None;
-    }
-    Some(trimmed)
 }
 
 fn normalize_handles(handles: &[String]) -> Vec<String> {
