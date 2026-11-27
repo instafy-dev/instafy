@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::auth::{authenticate_request, bearer_token, claims_have_scopes, RequestContext};
 use crate::config::{
-    ensure_service_runtime_user_id_via_supabase, AppConfig, PgPool,
+    ensure_service_runtime_user_id_via_supabase, AppConfig, PgPool, SelfHostedOriginNetworks,
     DEFAULT_SERVICE_RUNTIME_USER_EMAIL,
 };
 use crate::errors::{
@@ -2148,6 +2148,205 @@ fn origin_is_configured_hosted_gateway(state: &AppState, origin: &WorkspaceOrigi
             })
 }
 
+/// What a requester learns when the controller will not connect to an origin.
+const NON_PUBLIC_ORIGIN_ENDPOINT: &str = "origin endpoint is not at a public address; this \
+     controller reaches self-hosted origins only at public addresses";
+
+fn non_public_origin_endpoint(
+    project_id: &Uuid,
+    origin_id: &Uuid,
+    address: Option<IpAddr>,
+) -> (StatusCode, Json<ApiError>) {
+    tracing::info!(
+        project_id = %project_id,
+        origin_id = %origin_id,
+        address = ?address,
+        "refused a self-hosted origin endpoint that is not at a public address"
+    );
+    forbidden(NON_PUBLIC_ORIGIN_ENDPOINT)
+}
+
+/// The answer when `origin`'s endpoint fails the public-address check made
+/// before anything is sent to it: `403` when it is not at a public address,
+/// `502` when its name does not resolve, or not within the connect timeout.
+fn origin_address_check_failure(
+    origin: &WorkspaceOriginRecord,
+    error: crate::origin_network::PublicConnectError,
+) -> (StatusCode, Json<ApiError>) {
+    match error {
+        crate::origin_network::PublicConnectError::Refused(
+            refusal @ crate::origin_network::OriginAddressError::NonPublic { .. },
+        ) => non_public_origin_endpoint(&origin.project_id, &origin.id, refusal.address()),
+        other => bad_gateway(format!("origin endpoint could not be reached: {other}")),
+    }
+}
+
+/// Whether the controller may connect to `origin` only at public addresses
+/// (`SELF_HOSTED_ORIGIN_NETWORKS`, see `origin_network`). A private
+/// self-hosted runtime names its own origin's endpoint, so its origin is
+/// reached only at public addresses unless the operator allows private
+/// networks. The configured hosted gateway, tunnels this controller issues and
+/// provider-managed runtimes' origins are the operator's own and keep every
+/// address. An origin whose runtime cannot be classified counts as
+/// self-hosted. `live_binding` is the origin's live runtime binding, when the
+/// caller has already loaded it.
+async fn origin_requires_public_address(
+    state: &AppState,
+    origin: &WorkspaceOriginRecord,
+    live_binding: Option<&OriginRuntimeBinding>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    if state.config.self_hosted_origin_networks == SelfHostedOriginNetworks::Private
+        || origin_is_configured_hosted_gateway(state, origin)
+        || reqwest::Url::parse(origin.endpoint.trim())
+            .is_ok_and(|endpoint| state.config.is_issued_tunnel_url(&endpoint))
+    {
+        return Ok(false);
+    }
+    if let Some(binding) = live_binding {
+        return Ok(crate::runtime::runtime_is_private_self_hosted(
+            state,
+            &binding.provider,
+            &binding.capabilities,
+        ));
+    }
+    let registering_runtime = origin_registering_runtime(&state.pool, origin)
+        .await
+        .map_err(|error| internal_error(format!("failed to classify origin runtime: {error}")))?;
+    Ok(match registering_runtime {
+        Some((provider, capabilities)) => {
+            crate::runtime::runtime_is_private_self_hosted(state, &provider, &capabilities)
+        }
+        None => true,
+    })
+}
+
+/// The runtime that registered `origin`, live or not. An origin id is bound to
+/// one runtime's instance (see `register_runtime_bound_origin`).
+async fn origin_registering_runtime(
+    pool: &PgPool,
+    origin: &WorkspaceOriginRecord,
+) -> Result<Option<(String, JsonValue)>> {
+    let connection = pool
+        .get()
+        .await
+        .context("failed to acquire connection for origin runtime classification")?;
+    let row = connection
+        .query_opt(
+            "select r.provider, r.capabilities
+             from origin_instances oi
+             join runtimes r
+               on r.id = oi.runtime_id
+              and r.project_id = oi.project_id
+             where oi.project_id = $1
+               and oi.origin_id = $2
+             order by oi.updated_at desc
+             limit 1",
+            &[&origin.project_id, &origin.id],
+        )
+        .await
+        .context("failed to load the runtime that registered an origin")?;
+    Ok(row.map(|row| (row.get("provider"), row.get("capabilities"))))
+}
+
+/// What [`origin_upstream_client`] checks before a request to an origin held
+/// to public addresses. An IP literal reaches no resolver, so it is always
+/// checked first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeldEndpointCheck {
+    /// A name too, as it resolves, once: a refusal is then a clear `403`, and
+    /// a name that does not resolve, or not within the connect timeout, a
+    /// `502`, before anything is sent. For the controller's own requests,
+    /// whose callers would otherwise learn less from a failed connection.
+    Resolved,
+    /// Only an IP literal. A name is left to the public-address client's
+    /// resolver, which refuses it at the connection with the same `403` from
+    /// the relay, so a relayed request costs at most one lookup, not two,
+    /// and none over a pooled connection.
+    LiteralOnly,
+}
+
+/// The client for a request the controller sends to `origin` at `upstream`
+/// (its endpoint as `resolve_origin_proxy_upstream_endpoint` rewrites it).
+/// Neither client follows a redirect, which would take the request to an
+/// address the origin names. When only public addresses are allowed, the
+/// host is checked first, as `check` says, and the public-address client
+/// checks every connection again.
+async fn origin_upstream_client(
+    state: &AppState,
+    origin: &WorkspaceOriginRecord,
+    live_binding: Option<&OriginRuntimeBinding>,
+    upstream: &str,
+    check: HeldEndpointCheck,
+) -> Result<reqwest::Client, (StatusCode, Json<ApiError>)> {
+    if !origin_requires_public_address(state, origin, live_binding).await? {
+        return Ok(state.origin_proxy_client.clone());
+    }
+    let upstream = reqwest::Url::parse(upstream.trim())
+        .map_err(|_| internal_error("invalid origin endpoint".to_string()))?;
+    match check {
+        HeldEndpointCheck::Resolved => state.public_origins.check(&upstream).await,
+        HeldEndpointCheck::LiteralOnly => crate::origin_network::check_literal(&upstream),
+    }
+    .map_err(|error| origin_address_check_failure(origin, error))?;
+    Ok(state.public_origins.client().clone())
+}
+
+/// [`origin_upstream_client`] for the controller's own requests to an origin,
+/// such as a GitHub import or the project memory bootstrap.
+pub(crate) async fn origin_request_client(
+    state: &AppState,
+    origin: &WorkspaceOriginRecord,
+    upstream: &str,
+) -> Result<reqwest::Client, (StatusCode, Json<ApiError>)> {
+    origin_upstream_client(state, origin, None, upstream, HeldEndpointCheck::Resolved).await
+}
+
+/// Refuses a private self-hosted runtime's endpoint on a network that is not
+/// public, unless the operator allows private networks
+/// (`SELF_HOSTED_ORIGIN_NETWORKS`). Loopback stays registrable, as Desktop
+/// names its own origin that way, but the controller never connects to it.
+/// A runtime that is not registered for the project is left to the binding
+/// checks, which refuse it.
+async fn ensure_origin_registration_network(
+    state: &AppState,
+    project_id: &Uuid,
+    origin_id: &Uuid,
+    claims: &AccessTokenClaims,
+    endpoint: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if state.config.self_hosted_origin_networks == SelfHostedOriginNetworks::Private {
+        return Ok(());
+    }
+    let Some(runtime_id) = claims
+        .runtime_id
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return Ok(());
+    };
+    let runtime = runtime_provider_for_project(&state.pool, project_id, &runtime_id)
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to classify origin registration runtime: {error}"
+            ))
+        })?;
+    let Some((provider, capabilities)) = runtime else {
+        return Ok(());
+    };
+    if !crate::runtime::runtime_is_private_self_hosted(state, &provider, &capabilities) {
+        return Ok(());
+    }
+    let endpoint = reqwest::Url::parse(endpoint)
+        .map_err(|_| bad_request("endpoint must be a valid HTTP(S) URL"))?;
+    if state.config.is_issued_tunnel_url(&endpoint) {
+        return Ok(());
+    }
+    crate::origin_network::check_registration_endpoint(state.public_origins.lookup(), &endpoint)
+        .await
+        .map_err(|refusal| non_public_origin_endpoint(project_id, origin_id, refusal.address()))
+}
+
 async fn origin_runtime_binding_for_subject(
     state: &AppState,
     origin: &WorkspaceOriginRecord,
@@ -4237,7 +4436,7 @@ async fn proxy_origin_browser_ws(
         return Err(not_found("project not found"));
     }
 
-    authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
+    let runtime_binding = authorize_origin_proxy_token_runtime(&state, &origin, &claims).await?;
 
     if !origin_endpoint_is_proxyable(&state.config, &origin.endpoint) {
         return Err(forbidden(
@@ -4246,6 +4445,8 @@ async fn proxy_origin_browser_ws(
     }
 
     let (base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    let public_only =
+        origin_requires_public_address(&state, &origin, runtime_binding.as_ref()).await?;
     let mut upstream = reqwest::Url::parse(&base)
         .map_err(|_| internal_error("invalid origin endpoint".to_string()))?;
     let scheme = upstream.scheme().to_ascii_lowercase();
@@ -4263,6 +4464,19 @@ async fn proxy_origin_browser_ws(
     upstream.set_path(&path);
     upstream.set_query(forwarded_query.as_deref());
 
+    // Checked before the upgrade, so a refusal is a `403` rather than a
+    // closed socket; the bridge then connects to exactly these addresses.
+    let checked_addresses = if public_only {
+        let addresses = state
+            .public_origins
+            .addresses(&upstream)
+            .await
+            .map_err(|error| origin_address_check_failure(&origin, error))?;
+        Some(addresses)
+    } else {
+        None
+    };
+
     let upstream_url = upstream.to_string();
     let relay_context = BrowserRelayContext::new(
         relay_transport,
@@ -4274,8 +4488,32 @@ async fn proxy_origin_browser_ws(
         claims.run_id,
     );
     Ok(ws.on_upgrade(move |socket| {
-        bridge_origin_ws(socket, upstream_url, host_override, token, relay_context)
+        bridge_origin_ws(
+            socket,
+            upstream_url,
+            host_override,
+            token,
+            relay_context,
+            checked_addresses,
+        )
     }))
+}
+
+/// Opens the origin's WebSocket. An origin held to public addresses is
+/// reached only at `checked_addresses`, checked before the upgrade, so no
+/// second lookup can answer differently.
+async fn connect_origin_ws(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    checked_addresses: Option<&crate::origin_network::CheckedAddresses>,
+) -> anyhow::Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let Some(addresses) = checked_addresses else {
+        return Ok(connect_async(request).await?);
+    };
+    let stream = addresses.connect().await?;
+    Ok(tokio_tungstenite::client_async_tls(request, stream).await?)
 }
 
 async fn bridge_origin_ws(
@@ -4284,6 +4522,7 @@ async fn bridge_origin_ws(
     host_override: Option<String>,
     token: String,
     relay_context: BrowserRelayContext,
+    checked_addresses: Option<crate::origin_network::CheckedAddresses>,
 ) {
     let mut relay_telemetry = BrowserRelayTelemetry::new(relay_context);
     let upstream_url_with_token = match reqwest::Url::parse(&upstream_url) {
@@ -4320,17 +4559,18 @@ async fn bridge_origin_ws(
         }
     }
 
-    let (upstream_ws, _response) = match connect_async(request).await {
-        Ok(value) => value,
-        Err(error) => {
-            warn!(
-                ?error,
-                "failed to connect to upstream origin browser websocket"
-            );
-            relay_telemetry.close(BrowserRelayOutcome::OriginConnectError);
-            return;
-        }
-    };
+    let (upstream_ws, _response) =
+        match connect_origin_ws(request, checked_addresses.as_ref()).await {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "failed to connect to upstream origin browser websocket"
+                );
+                relay_telemetry.close(BrowserRelayOutcome::OriginConnectError);
+                return;
+            }
+        };
 
     let (mut client_sender, mut client_receiver) = socket.split();
     let (mut upstream_sender, mut upstream_receiver) = upstream_ws.split();
@@ -4508,12 +4748,19 @@ async fn proxy_origin_request(
     }
 
     let (base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    let upstream_client = origin_upstream_client(
+        &state,
+        &origin,
+        runtime_binding.as_ref(),
+        &base,
+        HeldEndpointCheck::LiteralOnly,
+    )
+    .await?;
     let url = build_origin_proxy_upstream_url(&base, &canonical_path, forwarded_query.as_deref())?;
 
     let upstream_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .map_err(|_| bad_request("invalid proxy method"))?;
-    let mut builder = state
-        .origin_proxy_client
+    let mut builder = upstream_client
         .request(upstream_method, url)
         .bearer_auth(&token);
     if let Some(host) = host_override
@@ -4609,7 +4856,20 @@ async fn proxy_origin_request(
     let idle = crate::proxy_read::ORIGIN_PROXY_IDLE_TIMEOUT;
     let mut upstream = crate::proxy_read::send_within_idle(builder.body(body), idle)
         .await
-        .map_err(|error| bad_gateway(format!("origin proxy request failed: {error}")))?;
+        .map_err(|error| {
+            let refused = match &error {
+                crate::proxy_read::ProxyReadError::Upstream(upstream_error) => {
+                    crate::origin_network::refused_non_public_address(upstream_error)
+                }
+                crate::proxy_read::ProxyReadError::Idle(_) => None,
+            };
+            match refused {
+                Some(address) => {
+                    non_public_origin_endpoint(&origin.project_id, &origin.id, Some(address))
+                }
+                None => bad_gateway(format!("origin proxy request failed: {error}")),
+            }
+        })?;
 
     let status = upstream.status();
     let headers = upstream.headers().clone();
@@ -4779,6 +5039,8 @@ pub(crate) async fn post_origin_register(
     // query/fragment payloads) and canonicalize before the binding checks so
     // tunnel/re-registration comparisons are exact.
     let endpoint = normalize_origin_registration_endpoint(&body.endpoint)?;
+    // Outside the registration transaction: it may wait on DNS.
+    ensure_origin_registration_network(&state, &project_id, &origin_id, &claims, &endpoint).await?;
 
     let mut protocols = body.protocols.unwrap_or_else(|| vec!["http".to_string()]);
     protocols = protocols
@@ -6606,6 +6868,506 @@ eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
 eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n";
 
         assert_eq!(parse_default_gateway_ipv4(sample), None);
+    }
+
+    /// `SELF_HOSTED_ORIGIN_NETWORKS`: which origins are held to public
+    /// addresses, and what reaching one looks like (see `origin_network`).
+    mod origin_network_boundary {
+        use super::*;
+        use crate::origin_network::test_support::{
+            checked_addresses, HangingLookup, ScriptedLookup,
+        };
+
+        /// A state whose database is never reached unless a test means to.
+        fn origin_network_test_state(
+            networks: SelfHostedOriginNetworks,
+            tunnel_domain: Option<&str>,
+            hosted_origin_endpoint: Option<&str>,
+        ) -> AppState {
+            let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+                "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+                crate::config::database_tls(),
+            )
+            .expect("connection manager");
+            let pool = bb8::Pool::builder()
+                .max_size(1)
+                .connection_timeout(std::time::Duration::from_millis(200))
+                .build_unchecked(manager);
+            let mut config = crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "origin-network-boundary",
+            );
+            config.self_hosted_origin_networks = networks;
+            config.previews.tunnel_domain = tunnel_domain.map(str::to_string);
+            config.hosted_origin_endpoint = hosted_origin_endpoint.map(str::to_string);
+            crate::tests::build_test_state(pool, config)
+        }
+
+        fn origin_at(
+            project_id: Uuid,
+            id: Uuid,
+            mode: OriginMode,
+            endpoint: &str,
+        ) -> WorkspaceOriginRecord {
+            WorkspaceOriginRecord {
+                id,
+                project_id,
+                mode,
+                endpoint: endpoint.to_string(),
+                protocols: vec!["http".to_string()],
+                region: None,
+                device_id: None,
+                metadata: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn runtime_binding(provider: &str) -> OriginRuntimeBinding {
+            OriginRuntimeBinding {
+                runtime_id: Uuid::new_v4(),
+                provider: provider.to_string(),
+                capabilities: json!({}),
+            }
+        }
+
+        #[tokio::test]
+        async fn only_tunnels_this_controller_issues_count_as_issued() {
+            let state = origin_network_test_state(
+                SelfHostedOriginNetworks::Public,
+                Some("tunnels.example.com"),
+                None,
+            );
+            for (endpoint, issued) in [
+                ("https://k7m2qa.tunnels.example.com", true),
+                ("http://k7m2qa.tunnels.example.com/", true),
+                ("https://k7m2qa.tunnels.example.com:443", true),
+                ("https://K7M2QA.Tunnels.Example.com.", true),
+                ("https://k7-m2qa.tunnels.example.com", true),
+                // Another port on the ingress host is not a tunnel, and nor is
+                // a tunnel from a broker whose PUBLIC_INGRESS_PORT is not the
+                // scheme's default: it is held to public addresses.
+                ("https://k7m2qa.tunnels.example.com:8443", false),
+                ("http://k7m2qa.tunnels.example.com:8083", false),
+                ("http://k7m2qa.tunnels.example.com:6379", false),
+                // The broker mints exactly one label.
+                ("https://tunnels.example.com", false),
+                ("https://a.k7m2qa.tunnels.example.com", false),
+                ("https://k7_m2qa.tunnels.example.com", false),
+                ("https://-k7m2qa.tunnels.example.com", false),
+                ("https://k7m2qa-.tunnels.example.com", false),
+                ("https://tunnels.example.com.attacker.test", false),
+                ("https://xtunnels.example.com", false),
+                ("https://k7m2qa.rt.test", false),
+                ("http://127.0.0.1:54332", false),
+            ] {
+                let url = reqwest::Url::parse(endpoint).unwrap();
+                assert_eq!(
+                    state.config.is_issued_tunnel_url(&url),
+                    issued,
+                    "{endpoint}"
+                );
+            }
+
+            // A `p-` label is a preview's capability host, not a tunnel, when
+            // previews share the tunnel domain.
+            let preview_label =
+                reqwest::Url::parse("https://p-web--k7m2qa.tunnels.example.com").unwrap();
+            assert!(state.config.is_issued_tunnel_url(&preview_label));
+            let mut shared = origin_network_test_state(
+                SelfHostedOriginNetworks::Public,
+                Some("tunnels.example.com"),
+                None,
+            );
+            shared.config.previews.domain = Some("Tunnels.Example.com".to_string());
+            assert!(!shared.config.is_issued_tunnel_url(&preview_label));
+
+            // The local broker's domain is never an issued tunnel, even when it
+            // is configured, and nothing is one without a tunnel domain.
+            let local =
+                origin_network_test_state(SelfHostedOriginNetworks::Public, Some("rt.test"), None);
+            let unset = origin_network_test_state(SelfHostedOriginNetworks::Public, None, None);
+            let rt_test = reqwest::Url::parse("https://k7m2qa.rt.test").unwrap();
+            let issued = reqwest::Url::parse("https://k7m2qa.tunnels.example.com").unwrap();
+            assert!(!local.config.is_issued_tunnel_url(&rt_test));
+            assert!(!unset.config.is_issued_tunnel_url(&issued));
+        }
+
+        #[tokio::test]
+        async fn only_a_self_hosted_runtimes_origin_is_held_to_public_addresses() {
+            let project_id = Uuid::new_v4();
+            let gateway_endpoint = "http://10.0.0.9:54333";
+            let public = origin_network_test_state(
+                SelfHostedOriginNetworks::Public,
+                Some("tunnels.example.com"),
+                Some(gateway_endpoint),
+            );
+            let private = origin_network_test_state(
+                SelfHostedOriginNetworks::Private,
+                Some("tunnels.example.com"),
+                Some(gateway_endpoint),
+            );
+            let self_hosted = runtime_binding("self-hosted");
+            let managed = runtime_binding("instafy-cloud");
+            let lan = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "http://192.168.1.20:54332",
+            );
+
+            // A person's own runtime names its endpoint.
+            assert!(
+                origin_requires_public_address(&public, &lan, Some(&self_hosted))
+                    .await
+                    .unwrap()
+            );
+            // ... unless the operator allows private networks.
+            assert!(
+                !origin_requires_public_address(&private, &lan, Some(&self_hosted))
+                    .await
+                    .unwrap()
+            );
+            // A provider-managed runtime's origin is the operator's own.
+            assert!(
+                !origin_requires_public_address(&public, &lan, Some(&managed))
+                    .await
+                    .unwrap()
+            );
+            // So is a tunnel this controller issued, but not another port on
+            // it.
+            let tunnel = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "https://k7m2qa.tunnels.example.com",
+            );
+            assert!(
+                !origin_requires_public_address(&public, &tunnel, Some(&self_hosted))
+                    .await
+                    .unwrap()
+            );
+            let tunnel_port = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "https://k7m2qa.tunnels.example.com:6379",
+            );
+            assert!(
+                origin_requires_public_address(&public, &tunnel_port, Some(&self_hosted))
+                    .await
+                    .unwrap()
+            );
+            // The configured hosted gateway needs no runtime.
+            let gateway = origin_at(
+                project_id,
+                hosted_origin_id_for_project(&project_id),
+                OriginMode::Hosted,
+                gateway_endpoint,
+            );
+            assert!(!origin_requires_public_address(&public, &gateway, None)
+                .await
+                .unwrap());
+            // Any other unbound origin is classified by the runtime that
+            // registered it, and a failure to do that fails closed.
+            let elsewhere = origin_at(
+                project_id,
+                hosted_origin_id_for_project(&project_id),
+                OriginMode::Hosted,
+                "http://10.0.0.10:54333",
+            );
+            assert!(origin_requires_public_address(&public, &elsewhere, None)
+                .await
+                .is_err());
+        }
+
+        #[tokio::test]
+        async fn a_held_origin_at_a_non_public_address_is_refused_before_anything_is_sent() {
+            let project_id = Uuid::new_v4();
+            let mut state = origin_network_test_state(SelfHostedOriginNetworks::Public, None, None);
+            let lookup = ScriptedLookup::always("origin.test", &["10.0.0.5"]);
+            state.public_origins = lookup.network();
+            let self_hosted = runtime_binding("self-hosted");
+            for upstream in [
+                "http://127.0.0.1:54332",
+                "http://10.0.0.5:54332",
+                "http://[::1]:54332",
+                "http://169.254.169.254",
+                // A name is resolved once before the request, so its refusal
+                // is a 403 too; the connection is checked again.
+                "http://origin.test:54332",
+            ] {
+                let origin = origin_at(project_id, Uuid::new_v4(), OriginMode::Desktop, upstream);
+                let (status, Json(error)) = origin_upstream_client(
+                    &state,
+                    &origin,
+                    Some(&self_hosted),
+                    upstream,
+                    HeldEndpointCheck::Resolved,
+                )
+                .await
+                .expect_err("a non-public address is refused");
+                assert_eq!(status, StatusCode::FORBIDDEN, "{upstream}");
+                assert_eq!(error.message, NON_PUBLIC_ORIGIN_ENDPOINT, "{upstream}");
+            }
+            assert_eq!(
+                lookup.calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "only the name is looked up"
+            );
+            // A public name passes; the public client checks every connection.
+            state.public_origins =
+                ScriptedLookup::always("origin.test", &["203.0.114.10"]).network();
+            let named = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "https://origin.test",
+            );
+            assert!(origin_upstream_client(
+                &state,
+                &named,
+                Some(&self_hosted),
+                "https://origin.test",
+                HeldEndpointCheck::Resolved,
+            )
+            .await
+            .is_ok());
+            // A managed runtime's origin keeps the ordinary client.
+            let managed_origin = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Hosted,
+                "http://10.0.0.5:54332",
+            );
+            assert!(origin_upstream_client(
+                &state,
+                &managed_origin,
+                Some(&runtime_binding("instafy-cloud")),
+                "http://10.0.0.5:54332",
+                HeldEndpointCheck::Resolved,
+            )
+            .await
+            .is_ok());
+        }
+
+        /// A relay checks only an IP literal before sending: a held name is
+        /// looked up once, by the public-address client as it connects, and
+        /// refused there.
+        #[tokio::test]
+        async fn a_relay_checks_only_an_ip_literal_and_leaves_a_name_to_the_connection() {
+            let project_id = Uuid::new_v4();
+            let mut state = origin_network_test_state(SelfHostedOriginNetworks::Public, None, None);
+            let lookup = ScriptedLookup::always("origin.test", &["10.0.0.5"]);
+            state.public_origins = lookup.network();
+            let self_hosted = runtime_binding("self-hosted");
+            let literal = "http://10.0.0.5:54332";
+            let origin = origin_at(project_id, Uuid::new_v4(), OriginMode::Desktop, literal);
+            let (status, Json(error)) = origin_upstream_client(
+                &state,
+                &origin,
+                Some(&self_hosted),
+                literal,
+                HeldEndpointCheck::LiteralOnly,
+            )
+            .await
+            .expect_err("a non-public IP literal is refused before sending");
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(error.message, NON_PUBLIC_ORIGIN_ENDPOINT);
+
+            let named = "http://origin.test:54332";
+            let origin = origin_at(project_id, Uuid::new_v4(), OriginMode::Desktop, named);
+            let client = origin_upstream_client(
+                &state,
+                &origin,
+                Some(&self_hosted),
+                named,
+                HeldEndpointCheck::LiteralOnly,
+            )
+            .await
+            .unwrap_or_else(|(status, Json(error))| panic!("{status}: {}", error.message));
+            assert_eq!(
+                lookup.calls.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "nothing is looked up before the request"
+            );
+            let refusal = client
+                .get(format!("{named}/entries"))
+                .send()
+                .await
+                .expect_err("refused at the connection");
+            assert_eq!(
+                crate::origin_network::refused_non_public_address(&refusal),
+                Some("10.0.0.5".parse().unwrap())
+            );
+            assert_eq!(lookup.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        /// A held name whose lookup does not answer fails the check after one
+        /// connect timeout with a `502`, before anything is sent, instead of
+        /// leaving the client to wait on a second lookup.
+        #[tokio::test(start_paused = true)]
+        async fn a_held_name_that_does_not_resolve_in_time_answers_502_before_anything_is_sent() {
+            let project_id = Uuid::new_v4();
+            let mut state = origin_network_test_state(SelfHostedOriginNetworks::Public, None, None);
+            let lookup = std::sync::Arc::new(HangingLookup::default());
+            state.public_origins = lookup.network();
+            let upstream = "http://origin.test:54332";
+            let origin = origin_at(project_id, Uuid::new_v4(), OriginMode::Desktop, upstream);
+            let started = tokio::time::Instant::now();
+            let (status, Json(error)) = origin_upstream_client(
+                &state,
+                &origin,
+                Some(&runtime_binding("self-hosted")),
+                upstream,
+                HeldEndpointCheck::Resolved,
+            )
+            .await
+            .expect_err("a name that does not resolve in time fails the check");
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(
+                error
+                    .message
+                    .starts_with("origin endpoint could not be reached"),
+                "{}",
+                error.message
+            );
+            assert_eq!(
+                started.elapsed(),
+                crate::proxy_read::ORIGIN_PROXY_CONNECT_TIMEOUT
+            );
+            assert_eq!(lookup.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+
+        /// A WebSocket relay to a held origin connects to the addresses it
+        /// checked before the upgrade and looks nothing up again: a `.invalid`
+        /// name cannot resolve, so the handshake can only succeed over the
+        /// checked address.
+        #[tokio::test]
+        async fn a_websocket_bridge_connects_only_to_the_addresses_it_checked() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let origin = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio_tungstenite::accept_async(stream).await.is_ok()
+            });
+            let request = format!("ws://origin.invalid:{}/browser/vnc", address.port())
+                .into_client_request()
+                .unwrap();
+            let (_socket, response) =
+                connect_origin_ws(request, Some(&checked_addresses(vec![address])))
+                    .await
+                    .expect("connected to the checked address");
+            assert_eq!(response.status().as_u16(), 101);
+            assert!(origin.await.unwrap(), "the origin completed the handshake");
+        }
+
+        /// An origin that is not held still gets a client that follows no
+        /// redirect: the redirect would name any address it likes. This is
+        /// the client GitHub imports and the memory bootstrap send with too.
+        #[tokio::test]
+        async fn an_origin_that_is_not_held_is_reached_without_following_a_redirect() {
+            let project_id = Uuid::new_v4();
+            let elsewhere = httpmock::MockServer::start_async().await;
+            let landed = elsewhere
+                .mock_async(|_when, then| {
+                    then.status(200).body("followed");
+                })
+                .await;
+            let origin_server = httpmock::MockServer::start_async().await;
+            origin_server
+                .mock_async(|when, then| {
+                    when.method(httpmock::Method::GET);
+                    then.status(302)
+                        .header("location", elsewhere.url("/landed"));
+                })
+                .await;
+            origin_server
+                .mock_async(|when, then| {
+                    when.method(httpmock::Method::POST);
+                    then.status(307)
+                        .header("location", elsewhere.url("/landed"));
+                })
+                .await;
+
+            let gateway_endpoint = origin_server.base_url();
+            let public = origin_network_test_state(
+                SelfHostedOriginNetworks::Public,
+                Some("tunnels.example.com"),
+                Some(&gateway_endpoint),
+            );
+            let private = origin_network_test_state(SelfHostedOriginNetworks::Private, None, None);
+            let self_hosted = runtime_binding("self-hosted");
+            let tunnel = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "https://k7m2qa.tunnels.example.com",
+            );
+            let gateway = origin_at(
+                project_id,
+                hosted_origin_id_for_project(&project_id),
+                OriginMode::Hosted,
+                &gateway_endpoint,
+            );
+            let lan = origin_at(
+                project_id,
+                Uuid::new_v4(),
+                OriginMode::Desktop,
+                "http://192.168.1.20:54332",
+            );
+            let managed = runtime_binding("instafy-cloud");
+            let cases = [
+                (&public, &tunnel, Some(&self_hosted), "an issued tunnel"),
+                (&public, &gateway, None, "the hosted gateway"),
+                (&public, &lan, Some(&managed), "a managed runtime's origin"),
+                (
+                    &private,
+                    &lan,
+                    Some(&self_hosted),
+                    "private networks allowed",
+                ),
+            ];
+            for (state, origin, binding, case) in cases {
+                let client = match binding {
+                    // What a relay asks for.
+                    Some(binding) => {
+                        origin_upstream_client(
+                            state,
+                            origin,
+                            Some(binding),
+                            &origin.endpoint,
+                            HeldEndpointCheck::LiteralOnly,
+                        )
+                        .await
+                    }
+                    // What imports and the memory bootstrap ask for.
+                    None => origin_request_client(state, origin, &origin.endpoint).await,
+                }
+                .unwrap_or_else(|(status, Json(error))| {
+                    panic!("{case}: {status}: {}", error.message)
+                });
+                let read = client
+                    .get(origin_server.url("/files/INSTAFY.md"))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(read.status(), reqwest::StatusCode::FOUND, "{case}");
+                let status = client
+                    .post(origin_server.url("/apply/status"))
+                    .json(&json!({ "idempotencyKey": "imp:origin-network" }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    status.status(),
+                    reqwest::StatusCode::TEMPORARY_REDIRECT,
+                    "{case}"
+                );
+            }
+            assert_eq!(landed.hits_async().await, 0);
+        }
     }
 }
 

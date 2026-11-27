@@ -25,6 +25,9 @@ pub(crate) struct AppState {
     pub(crate) follow: crate::previews::FollowHub,
     pub(crate) http_client: reqwest::Client,
     pub(crate) origin_proxy_client: reqwest::Client,
+    /// Reaches a private self-hosted runtime's origin at public addresses
+    /// only (`origin_network::PublicOriginNetwork`).
+    pub(crate) public_origins: crate::origin_network::PublicOriginNetwork,
     pub(crate) runtime_activity: RuntimeActivityTracker,
     pub(crate) local_workspaces: LocalWorkspaceRegistry,
     pub(crate) runtime_preferences: RuntimePreferenceRegistry,

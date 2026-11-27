@@ -18,6 +18,18 @@ pub(crate) const ORIGIN_PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10
 /// before it answers (a publish budget of 60 seconds).
 pub(crate) const ORIGIN_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The client for origin and speech proxying and the controller's own requests
+/// to origins: no total deadline (the idle timeout above is applied per
+/// request), a bounded connect, and no redirect followed, since a redirect
+/// would take the request to whatever address the upstream names.
+pub(crate) fn origin_proxy_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent("instafy-runtime-controller-origin-proxy")
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(ORIGIN_PROXY_CONNECT_TIMEOUT)
+        .build()
+}
+
 /// Why a proxied answer could not be read.
 #[derive(Debug)]
 pub(crate) enum ProxyReadError {

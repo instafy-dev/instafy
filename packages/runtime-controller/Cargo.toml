@@ -20,6 +20,9 @@ anyhow = "1"
 axum = { version = "0.7", features = ["json", "http1", "ws"] }
 futures-util = "0.3"
 hyper = { version = "1", features = ["full"] }
+# reqwest 0.11's own hyper, named only for the host name type its DNS resolver
+# trait takes (`origin_network::PublicAddressResolver`). No new crate.
+hyper014 = { package = "hyper", version = "0.14", default-features = false, features = ["client", "http1", "tcp"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }

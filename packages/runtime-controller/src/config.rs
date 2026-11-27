@@ -423,6 +423,59 @@ impl HostedBrowserHostPolicy {
     }
 }
 
+pub(crate) const SELF_HOSTED_ORIGIN_NETWORKS_ENV: &str = "SELF_HOSTED_ORIGIN_NETWORKS";
+
+/// The networks on which the controller reaches the origin of a private
+/// self-hosted runtime (`SELF_HOSTED_ORIGIN_NETWORKS`; see `origin_network`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelfHostedOriginNetworks {
+    /// Public addresses only (the default). Registration still accepts a
+    /// loopback endpoint, which is how Desktop names its own origin, but the
+    /// controller never connects to it.
+    #[default]
+    Public,
+    /// Any address, the controller's own machine and private networks
+    /// included: for an install whose controller and self-hosted runtimes
+    /// share a network the operator trusts.
+    Private,
+}
+
+impl SelfHostedOriginNetworks {
+    pub(crate) fn from_value(raw: Option<&str>) -> anyhow::Result<Self> {
+        let value = raw.map(str::trim).unwrap_or_default().to_ascii_lowercase();
+        match value.as_str() {
+            "" | "public" => Ok(Self::Public),
+            "private" => Ok(Self::Private),
+            other => Err(anyhow::anyhow!(
+                "{SELF_HOSTED_ORIGIN_NETWORKS_ENV} must be public or private, not '{other}'"
+            )),
+        }
+    }
+
+    fn from_env() -> anyhow::Result<Self> {
+        Self::from_var(std::env::var(SELF_HOSTED_ORIGIN_NETWORKS_ENV))
+    }
+
+    /// An unset variable is `public`; one that is not Unicode refuses startup
+    /// like any other value that is not `public` or `private`.
+    pub(crate) fn from_var(raw: Result<String, std::env::VarError>) -> anyhow::Result<Self> {
+        match raw {
+            Ok(value) => Self::from_value(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Public),
+            Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+                "{SELF_HOSTED_ORIGIN_NETWORKS_ENV} must be public or private, not a value that is not Unicode"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+        }
+    }
+}
+
 /// Users asked for per page when the service runtime user is looked up in the
 /// Supabase admin user list.
 const ADMIN_USER_LOOKUP_PER_PAGE: usize = 200;
@@ -816,6 +869,10 @@ pub struct AppConfig {
     pub git_remote_public_base_url: Option<String>,
     pub git_shards: Vec<String>,
     pub hosted_origin_endpoint: Option<String>,
+    /// `SELF_HOSTED_ORIGIN_NETWORKS`: whether the controller reaches a private
+    /// self-hosted runtime's origin only at public addresses (the default) or
+    /// on private networks too (see `origin_network`).
+    pub self_hosted_origin_networks: SelfHostedOriginNetworks,
     /// `INSTAFY_AUTHOR_PSEUDONYM_KEYS`: versioned keys for the per-space
     /// author pseudonyms signed into users' workspace-write tokens. `None`
     /// (unset) mints no author claims, so origins keep their own identity.
@@ -1018,18 +1075,66 @@ impl AppConfig {
     /// [`PreviewSettings::usable_tunnel_domain`]) matches nothing.
     pub fn is_tunnel_host(&self, host: &str) -> bool {
         let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-        let within = |domain: &str| {
-            host == domain
-                || host
-                    .strip_suffix(domain)
-                    .is_some_and(|rest| rest.len() > 1 && rest.ends_with('.'))
-        };
-        within(LOCAL_TUNNEL_DOMAIN)
+        host_is_within(&host, LOCAL_TUNNEL_DOMAIN)
             || self
                 .previews
                 .usable_tunnel_domain()
-                .is_some_and(|domain| within(&domain))
+                .is_some_and(|domain| host_is_within(&host, &domain))
     }
+
+    /// Whether `url` names a tunnel as this controller's broker issues them:
+    /// one label under the configured `TUNNEL_DOMAIN`, as the broker mints it
+    /// (`hostname_in_tunnel_domain`), at the scheme's default port. The
+    /// domain itself, a name more than one label below it and a preview
+    /// capability label (`p-`, when `PREVIEW_DOMAIN` is the same domain) are
+    /// not tunnels. The local broker's `rt.test` never counts: the origin
+    /// relays send it to this machine's own loopback.
+    pub fn is_issued_tunnel_url(&self, url: &url::Url) -> bool {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if url.port().is_some() || host_is_within(&host, LOCAL_TUNNEL_DOMAIN) {
+            return false;
+        }
+        let Some(domain) = self.previews.usable_tunnel_domain() else {
+            return false;
+        };
+        let Some(label) = host
+            .strip_suffix(domain.as_str())
+            .and_then(|rest| rest.strip_suffix('.'))
+        else {
+            return false;
+        };
+        let capability_label = label.starts_with("p-")
+            && self
+                .previews
+                .domain
+                .as_deref()
+                .and_then(normalize_domain_setting)
+                .is_some_and(|preview_domain| preview_domain == domain);
+        is_tunnel_label(label) && !capability_label
+    }
+}
+
+/// One DNS label as the tunnel broker mints it: 1 to 63 lowercase letters,
+/// digits and hyphens, not starting or ending with a hyphen.
+fn is_tunnel_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Whether lowercase `host` is `domain` or a name under it.
+fn host_is_within(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|rest| rest.len() > 1 && rest.ends_with('.'))
 }
 
 impl PreviewSettings {
@@ -1602,6 +1707,7 @@ impl AppConfig {
         let hosted_origin_endpoint = read_first_env(&["HOSTED_ORIGIN_ENDPOINT"])
             .map(|value| value.trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty());
+        let self_hosted_origin_networks = SelfHostedOriginNetworks::from_env()?;
 
         let sandbox_credit_seed_amount = std::env::var("SANDBOX_CREDIT_SEED_AMOUNT")
             .ok()
@@ -1936,6 +2042,7 @@ impl AppConfig {
             git_remote_public_base_url,
             git_shards,
             hosted_origin_endpoint,
+            self_hosted_origin_networks,
             author_pseudonym_keys,
             browser_turn_rest,
             sandbox_credit_seed_amount,
@@ -2133,8 +2240,9 @@ mod tests {
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
         working_state_saves_enabled, AdminUserLookup, AdminUsersPage, ClaudeCodeLaneUsers,
-        CredentialEncryptionKey, DeviceGrantUsers, HostedBrowserHostPolicy, DEV_USER_TOKEN_SECRET,
-        MANAGED_AI_NATIVE_WEB_SEARCH_ENV,
+        CredentialEncryptionKey, DeviceGrantUsers, HostedBrowserHostPolicy,
+        SelfHostedOriginNetworks, DEV_USER_TOKEN_SECRET, MANAGED_AI_NATIVE_WEB_SEARCH_ENV,
+        SELF_HOSTED_ORIGIN_NETWORKS_ENV,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -2746,6 +2854,58 @@ mod tests {
                 .expect_err("bad policy must fail controller startup");
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn self_hosted_origin_networks_defaults_to_public_and_fails_closed() {
+        assert_eq!(
+            SelfHostedOriginNetworks::from_value(None).unwrap(),
+            SelfHostedOriginNetworks::Public
+        );
+        assert_eq!(
+            SelfHostedOriginNetworks::default(),
+            SelfHostedOriginNetworks::Public
+        );
+        for (value, expected) in [
+            ("", SelfHostedOriginNetworks::Public),
+            ("public", SelfHostedOriginNetworks::Public),
+            (" Public ", SelfHostedOriginNetworks::Public),
+            ("private", SelfHostedOriginNetworks::Private),
+            ("PRIVATE", SelfHostedOriginNetworks::Private),
+        ] {
+            assert_eq!(
+                SelfHostedOriginNetworks::from_value(Some(value)).unwrap(),
+                expected,
+                "{value}"
+            );
+            assert_eq!(
+                SelfHostedOriginNetworks::from_value(Some(expected.as_str())).unwrap(),
+                expected
+            );
+        }
+        for value in ["any", "lan", "1", "true", "public,private"] {
+            let error = SelfHostedOriginNetworks::from_value(Some(value))
+                .expect_err("an unknown value must fail controller startup");
+            assert!(
+                error.to_string().contains(SELF_HOSTED_ORIGIN_NETWORKS_ENV),
+                "{value}: {error}"
+            );
+        }
+
+        // As the environment hands the variable over.
+        assert_eq!(
+            SelfHostedOriginNetworks::from_var(Err(std::env::VarError::NotPresent)).unwrap(),
+            SelfHostedOriginNetworks::Public
+        );
+        assert_eq!(
+            SelfHostedOriginNetworks::from_var(Ok("private".to_string())).unwrap(),
+            SelfHostedOriginNetworks::Private
+        );
+        let error = SelfHostedOriginNetworks::from_var(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("private"),
+        )))
+        .expect_err("a value that is not Unicode must fail controller startup");
+        assert!(error.to_string().contains(SELF_HOSTED_ORIGIN_NETWORKS_ENV));
     }
 
     #[test]

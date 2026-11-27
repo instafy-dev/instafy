@@ -21,7 +21,7 @@ use crate::errors::{
     unauthorized, ApiError,
 };
 use crate::origins::{
-    acquire_fresh_lease, release_lease,
+    acquire_fresh_lease, origin_request_client, release_lease,
     resolve_accessible_origin_for_protocol_with_hosted_fallback, LeaseAcquireOutcome,
 };
 use crate::project_memory_origin::{
@@ -6003,6 +6003,7 @@ async fn bootstrap_project_memory_scaffold(
 
     let origin = resolved.origin;
     let endpoint = origin.endpoint.trim_end_matches('/').to_string();
+    let origin_client = origin_request_client(state, &origin, &endpoint).await?;
     let token_subject = origin_subject.to_string();
 
     let read_token =
@@ -6010,7 +6011,7 @@ async fn bootstrap_project_memory_scaffold(
     let paths = project_memory_bootstrap_paths();
     let Some(first) = read_origin_snapshot(
         &OriginBootstrapTarget {
-            http: &state.http_client,
+            http: &origin_client,
             endpoint: &endpoint,
             origin_id: origin.id,
             project_id: *project_id,
@@ -6065,6 +6066,7 @@ async fn bootstrap_project_memory_scaffold(
     let task_state = state.clone();
     let task_project_id = *project_id;
     let task_origin_id = origin.id;
+    let task_origin_client = origin_client.clone();
     let apply_task = tokio::spawn(async move {
         let apply_result: Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> =
             async {
@@ -6111,7 +6113,7 @@ async fn bootstrap_project_memory_scaffold(
                 let title = project_memory_version_title(&first);
                 let outcome = bootstrap_write_via_origin(
                     &OriginBootstrapTarget {
-                        http: &task_state.http_client,
+                        http: &task_origin_client,
                         endpoint: &endpoint,
                         origin_id: task_origin_id,
                         project_id: task_project_id,

@@ -3136,6 +3136,10 @@ async function startControllerIfNeeded(
     RUNTIME_LEASE_PATH: process.env.RUNTIME_LEASE_PATH || "/agent/lease",
     RUNTIME_HEARTBEAT_PATH: process.env.RUNTIME_HEARTBEAT_PATH || "/agent/heartbeat",
     DEV_MODE: process.env.DEV_MODE || "1",
+    // Local self-hosted runtimes register origins on this machine (loopback,
+    // host.docker.internal, .rt.test), which the controller relays to only
+    // when private networks are allowed.
+    SELF_HOSTED_ORIGIN_NETWORKS: process.env.SELF_HOSTED_ORIGIN_NETWORKS || "private",
   };
   if (proxyByocModeEnabled()) {
     delete env.OPENAI_API_KEY;
