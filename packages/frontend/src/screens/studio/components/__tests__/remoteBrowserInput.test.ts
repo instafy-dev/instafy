@@ -21,6 +21,7 @@ function touchPointerEvent(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
 
@@ -342,7 +343,60 @@ describe("attachRemoteBrowserInput", () => {
         key: "@",
         code: "Digit2",
         text: "@",
+        // Windows reports AltGr as Control+Alt, and a Linux browser types
+        // nothing while Control is held: the character goes alone.
+        modifiers: 0,
       }),
+    );
+    binding.dispose();
+  });
+
+  it.each<{ label: string; init: KeyboardEventInit; modifiers: number }>([
+    { label: "Option+2 (a Swedish @)", init: { key: "@", code: "Digit2", altKey: true }, modifiers: 0 },
+    { label: "Option+L (a German @)", init: { key: "@", code: "KeyL", altKey: true }, modifiers: 0 },
+    {
+      label: "Shift+Option+7 (a Swedish backslash)",
+      init: { key: "\\", code: "Digit7", altKey: true, shiftKey: true },
+      modifiers: 8,
+    },
+    // Not ASCII: Alt stays, so the remote page can still take Alt+Z.
+    { label: "Option+Z (a US Ω)", init: { key: "Ω", code: "KeyZ", altKey: true }, modifiers: 1 },
+  ])("types the character a Mac keyboard composes with $label", ({ init, modifiers }) => {
+    vi.spyOn(window.navigator, "platform", "get").mockReturnValue("MacIntel");
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+
+    element.dispatchEvent(new KeyboardEvent("keydown", { ...init, keyCode: 50, cancelable: true }));
+    element.dispatchEvent(new KeyboardEvent("keyup", { ...init, keyCode: 50, cancelable: true }));
+
+    expect(send.mock.calls.map(([message]) => message)).toEqual([
+      {
+        type: "key", kind: "keyDown", key: init.key, code: init.code,
+        text: init.key, modifiers, autoRepeat: false, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50,
+      },
+      {
+        type: "key", kind: "keyUp", key: init.key, code: init.code,
+        text: "", modifiers, autoRepeat: false, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50,
+      },
+    ]);
+    binding.dispose();
+  });
+
+  it.each<{ label: string; init: KeyboardEventInit; modifiers: number }>([
+    { label: "Control+Option+x", init: { key: "≈", code: "KeyX", altKey: true, ctrlKey: true }, modifiers: 3 },
+    { label: "Command+Option+x", init: { key: "≈", code: "KeyX", altKey: true, metaKey: true }, modifiers: 5 },
+    { label: "Option+ArrowLeft", init: { key: "ArrowLeft", code: "ArrowLeft", altKey: true }, modifiers: 1 },
+  ])("keeps $label a shortcut on a Mac", ({ init, modifiers }) => {
+    vi.spyOn(window.navigator, "platform", "get").mockReturnValue("MacIntel");
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+
+    element.dispatchEvent(new KeyboardEvent("keydown", { ...init, cancelable: true }));
+
+    expect(send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "rawKeyDown", key: init.key, text: "", modifiers }),
     );
     binding.dispose();
   });
