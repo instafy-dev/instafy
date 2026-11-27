@@ -25,12 +25,28 @@ pub(super) const RUNTIME_PROVIDER_RELEASE_TIMEOUT: Duration = Duration::from_sec
 /// "unknown" and must not delay the heartbeat-timeout stop behind it.
 pub(super) const RUNTIME_PROVIDER_INSPECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Sets the git remote a runtime saves its workspace to (`ORIGIN_GIT_REMOTE_URL`) in its launch
+/// metadata to `<GIT_REMOTE_BASE_URL>/<project id>.git`, or takes it out without a base, after
+/// all client and provider-row metadata has been merged. The runtime's git credential helper
+/// hands a token to that remote's host, and a runtime on a provider other than exact
+/// instafy_cloud keeps a client's metadata, so no value the launch or the row carried may stand.
+/// A provider service can still set one in its own environment, which its Compose file forwards
+/// when the launch carries none.
 pub(super) fn apply_git_remote_env(
     config: &crate::config::AppConfig,
     project_id: Uuid,
     metadata: Option<JsonValue>,
 ) -> Option<JsonValue> {
     let Some(base) = config.git_remote_base_url.as_deref() else {
+        let mut metadata = metadata;
+        if let Some(env) = metadata
+            .as_mut()
+            .and_then(JsonValue::as_object_mut)
+            .and_then(|root| root.get_mut("env"))
+            .and_then(JsonValue::as_object_mut)
+        {
+            env.remove("ORIGIN_GIT_REMOTE_URL");
+        }
         return metadata;
     };
 
@@ -53,8 +69,10 @@ pub(super) fn apply_git_remote_env(
         *env_entry = JsonValue::Object(JsonMap::new());
     }
     if let JsonValue::Object(env) = env_entry {
-        env.entry("ORIGIN_GIT_REMOTE_URL".to_string())
-            .or_insert_with(|| JsonValue::String(remote_url));
+        env.insert(
+            "ORIGIN_GIT_REMOTE_URL".to_string(),
+            JsonValue::String(remote_url),
+        );
     }
 
     Some(JsonValue::Object(root))
@@ -690,8 +708,8 @@ pub(super) fn authorize_provider_config_for_project(
 mod tests {
     use super::{
         apply_browser_profile_persistence_env, apply_browser_profile_persistence_policy,
-        apply_controller_turn_credentials, apply_managed_transport_policy, call_provider_endpoint,
-        merge_provider_metadata, provider_call_status_is_final_success,
+        apply_controller_turn_credentials, apply_git_remote_env, apply_managed_transport_policy,
+        call_provider_endpoint, merge_provider_metadata, provider_call_status_is_final_success,
         resolve_provider_auth_tokens, PROVIDER_ALLOCATOR_SETTING_KEYS,
     };
     use crate::browser_turn::BrowserTurnRestConfig;
@@ -1143,6 +1161,44 @@ mod tests {
             .expect("disabled policy must override ambient provider env");
         assert_eq!(result["env"]["INSTAFY_BROWSER_PROFILE_PERSIST"], "0");
         assert_eq!(result["env"]["INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS"], "0");
+    }
+
+    /// A launch's metadata, client and provider row alike, never picks the git remote a runtime
+    /// saves to and whose host its credential helper hands tokens to: the controller sets it from
+    /// its own base, or takes it out.
+    #[test]
+    fn a_launch_never_picks_the_git_remote() {
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "git-remote-test",
+        );
+        let project_id = Uuid::new_v4();
+        let launch = || {
+            Some(json!({
+                "env": {
+                    "ORIGIN_GIT_REMOTE_URL": "https://elsewhere.example.test/space.git",
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1"
+                },
+                "source": "client"
+            }))
+        };
+
+        config.git_remote_base_url = Some("http://git-edge:8080".to_string());
+        let launched = apply_git_remote_env(&config, project_id, launch()).expect("metadata");
+        assert_eq!(
+            launched["env"]["ORIGIN_GIT_REMOTE_URL"],
+            format!("http://git-edge:8080/{project_id}.git")
+        );
+        assert_eq!(launched["env"]["INSTAFY_ENABLE_BROWSER_SESSION"], "1");
+        assert_eq!(launched["source"], "client");
+
+        config.git_remote_base_url = None;
+        let launched = apply_git_remote_env(&config, project_id, launch()).expect("metadata");
+        let env = launched["env"].as_object().expect("environment");
+        assert!(!env.contains_key("ORIGIN_GIT_REMOTE_URL"), "{env:?}");
+        assert_eq!(env["INSTAFY_ENABLE_BROWSER_SESSION"], "1");
+        assert_eq!(apply_git_remote_env(&config, project_id, None), None);
     }
 
     fn host_policy_test_config(

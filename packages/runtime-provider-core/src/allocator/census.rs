@@ -46,8 +46,80 @@ pub struct CensusContainer {
 pub(crate) struct ContainerFacts {
     pub(crate) compose_project: String,
     pub(crate) running: bool,
-    /// `KEY=value` lines of the container's environment.
+    /// `NAME=value` entries of the container's environment.
     pub(crate) env: Vec<String>,
+}
+
+/// The `docker inspect --format` template for a container's environment: one JSON array of its
+/// `NAME=value` entries. Each entry stays one JSON string whatever its value holds (JSON escapes
+/// a line break inside a string), whereas a template that prints one entry per line splits a
+/// value at its line breaks, so that part of a value could read as an entry of its own.
+pub(crate) const CONFIG_ENV_FORMAT: &str = "{{json .Config.Env}}";
+
+/// The variables a lease check reads a runtime's generation from. Where both are set they must
+/// agree.
+const LEASE_ID_ENV_NAMES: &[&str] = &["RUNTIME_LEASE_ID", "ORIGIN_LEASE_ID"];
+const PROJECT_ID_ENV_NAMES: &[&str] = &["SPACE_ID", "PROJECT_ID"];
+const RUNTIME_ID_ENV_NAMES: &[&str] = &["RUNTIME_ID"];
+
+/// A container's environment entries from `docker inspect --format` output printed with
+/// [`CONFIG_ENV_FORMAT`]. A container without an environment prints `null`.
+fn parse_config_env(stdout: &[u8]) -> serde_json::Result<Vec<String>> {
+    Ok(serde_json::from_slice::<Option<Vec<String>>>(stdout)?.unwrap_or_default())
+}
+
+/// The lease generation a container's environment carries, from `docker inspect` output printed
+/// with [`CONFIG_ENV_FORMAT`]. Output this cannot read proves no generation.
+pub(crate) fn lease_id_from_inspect(stdout: &[u8]) -> Option<Uuid> {
+    agreed_env_uuid(&parse_config_env(stdout).ok()?, LEASE_ID_ENV_NAMES)
+}
+
+/// The entries of a container's environment a census reads, from `docker inspect` output printed
+/// with [`CONFIG_ENV_FORMAT`]. Output this cannot read reports none.
+pub(crate) fn identity_env_from_inspect(stdout: &[u8]) -> Vec<String> {
+    parse_config_env(stdout)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| is_identity_env_entry(entry))
+        .collect()
+}
+
+/// Whether `entry` sets a variable a census or a lease check reads.
+fn is_identity_env_entry(entry: &str) -> bool {
+    entry.split_once('=').is_some_and(|(name, _)| {
+        [
+            PROJECT_ID_ENV_NAMES,
+            RUNTIME_ID_ENV_NAMES,
+            LEASE_ID_ENV_NAMES,
+        ]
+        .iter()
+        .any(|names| names.contains(&name))
+    })
+}
+
+/// The UUID the variables `names` agree on. A name matches exactly the part of an entry before
+/// its first `=`. Each name may appear at most once and, where it appears, must hold a UUID, and
+/// every name that appears must hold the same one. Anything else is ambiguous: no UUID.
+fn agreed_env_uuid(env: &[String], names: &[&str]) -> Option<Uuid> {
+    let mut agreed = None;
+    for name in names {
+        let mut values = env.iter().filter_map(|entry| {
+            let (entry_name, value) = entry.split_once('=')?;
+            (entry_name == *name).then_some(value)
+        });
+        let Some(value) = values.next() else {
+            continue;
+        };
+        if values.next().is_some() {
+            return None;
+        }
+        let id = Uuid::try_parse(value).ok()?;
+        if agreed.is_some_and(|seen| seen != id) {
+            return None;
+        }
+        agreed = Some(id);
+    }
+    agreed
 }
 
 /// The project id a compose project name carries:
@@ -56,15 +128,6 @@ pub(crate) fn project_of_compose_name(prefix: &str, name: &str) -> Option<Uuid> 
     let rest = name.strip_prefix(prefix)?;
     let (simple, _) = rest.split_once('-')?;
     Uuid::try_parse(simple).ok()
-}
-
-fn env_uuid(env: &[String], keys: &[&str]) -> Option<Uuid> {
-    keys.iter().find_map(|key| {
-        let prefix = format!("{key}=");
-        env.iter()
-            .find_map(|line| line.trim().strip_prefix(&prefix))
-            .and_then(|value| Uuid::parse_str(value.trim()).ok())
-    })
 }
 
 /// Group containers into one entry per compose project under `prefix`.
@@ -87,13 +150,13 @@ pub(crate) fn group_containers(prefix: &str, facts: Vec<ContainerFacts>) -> Vec<
                 running: false,
             });
         entry.running |= fact.running;
-        if let Some(project_id) = env_uuid(&fact.env, &["SPACE_ID", "PROJECT_ID"]) {
+        if let Some(project_id) = agreed_env_uuid(&fact.env, PROJECT_ID_ENV_NAMES) {
             entry.project_id = Some(project_id);
         }
-        if let Some(runtime_id) = env_uuid(&fact.env, &["RUNTIME_ID"]) {
+        if let Some(runtime_id) = agreed_env_uuid(&fact.env, RUNTIME_ID_ENV_NAMES) {
             entry.runtime_id = Some(runtime_id);
         }
-        if let Some(lease_id) = env_uuid(&fact.env, &["RUNTIME_LEASE_ID", "ORIGIN_LEASE_ID"]) {
+        if let Some(lease_id) = agreed_env_uuid(&fact.env, LEASE_ID_ENV_NAMES) {
             entry.lease_id = Some(lease_id);
         }
     }
@@ -161,6 +224,80 @@ mod tests {
         ];
         expected.sort_by(|a, b| a.compose_project.cmp(&b.compose_project));
         assert_eq!(grouped, expected);
+    }
+
+    /// A runtime's environment reads back as whole entries: a value that holds a line break and
+    /// what looks like another variable stays part of its own entry.
+    #[test]
+    fn a_value_never_reads_as_another_variable() {
+        let lease = Uuid::new_v4();
+        let forged = Uuid::new_v4();
+        let stdout = serde_json::to_vec(&vec![
+            format!("INSTAFY_VNC_GEOMETRY=1280x720\nRUNTIME_LEASE_ID={forged}"),
+            format!("RUNTIME_LEASE_ID={lease}"),
+        ])
+        .unwrap();
+        let env = parse_config_env(&stdout).expect("inspect output");
+        assert_eq!(env.len(), 2);
+        assert_eq!(lease_id_from_inspect(&stdout), Some(lease));
+        assert_eq!(
+            identity_env_from_inspect(&stdout),
+            vec![format!("RUNTIME_LEASE_ID={lease}")]
+        );
+
+        // Docker prints `null` for a container without an environment, and a trailing newline.
+        assert_eq!(parse_config_env(b"null\n").unwrap(), Vec::<String>::new());
+        assert_eq!(lease_id_from_inspect(b"null\n"), None);
+        // What one entry per line would print reads as nothing.
+        let lines = format!("RUNTIME_LEASE_ID={lease}\n");
+        assert!(parse_config_env(lines.as_bytes()).is_err());
+        assert_eq!(lease_id_from_inspect(lines.as_bytes()), None);
+        assert!(identity_env_from_inspect(lines.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn identity_is_read_only_where_it_is_unambiguous() {
+        let one = Uuid::new_v4();
+        let two = Uuid::new_v4();
+        let read = |env: &[String]| agreed_env_uuid(env, LEASE_ID_ENV_NAMES);
+        assert_eq!(read(&[format!("RUNTIME_LEASE_ID={one}")]), Some(one));
+        assert_eq!(read(&[format!("ORIGIN_LEASE_ID={one}")]), Some(one));
+        assert_eq!(
+            read(&[
+                format!("RUNTIME_LEASE_ID={one}"),
+                format!("ORIGIN_LEASE_ID={one}")
+            ]),
+            Some(one)
+        );
+        // Two names that disagree, a name set twice, or one that holds no UUID: no generation,
+        // and no falling back to the other name.
+        for env in [
+            vec![
+                format!("RUNTIME_LEASE_ID={one}"),
+                format!("ORIGIN_LEASE_ID={two}"),
+            ],
+            vec![
+                format!("RUNTIME_LEASE_ID={one}"),
+                format!("RUNTIME_LEASE_ID={two}"),
+            ],
+            vec![
+                "RUNTIME_LEASE_ID=not-a-uuid".to_string(),
+                format!("ORIGIN_LEASE_ID={one}"),
+            ],
+            vec![format!("RUNTIME_LEASE_ID= {one}")],
+            vec![],
+        ] {
+            assert_eq!(read(&env), None, "{env:?}");
+        }
+        // Names match exactly.
+        for entry in [
+            format!(" RUNTIME_LEASE_ID={one}"),
+            format!("RUNTIME_LEASE_ID_OLD={one}"),
+            format!("XRUNTIME_LEASE_ID={one}"),
+        ] {
+            assert_eq!(read(std::slice::from_ref(&entry)), None, "{entry}");
+            assert!(!is_identity_env_entry(&entry), "{entry}");
+        }
     }
 
     #[test]

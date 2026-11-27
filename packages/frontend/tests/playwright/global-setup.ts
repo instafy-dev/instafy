@@ -653,7 +653,8 @@ async function ensureControllerProviders(serviceRoleKey: string) {
   // the dev stack builds its runtime images when they are missing (scripts/run-e2e-dev.mjs
   // ensureRuntimeImage), so run `pnpm stack:refresh` after changing runtime-agent. The stack's
   // own provider runs as exact instafy-cloud and starts those images whatever a request names;
-  // the stable local tag below is for a provider that honors a request's image.
+  // the stable local tag below is for a custom provider whose operator lets a request pick the
+  // image (RUNTIME_AGENT_IMAGE_FROM_REQUEST=1).
   //
   // This is intentionally gated behind PLAYWRIGHT_RUN_BENCH so the normal e2e suite stays fast.
   const benchEnabled = (process.env.PLAYWRIGHT_RUN_BENCH ?? "").trim() === "1";

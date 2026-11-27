@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -17,7 +17,10 @@ use super::address_pools::{
     is_address_pool_exhaustion, reclaim_runtime_address_space, ControllerSpaceDirectory, DockerCli,
     NoSpaceDirectory, ReclaimedAddressSpace, SpaceDirectory, SystemDocker,
 };
-use super::census::{group_containers, ContainerFacts, RuntimeCensus, MAX_CENSUS_CONTAINERS};
+use super::census::{
+    group_containers, identity_env_from_inspect, lease_id_from_inspect, ContainerFacts,
+    RuntimeCensus, CONFIG_ENV_FORMAT, MAX_CENSUS_CONTAINERS,
+};
 use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
 };
@@ -87,6 +90,9 @@ pub struct DockerRuntimeAllocator {
     codex_base: PathBuf,
     runtime_agent_image: Option<String>,
     runtime_agent_webdev_image: Option<String>,
+    /// For a provider other than exact instafy_cloud, a launch request's
+    /// `metadata.runtimeAgentImage` picks the image (`RUNTIME_AGENT_IMAGE_FROM_REQUEST`).
+    runtime_agent_image_from_request: bool,
     compose_semaphore: Arc<Semaphore>,
     assigned_ports: Mutex<HashMap<Uuid, u16>>,
     runtime_operation_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
@@ -193,6 +199,7 @@ impl DockerRuntimeAllocator {
                 .runtime_agent_webdev_image
                 .as_deref()
                 .and_then(normalize_runtime_agent_image),
+            runtime_agent_image_from_request: config.runtime_agent_image_from_request,
             compose_semaphore: Arc::new(Semaphore::new(max_ops)),
             assigned_ports: Mutex::new(HashMap::new()),
             runtime_operation_locks: Mutex::new(HashMap::new()),
@@ -403,49 +410,25 @@ impl DockerRuntimeAllocator {
     }
 
     async fn container_lease_id(&self, container_id: &str) -> anyhow::Result<Option<Uuid>> {
-        async fn read_env(container_id: &str, key: &str) -> anyhow::Result<Option<String>> {
-            let container_id = container_id.to_string();
-            let prefix = format!("{key}=");
-            let output = task::spawn_blocking(move || {
-                Command::new("docker")
-                    .arg("inspect")
-                    .arg("--format")
-                    .arg("{{range .Config.Env}}{{println .}}{{end}}")
-                    .arg(&container_id)
-                    .output()
-            })
-            .await??;
+        let container_id = container_id.to_string();
+        let output = task::spawn_blocking(move || {
+            Command::new("docker")
+                .arg("inspect")
+                .arg("--format")
+                .arg(CONFIG_ENV_FORMAT)
+                .arg(&container_id)
+                .output()
+        })
+        .await??;
 
-            if !output.status.success() {
-                anyhow::bail!(
-                    "docker inspect failed while resolving runtime lease: {}",
-                    summarize_command_output(&output)
-                );
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if let Some(value) = trimmed.strip_prefix(&prefix) {
-                    let value = value.trim();
-                    if value.is_empty() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(value.to_string()));
-                }
-            }
-
-            Ok(None)
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker inspect failed while resolving runtime lease: {}",
+                summarize_command_output(&output)
+            );
         }
 
-        for key in ["RUNTIME_LEASE_ID", "ORIGIN_LEASE_ID"] {
-            if let Some(value) = read_env(container_id, key).await? {
-                if let Ok(id) = Uuid::parse_str(value.trim()) {
-                    return Ok(Some(id));
-                }
-            }
-        }
-        Ok(None)
+        Ok(lease_id_from_inspect(&output.stdout))
     }
 
     async fn run_compose_up_with_flags(
@@ -745,9 +728,18 @@ impl DockerRuntimeAllocator {
         // Disable tunnels to avoid local tunnel-broker flakiness (and reduce moving parts) unless a
         // different allocator explicitly opts in.
         envs.push(("ORIGIN_TUNNEL_ENABLED".to_string(), "0".to_string()));
-        if let Some(mode) = request.origin_mode.as_deref() {
-            if !mode.is_empty() {
-                envs.push(("ORIGIN_MODE".to_string(), mode.to_string()));
+        if let Some(raw) = request
+            .origin_mode
+            .as_deref()
+            .filter(|raw| !raw.trim().is_empty())
+        {
+            match known_origin_mode(raw) {
+                Some(mode) => envs.push(("ORIGIN_MODE".to_string(), mode.to_string())),
+                None => warn!(
+                    "runtime launch request names an origin mode the runtime does not know; \
+                     it starts in the mode the provider service's environment or its compose \
+                     file sets"
+                ),
             }
         }
 
@@ -773,54 +765,45 @@ impl DockerRuntimeAllocator {
         }
         let managed_webdev_image = self.managed_webdev_image(request)?;
         let exact_managed_provider = is_exact_managed_provider(&request.provider);
-        let process_metadata =
+        let mut process_metadata =
             runtime_metadata_for_process(&request.provider, request.metadata.as_ref());
-        if let Some(meta) = process_metadata.as_ref() {
-            envs.push(("RUNTIME_METADATA".to_string(), meta.to_string()));
-            if let Some(runtime_image) = managed_webdev_image.clone().or_else(|| {
-                (!exact_managed_provider)
-                    .then(|| resolve_runtime_agent_image(meta))
-                    .flatten()
-            }) {
-                envs.push(("RUNTIME_AGENT_IMAGE".to_string(), runtime_image));
-            }
-            if let Some(env_overrides) = meta.get("env").and_then(|value| value.as_object()) {
-                // What the provider set above (the runtime's ids, its token, the controller and
-                // origin addresses) stays as the provider set it.
-                let provider_set: std::collections::HashSet<String> =
-                    envs.iter().map(|(key, _)| key.clone()).collect();
-                for (key, value) in env_overrides {
-                    if provider_set.contains(key) || is_operator_only_env_key(key) {
-                        continue;
-                    }
-                    if !request_may_set_compose_env(exact_managed_provider, key, value) {
-                        continue;
-                    }
-                    let rendered = match value {
-                        JsonValue::String(s) => s.clone(),
-                        JsonValue::Number(n) => n.to_string(),
-                        JsonValue::Bool(b) => {
-                            if *b {
-                                "1".to_string()
-                            } else {
-                                "0".to_string()
-                            }
-                        }
-                        JsonValue::Null => continue,
-                        other => other.to_string(),
-                    };
-                    if rendered.is_empty() {
-                        continue;
-                    }
-                    envs.push((key.to_string(), rendered));
+        // What the provider set above (the runtime's ids, its token, the controller and origin
+        // addresses) stays as the provider set it.
+        let provider_set: HashSet<String> = envs.iter().map(|(key, _)| key.clone()).collect();
+        let request_env = process_metadata
+            .as_ref()
+            .map(|meta| request_compose_env(exact_managed_provider, meta, &provider_set))
+            .unwrap_or_default();
+        let runtime_image = match managed_webdev_image {
+            Some(image) => Some(image),
+            None => self
+                .requested_runtime_agent_image(exact_managed_provider, process_metadata.as_ref()),
+        }
+        .or_else(|| self.runtime_agent_image.clone());
+        if let Some(meta) = process_metadata.as_mut() {
+            // The runtime's own copy of its launch metadata carries, as its env, what the request
+            // set here, and nothing the request was refused; an env that is no object set nothing.
+            if let Some(root) = meta.as_object_mut() {
+                if root.get("env").is_some_and(JsonValue::is_object) {
+                    root.insert(
+                        "env".to_string(),
+                        JsonValue::Object(
+                            request_env
+                                .iter()
+                                .map(|(key, value)| (key.clone(), JsonValue::String(value.clone())))
+                                .collect(),
+                        ),
+                    );
+                } else {
+                    root.remove("env");
                 }
             }
+            envs.push(("RUNTIME_METADATA".to_string(), json_env_value(meta)));
         }
-        if !envs.iter().any(|(key, _)| key == "RUNTIME_AGENT_IMAGE") {
-            if let Some(runtime_image) = self.runtime_agent_image.clone() {
-                envs.push(("RUNTIME_AGENT_IMAGE".to_string(), runtime_image));
-            }
+        if let Some(runtime_image) = runtime_image {
+            envs.push(("RUNTIME_AGENT_IMAGE".to_string(), runtime_image));
         }
+        envs.extend(request_env);
 
         // The provider alone picks the host directories it mounts into the runtime: a request
         // cannot set RUNTIME_REPO_HOST or RUNTIME_CACHE_HOST.
@@ -866,17 +849,60 @@ impl DockerRuntimeAllocator {
             .ok_or_else(|| anyhow::anyhow!("origin instance id missing for docker allocator"))?;
         envs.push(("ORIGIN_ID".to_string(), origin_id.to_string()));
         envs.push(("ORIGIN_LEASE_ID".to_string(), request.lease_id.to_string()));
-        if !request.origin_protocols.is_empty() {
-            envs.push((
-                "ORIGIN_PROTOCOLS".to_string(),
-                request.origin_protocols.join(","),
-            ));
+        let protocols: Vec<&str> = request
+            .origin_protocols
+            .iter()
+            .map(String::as_str)
+            .filter(|protocol| is_origin_protocol_name(protocol))
+            .collect();
+        if protocols.len() != request.origin_protocols.len() {
+            warn!(
+                refused = request.origin_protocols.len() - protocols.len(),
+                "runtime launch request names origin protocols that are no protocol names; \
+                 the runtime starts without them"
+            );
+        }
+        if !protocols.is_empty() {
+            envs.push(("ORIGIN_PROTOCOLS".to_string(), protocols.join(",")));
         }
         if let Some(origin_meta) = request.origin_metadata.as_ref() {
-            envs.push(("ORIGIN_METADATA".to_string(), origin_meta.to_string()));
+            envs.push(("ORIGIN_METADATA".to_string(), json_env_value(origin_meta)));
         }
 
         Ok(envs)
+    }
+
+    /// The runtime image a launch request names (`metadata.runtimeAgentImage`), for a provider
+    /// other than exact instafy_cloud that lets a request choose it
+    /// (`RUNTIME_AGENT_IMAGE_FROM_REQUEST`). The image decides all the code a runtime runs, the
+    /// turns of every member it serves included, so without that the provider's own image
+    /// applies.
+    fn requested_runtime_agent_image(
+        &self,
+        exact_managed_provider: bool,
+        metadata: Option<&JsonValue>,
+    ) -> Option<String> {
+        if exact_managed_provider {
+            return None;
+        }
+        let requested = resolve_runtime_agent_image(metadata?)?;
+        if self.runtime_agent_image_from_request {
+            return Some(requested);
+        }
+        if self.runtime_agent_image.is_some() {
+            warn!(
+                "runtime launch request names a runtime image; this provider starts its own \
+                 RUNTIME_AGENT_IMAGE (RUNTIME_AGENT_IMAGE_FROM_REQUEST is off)"
+            );
+        } else {
+            warn!(
+                "runtime launch request names a runtime image, but \
+                 RUNTIME_AGENT_IMAGE_FROM_REQUEST is off and this provider names no \
+                 RUNTIME_AGENT_IMAGE: Compose starts its compose file's default image, or fails \
+                 where the file has none"
+            );
+        }
+        None
     }
 
     fn managed_webdev_image(
@@ -1043,26 +1069,34 @@ fn first_status_quantity(status: &str) -> Option<u64> {
         })
 }
 
-/// Environment only the operator who runs the provider may set: where the runtime's model proxy
-/// sends its requests, with the credential it carries (`PROXY_UPSTREAM_*`, read by the compose
-/// file). A runtime request never sets it.
-fn is_operator_only_env_key(key: &str) -> bool {
-    key.starts_with("PROXY_UPSTREAM_")
-}
+/// Managed launch keys that, for a provider other than exact instafy_cloud, only the provider's
+/// operator sets, in the provider service's own environment: the Shared Browser's egress
+/// policy, the host the origin reaches its VNC server at, and the display's colour depth. For
+/// exact instafy_cloud the controller strips a client's value of each before the provider row
+/// adds its own; for any other provider a client's value would arrive with the row's and win
+/// over it.
+const EXACT_ONLY_LAUNCH_ENV_KEYS: &[&str] = &[
+    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
+    "INSTAFY_BROWSER_EGRESS_ISOLATION",
+    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+    "INSTAFY_VNC_DEPTH",
+    "INSTAFY_VNC_HOST",
+];
 
-/// The variables a launch request may set for a provider other than exact instafy_cloud, besides
-/// the managed launch keys. `docker compose` runs with a request's variables in its own
-/// environment, where the Docker CLI, Compose, BuildKit and the dynamic loader read their
-/// settings, and the runtime compose files put each variable they use outside the runtime's
-/// `environment:` into another service, a bind mount, an `env_file` path, an image, a port, a
-/// build setting or a resource limit. A request is meant for the runtime container, so these are
-/// the variables either runtime compose file passes into the runtime's `environment:` and neither
-/// file uses anywhere else. scripts/check-self-host-compose.test.mjs keeps the list in step with
-/// both files, and a test here keeps every name to the runtime's own name families or a few
-/// names checked one by one, none of them a setting Docker tools or the process read. The
-/// provider's own value still wins for the ones it sets itself, such as the runtime's ids, token
-/// and addresses.
-const RUNTIME_CONTAINER_ENV_KEYS: &[&str] = &[
+/// The variables a runtime compose file passes into the runtime container that a launch request
+/// never sets, for any provider. The provider sets some itself (the runtime's ids, its token, its
+/// addresses); the others only its operator sets, in the provider service's own environment,
+/// which `docker compose` inherits: the runtime's model routing, its agent's sandbox, tools and
+/// model, its timings, capabilities and credentials. A shared runtime runs the turns of every
+/// member it serves, so none of them is a launch's to choose. build_env never consults this list
+/// (it takes from a request only the managed launch keys); a test here holds build_env to it, and
+/// scripts/check-self-host-compose.test.mjs holds both runtime compose files to it: each variable
+/// they pass only into the runtime container is a managed launch key, one of these or one of
+/// REQUEST_DERIVED_RUNTIME_ENV_KEYS.
+#[cfg(test)]
+const OPERATOR_ONLY_RUNTIME_ENV_KEYS: &[&str] = &[
     "CODEX_API_ENDPOINT",
     "CODEX_API_KEY",
     "CODEX_AUTH_PATH",
@@ -1078,47 +1112,20 @@ const RUNTIME_CONTAINER_ENV_KEYS: &[&str] = &[
     "CODEX_PROXY_CHATGPT_ENDPOINT",
     "CODEX_SANDBOX_MODE",
     "CODEX_SHOW_RAW_AGENT_REASONING",
-    "INSTAFY_BROWSER_CDP_SCREENCAST",
-    "INSTAFY_BROWSER_DISPLAY",
-    "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
-    "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
-    "INSTAFY_BROWSER_EGRESS_ISOLATION",
-    "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
-    "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
-    "INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS",
-    "INSTAFY_BROWSER_PREFERRED_VIEWER",
-    "INSTAFY_BROWSER_PROFILE_PERSIST",
-    "INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS",
-    "INSTAFY_BROWSER_RENDER_SCALE",
-    "INSTAFY_BROWSER_VIEWPORT_ONLY",
-    "INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS",
-    "INSTAFY_BROWSER_WEBRTC_ENABLED",
-    "INSTAFY_BROWSER_WEBRTC_FPS",
-    "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON",
-    "INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN",
-    "INSTAFY_ENABLE_BROWSER_SESSION",
     "INSTAFY_HOLD_PAGES",
     "INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED",
     "INSTAFY_PLAYWRIGHT_MCP_MODE",
     "INSTAFY_PLAYWRIGHT_MCP_PORT",
     "INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR",
     "INSTAFY_RESEARCH_PAGES_SEARCH_FIRST",
-    "INSTAFY_VNC_DEPTH",
-    "INSTAFY_VNC_GEOMETRY",
-    "INSTAFY_VNC_HOST",
-    "INSTAFY_VNC_PORT",
     "OPENAI_BASE_URL",
     "ORIGIN_BIND_HOST",
     "ORIGIN_BIND_PORT",
     "ORIGIN_DEVICE_ID",
     "ORIGIN_ENABLE_PRESENCE_HEARTBEAT",
     "ORIGIN_ENDPOINT",
-    "ORIGIN_GIT_REMOTE_URL",
     "ORIGIN_ID",
     "ORIGIN_LEASE_ID",
-    "ORIGIN_METADATA",
-    "ORIGIN_MODE",
-    "ORIGIN_PROTOCOLS",
     "ORIGIN_SKIP_AUTH",
     "ORIGIN_TUNNEL_ENABLED",
     "PROXY_BASE_URL",
@@ -1130,7 +1137,6 @@ const RUNTIME_CONTAINER_ENV_KEYS: &[&str] = &[
     "RUNTIME_ID",
     "RUNTIME_LEASE_ID",
     "RUNTIME_LEASE_SECONDS",
-    "RUNTIME_METADATA",
     "RUNTIME_STRICT_MODE",
     "RUNTIME_TYPE",
     "RUNTIME_VERSION",
@@ -1139,15 +1145,181 @@ const RUNTIME_CONTAINER_ENV_KEYS: &[&str] = &[
     "USE_PROXY_FOR_LLM",
 ];
 
+/// The variables build_env derives from a launch request's own fields rather than from its
+/// `metadata.env`: the runtime's copy of its launch metadata, and its origin's mode, protocols
+/// and metadata. scripts/check-self-host-compose.test.mjs keeps each inside the runtime
+/// container, as it does the managed launch keys, and a test here shows the list complete.
+#[cfg(test)]
+const REQUEST_DERIVED_RUNTIME_ENV_KEYS: &[&str] = &[
+    "ORIGIN_METADATA",
+    "ORIGIN_MODE",
+    "ORIGIN_PROTOCOLS",
+    "RUNTIME_METADATA",
+];
+
 /// Whether a request's `metadata.env` entry joins the environment `docker compose` runs with.
-/// Exact instafy_cloud takes only the managed launch keys, with scalar values; any other provider
-/// also takes the variables the runtime compose files keep inside the runtime container.
+/// Exact instafy_cloud takes the managed launch keys, with scalar values. Any other provider takes
+/// them but the operator's browser policy (EXACT_ONLY_LAUNCH_ENV_KEYS), and takes the WebRTC
+/// switch only as a string: the controller applies its relay policy to the string "1" alone,
+/// while a `true` would turn WebRTC on here past it.
 fn request_may_set_compose_env(exact_managed_provider: bool, key: &str, value: &JsonValue) -> bool {
     if exact_managed_provider {
         return is_allowed_managed_runtime_env_key(key)
             && canonical_managed_runtime_env_value(value).is_some();
     }
-    is_allowed_managed_runtime_env_key(key) || RUNTIME_CONTAINER_ENV_KEYS.contains(&key)
+    is_allowed_managed_runtime_env_key(key)
+        && !EXACT_ONLY_LAUNCH_ENV_KEYS.contains(&key)
+        && (key != "INSTAFY_BROWSER_WEBRTC_ENABLED" || value.is_string())
+}
+
+/// A warning lists at most this many refused names, each cut to REFUSED_NAME_CHARS_LOGGED
+/// characters, so that no launch floods the log.
+const REFUSED_NAMES_LOGGED: usize = 16;
+const REFUSED_NAME_CHARS_LOGGED: usize = 64;
+
+/// The `metadata.env` entries of a request's metadata that join the environment `docker compose`
+/// runs with, rendered, one per name. A null or empty value sets nothing. One warning lists the
+/// names a launch may not set here (the provider sets some itself; an operator sets the others in
+/// the provider service's own environment). A value is refused, with a warning that names its key
+/// but never its value, when it would not reach the runtime as one line or, for the Shared
+/// Browser's display, names anything but a local X display.
+fn request_compose_env(
+    exact_managed_provider: bool,
+    metadata: &JsonValue,
+    provider_set: &HashSet<String>,
+) -> Vec<(String, String)> {
+    let Some(env) = metadata.get("env").and_then(JsonValue::as_object) else {
+        return Vec::new();
+    };
+    let mut accepted = Vec::new();
+    let mut refused_names = Vec::new();
+    for (key, value) in env {
+        if value.is_null() || value.as_str() == Some("") {
+            continue;
+        }
+        if provider_set.contains(key)
+            || !request_may_set_compose_env(exact_managed_provider, key, value)
+        {
+            refused_names.push(key.as_str());
+            continue;
+        }
+        let Some(rendered) = render_request_env_value(value) else {
+            continue;
+        };
+        if let Some(reason) = refused_request_env_value(key, &rendered) {
+            warn!(
+                %key,
+                reason,
+                "runtime launch request value refused; the runtime starts without it"
+            );
+            continue;
+        }
+        accepted.push((key.clone(), rendered));
+    }
+    if !refused_names.is_empty() {
+        let names: Vec<String> = refused_names
+            .iter()
+            .take(REFUSED_NAMES_LOGGED)
+            .map(|name| name.chars().take(REFUSED_NAME_CHARS_LOGGED).collect())
+            .collect();
+        warn!(
+            refused = refused_names.len(),
+            ?names,
+            "runtime launch request sets variables a launch may not set on this provider; the \
+             runtime starts without them"
+        );
+    }
+    accepted
+}
+
+/// A request's `metadata.env` value as the runtime receives it: a boolean as `1` or `0`, an array
+/// or object as compact JSON, and a string that holds a JSON array or object laid out over
+/// several lines (an ICE server list, say) as that JSON on one line.
+fn render_request_env_value(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => {
+            if text.chars().any(breaks_env_line) {
+                if let Ok(json @ (JsonValue::Array(_) | JsonValue::Object(_))) =
+                    serde_json::from_str::<JsonValue>(text)
+                {
+                    return Some(json_env_value(&json));
+                }
+            }
+            Some(text.clone())
+        }
+        JsonValue::Number(number) => Some(number.to_string()),
+        JsonValue::Bool(flag) => Some(if *flag { "1" } else { "0" }.to_string()),
+        JsonValue::Null => None,
+        other => Some(json_env_value(other)),
+    }
+}
+
+/// Why a rendered request value may not join the runtime's environment, if it may not.
+fn refused_request_env_value(key: &str, value: &str) -> Option<&'static str> {
+    if value.chars().any(breaks_env_line) {
+        return Some("the value holds a control character or a line break");
+    }
+    if key == "INSTAFY_BROWSER_DISPLAY" && !is_local_x_display(value) {
+        return Some("the display is not a local X display (:N)");
+    }
+    None
+}
+
+/// A character that can end a line, or that a reader may treat as one: every control character
+/// (C0, DEL and C1, U+0085 among them) and the Unicode line and paragraph separators.
+fn breaks_env_line(character: char) -> bool {
+    character.is_control() || character == '\u{2028}' || character == '\u{2029}'
+}
+
+/// `:N` for a display number N from 0 to 9999, written without leading zeros: the runtime
+/// derives its X lock and socket paths from the number as written.
+fn is_local_x_display(value: &str) -> bool {
+    let Some(number) = value.strip_prefix(':') else {
+        return false;
+    };
+    (1..=4).contains(&number.len())
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && (number == "0" || !number.starts_with('0'))
+}
+
+/// `value` as compact JSON on one line. Compact JSON holds a control character or a Unicode line
+/// separator only inside a string, where JSON allows it raw; each is written as its `\u` escape,
+/// which stands for the same character.
+fn json_env_value(value: &JsonValue) -> String {
+    let compact = value.to_string();
+    if !compact.chars().any(breaks_env_line) {
+        return compact;
+    }
+    let mut escaped = String::with_capacity(compact.len() + 16);
+    for character in compact.chars() {
+        if breaks_env_line(character) {
+            escaped.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+/// An origin mode the runtime knows, as it reads it.
+fn known_origin_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "hosted" => Some("hosted"),
+        "desktop" => Some("desktop"),
+        "efs" => Some("efs"),
+        _ => None,
+    }
+}
+
+/// A protocol name an origin may list: a lowercase letter, then up to 31 lowercase letters,
+/// digits, `+`, `.` or `-`. The runtime reads the list split at its commas.
+fn is_origin_protocol_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes.len() <= 32
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
+        })
 }
 
 fn resolve_runtime_agent_image(metadata: &JsonValue) -> Option<String> {
@@ -1166,9 +1338,11 @@ fn normalize_runtime_agent_image(raw: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.len() > 512 {
         return None;
     }
-    if trimmed
-        .chars()
-        .any(|ch| ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '\\')
+    // A reference that starts with `-` would read as an option to the Docker CLI.
+    if trimmed.starts_with('-')
+        || trimmed.chars().any(|ch| {
+            ch.is_whitespace() || breaks_env_line(ch) || ch == '"' || ch == '\'' || ch == '\\'
+        })
     {
         return None;
     }
@@ -1209,26 +1383,12 @@ fn list_runtime_containers(prefix: &str) -> anyhow::Result<(Vec<ContainerFacts>,
         let inspect = Command::new("docker")
             .arg("inspect")
             .arg("--format")
-            .arg("{{range .Config.Env}}{{println .}}{{end}}")
+            .arg(CONFIG_ENV_FORMAT)
             .arg(id.trim())
             .output()?;
         // A container removed since the listing has nothing left to report.
         let env = if inspect.status.success() {
-            String::from_utf8_lossy(&inspect.stdout)
-                .lines()
-                .filter(|line| {
-                    [
-                        "SPACE_ID=",
-                        "PROJECT_ID=",
-                        "RUNTIME_ID=",
-                        "RUNTIME_LEASE_ID=",
-                        "ORIGIN_LEASE_ID=",
-                    ]
-                    .iter()
-                    .any(|key| line.trim().starts_with(key))
-                })
-                .map(str::to_string)
-                .collect()
+            identity_env_from_inspect(&inspect.stdout)
         } else {
             Vec::new()
         };
@@ -1733,6 +1893,144 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    /// build_env for `request`. `docker compose` runs with the last value of a name build_env
+    /// lists, while `env_value` and the image pull read the first, so each name must appear once.
+    fn launch_env(
+        allocator: &DockerRuntimeAllocator,
+        request: &EnsureRuntimeRequest,
+    ) -> Vec<(String, String)> {
+        let envs = allocator.build_env(request, 54332).expect("runtime env");
+        let mut seen = HashSet::new();
+        for (name, _) in &envs {
+            assert!(seen.insert(name.as_str()), "{name} is set more than once");
+        }
+        envs
+    }
+
+    /// The managed launch keys a launch request sets for a provider other than exact
+    /// instafy_cloud (all of them but EXACT_ONLY_LAUNCH_ENV_KEYS), each with a value it may take.
+    const CUSTOM_LAUNCH_ENV: &[(&str, &str)] = &[
+        ("INSTAFY_BROWSER_CDP_SCREENCAST", "1"),
+        ("INSTAFY_BROWSER_DISPLAY", ":1"),
+        ("INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS", "2073600"),
+        ("INSTAFY_BROWSER_PREFERRED_VIEWER", "webrtc"),
+        ("INSTAFY_BROWSER_PROFILE_PERSIST", "0"),
+        ("INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS", "30"),
+        ("INSTAFY_BROWSER_RENDER_SCALE", "1.5"),
+        ("INSTAFY_BROWSER_VIEWPORT_ONLY", "1"),
+        ("INSTAFY_BROWSER_WEBRTC_BIND", "127.0.0.1:9225"),
+        ("INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS", "2500"),
+        ("INSTAFY_BROWSER_WEBRTC_ENABLED", "1"),
+        ("INSTAFY_BROWSER_WEBRTC_FPS", "30"),
+        (
+            "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON",
+            r#"[{"urls":["stun:stun.example.test:19302"]}]"#,
+        ),
+        ("INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN", "1"),
+        ("INSTAFY_BROWSER_WEBRTC_SENDER_URL", "http://127.0.0.1:9225"),
+        ("INSTAFY_ENABLE_BROWSER_SESSION", "1"),
+        ("INSTAFY_VNC_GEOMETRY", "1280x720"),
+        ("INSTAFY_VNC_PORT", "5900"),
+        (
+            "ORIGIN_GIT_REMOTE_URL",
+            "https://git.example.test/space.git",
+        ),
+        ("RUNTIME_CPU_LIMIT", "2"),
+        ("RUNTIME_MEMORY_LIMIT", "4g"),
+    ];
+
+    /// Variables that `docker compose`, the processes it runs or the runtime compose files read
+    /// for themselves, with a value each that would point them elsewhere. A launch request sets
+    /// none of them, for any provider.
+    const DOCKER_AND_HOST_SETTINGS: &[(&str, &str)] = &[
+        // The Docker CLI, Compose and BuildKit.
+        ("DOCKER_HOST", "tcp://elsewhere.test:2375"),
+        ("DOCKER_CONTEXT", "elsewhere"),
+        ("DOCKER_CONFIG", "/tmp/elsewhere-docker-config"),
+        ("DOCKER_CERT_PATH", "/tmp/elsewhere-certs"),
+        ("DOCKER_TLS_VERIFY", "0"),
+        ("COMPOSE_FILE", "/tmp/elsewhere-compose.yml"),
+        ("COMPOSE_PROJECT_NAME", "elsewhere"),
+        ("COMPOSE_PROFILES", "elsewhere"),
+        ("COMPOSE_ENV_FILES", "/tmp/elsewhere.env"),
+        ("BUILDKIT_HOST", "tcp://elsewhere.test:1234"),
+        ("BUILDX_BUILDER", "elsewhere"),
+        // The process itself: loader, shell, proxies, TLS, Go and git.
+        ("PATH", "/tmp/elsewhere-bin"),
+        ("HOME", "/tmp/elsewhere-home"),
+        ("TMPDIR", "/tmp/elsewhere-tmp"),
+        ("XDG_CONFIG_HOME", "/tmp/elsewhere-config"),
+        ("LD_PRELOAD", "/tmp/elsewhere.so"),
+        ("LD_LIBRARY_PATH", "/tmp/elsewhere-lib"),
+        ("DYLD_INSERT_LIBRARIES", "/tmp/elsewhere.dylib"),
+        ("BASH_ENV", "/tmp/elsewhere-shell-init"),
+        ("HTTP_PROXY", "http://elsewhere.test:8080"),
+        ("HTTPS_PROXY", "http://elsewhere.test:8443"),
+        ("ALL_PROXY", "socks5://elsewhere.test:1080"),
+        ("NO_PROXY", "*"),
+        ("http_proxy", "http://elsewhere.test:8080"),
+        ("SSL_CERT_FILE", "/tmp/elsewhere-ca.pem"),
+        ("GODEBUG", "x509ignoreCN=1"),
+        ("GIT_DIR", "/tmp/elsewhere-repo/.git"),
+        ("GIT_CONFIG_GLOBAL", "/tmp/elsewhere-gitconfig"),
+        ("GIT_SSH_COMMAND", "/tmp/elsewhere-ssh"),
+        // What the runtime compose files interpolate outside the runtime's environment.
+        ("RUNTIME_REPO_HOST", "/"),
+        ("RUNTIME_CACHE_HOST", "/var/run"),
+        ("RUNTIME_CODEX_VOLUME", "/root"),
+        ("PROXY_CODEX_VOLUME", "/etc"),
+        ("INSTAFY_ENV_DIR", "/tmp/elsewhere-env"),
+        (
+            "PROXY_CREDENTIAL_LEASE_ENV_FILE",
+            "/tmp/elsewhere-lease.env",
+        ),
+        ("RUNTIME_PROXY_IMAGE", "elsewhere/proxy:latest"),
+        ("PROXY_CONTROLLER_BASE_URL", "https://elsewhere.test"),
+        ("CONTROLLER_BASE_URL", "https://elsewhere.test"),
+        ("CONTROLLER_INTERNAL_TOKEN", "elsewhere"),
+        ("PROXY_SIGNING_SECRET", "elsewhere"),
+        ("OPENAI_API_KEY", "elsewhere"),
+        ("ORIGIN_GIT_AUTHOR_NAME", "elsewhere"),
+        ("ORIGIN_HOST_PORT", "22"),
+        ("PROXY_PORT", "22"),
+        // What picks the image, or once asked the allocator to build one.
+        ("RUNTIME_AGENT_IMAGE", "elsewhere/runtime:latest"),
+        ("RUNTIME_AGENT_BUILD_TARGET", "elsewhere"),
+        ("RUNTIME_AGENT_FORCE_BUILD", "1"),
+        // Read inside a runtime, but no runtime compose file passes it on.
+        (
+            "INSTAFY_SHARED_BROWSER_APPROVAL_DIR",
+            "/tmp/elsewhere-approvals",
+        ),
+    ];
+
+    /// Provider ids the allocator treats as other than exact instafy_cloud.
+    const CUSTOM_PROVIDERS: &[&str] = &[
+        "hosted",
+        "external-http",
+        "self-hosted",
+        "instafy-cloud-custom",
+        "instafy_cloud_eu",
+    ];
+
+    /// A provider config whose checkouts, codex volumes and caches land in `scratch`.
+    fn scratch_config(scratch: &ScratchDir) -> ProviderConfig {
+        let mut config = ProviderConfig::default_docker();
+        config.runtime_agent_image = Some("runtime-agent:provider".to_string());
+        config.runtime_docker_repo_host = Some(scratch.0.join("repos"));
+        config.runtime_docker_codex_root = Some(scratch.0.join("codex"));
+        config
+    }
+
+    /// An allocator on [`scratch_config`] with no controller on its node.
+    fn scratch_allocator(scratch: &ScratchDir, from_request: bool) -> DockerRuntimeAllocator {
+        let mut config = scratch_config(scratch);
+        config.runtime_agent_image_from_request = from_request;
+        let mut allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
+        allocator.controller_base_url = None;
+        allocator
+    }
+
     /// A directory under the temp dir that is removed when the test ends, passed or failed.
     struct ScratchDir(PathBuf);
 
@@ -1786,13 +2084,12 @@ mod tests {
 
     #[test]
     fn build_env_uses_provider_runtime_agent_image_when_metadata_absent() {
-        let mut config = ProviderConfig::default_docker();
+        let scratch = ScratchDir::new("instafy-provider-image");
+        let mut config = scratch_config(&scratch);
         config.runtime_agent_image =
             Some("ghcr.io/instafy-dev/instafy-runtime-agent:release".to_string());
         let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
-        let envs = allocator
-            .build_env(&sample_request(None), 54332)
-            .expect("runtime env");
+        let envs = launch_env(&allocator, &sample_request(None));
 
         assert_eq!(
             env_value(&envs, "RUNTIME_AGENT_IMAGE"),
@@ -1807,26 +2104,24 @@ mod tests {
 
     #[test]
     fn build_env_keeps_what_the_provider_and_its_operator_set() {
-        let config = ProviderConfig::default_docker();
-        let mut allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
+        let scratch = ScratchDir::new("instafy-provider-keeps");
+        let mut allocator = scratch_allocator(&scratch, false);
         allocator.controller_base_url = Some("http://controller.internal:8788".to_string());
-        let envs = allocator
-            .build_env(
-                &sample_request(Some(json!({
-                    "env": {
-                        "PROXY_UPSTREAM_CHATGPT_ENDPOINT": "https://elsewhere.test/backend-api/codex/responses",
-                        "PROXY_UPSTREAM_OPENAI_ENDPOINT": "https://elsewhere.test/v1",
-                        "CONTROLLER_BASE_URL": "https://elsewhere.test",
-                        "RUNTIME_ACCESS_TOKEN": "chosen",
-                        "ORIGIN_INTERNAL_TOKEN": "chosen",
-                        "RUNTIME_ID": "chosen",
-                        "SPACE_ID": "chosen",
-                        "CODEX_MODEL": "chosen-model"
-                    }
-                }))),
-                54332,
-            )
-            .expect("runtime env");
+        let envs = launch_env(
+            &allocator,
+            &sample_request(Some(json!({
+                "env": {
+                    "PROXY_UPSTREAM_CHATGPT_ENDPOINT": "https://elsewhere.test/backend-api/codex/responses",
+                    "PROXY_UPSTREAM_OPENAI_ENDPOINT": "https://elsewhere.test/v1",
+                    "CONTROLLER_BASE_URL": "https://elsewhere.test",
+                    "RUNTIME_ACCESS_TOKEN": "chosen",
+                    "ORIGIN_INTERNAL_TOKEN": "chosen",
+                    "RUNTIME_ID": "chosen",
+                    "SPACE_ID": "chosen",
+                    "CODEX_MODEL": "chosen-model"
+                }
+            }))),
+        );
 
         for key in [
             "PROXY_UPSTREAM_CHATGPT_ENDPOINT",
@@ -1852,47 +2147,65 @@ mod tests {
             env_value(&envs, "CONTROLLER_BASE_URL"),
             Some("http://controller.internal:8788")
         );
-        // runtime settings a self-hosted runtime request may choose still apply
-        assert_eq!(env_value(&envs, "CODEX_MODEL"), Some("chosen-model"));
+        // The model is the operator's to set, in the provider service's own environment.
+        assert_eq!(env_value(&envs, "CODEX_MODEL"), None);
     }
 
+    /// For a provider other than exact instafy_cloud, the request's top-level
+    /// `metadata.runtimeAgentImage` picks the image only where the operator lets requests choose
+    /// it; `metadata.env` never does.
     #[test]
-    fn build_env_prefers_metadata_runtime_agent_image_over_provider_env() {
-        // The codex volumes the allocator and build_env create land in here.
+    fn a_request_picks_the_image_only_where_the_operator_allows_it() {
         let scratch = ScratchDir::new("instafy-runtime-image");
-        let mut config = ProviderConfig::default_docker();
-        config.runtime_agent_image =
-            Some("ghcr.io/instafy-dev/instafy-runtime-agent:provider".to_string());
-        config.runtime_docker_codex_root = Some(scratch.0.join("codex"));
-        let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
-        let images = |metadata: JsonValue| -> Vec<String> {
-            allocator
-                .build_env(&sample_request(Some(metadata)), 54332)
-                .expect("runtime env")
-                .into_iter()
-                .filter(|(key, _)| key == "RUNTIME_AGENT_IMAGE")
-                .map(|(_, value)| value)
-                .collect()
-        };
+        let chosen = json!({
+            "runtimeAgentImage": "ghcr.io/instafy-dev/instafy-runtime-agent:request",
+            "env": {
+                "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
+            }
+        });
+        let env_only = json!({
+            "env": {
+                "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
+            }
+        });
+        for (from_request, provider, metadata, expected) in [
+            (
+                true,
+                "hosted",
+                &chosen,
+                "ghcr.io/instafy-dev/instafy-runtime-agent:request",
+            ),
+            (false, "hosted", &chosen, "runtime-agent:provider"),
+            (true, "hosted", &env_only, "runtime-agent:provider"),
+            (false, "hosted", &env_only, "runtime-agent:provider"),
+            (true, "instafy-cloud", &chosen, "runtime-agent:provider"),
+        ] {
+            let allocator = scratch_allocator(&scratch, from_request);
+            let mut request = sample_request(Some(metadata.clone()));
+            request.provider = provider.to_string();
+            let envs = launch_env(&allocator, &request);
+            assert_eq!(
+                env_value(&envs, "RUNTIME_AGENT_IMAGE"),
+                Some(expected),
+                "{provider}, from request {from_request}: {metadata}"
+            );
+        }
 
-        assert_eq!(
-            images(json!({
-                "runtimeAgentImage": "ghcr.io/instafy-dev/instafy-runtime-agent:request",
-                "env": {
-                    "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
-                }
-            })),
-            vec!["ghcr.io/instafy-dev/instafy-runtime-agent:request"]
-        );
-        // metadata.env never picks the image, with or without a top-level choice.
-        assert_eq!(
-            images(json!({
-                "env": {
-                    "RUNTIME_AGENT_IMAGE": "ghcr.io/instafy-dev/instafy-runtime-agent:env"
-                }
-            })),
-            vec!["ghcr.io/instafy-dev/instafy-runtime-agent:provider"]
-        );
+        // A reference Docker would read as an option, or one that holds a control character,
+        // picks nothing.
+        for value in [
+            "--privileged",
+            "-v/:/host",
+            "runtime-agent:\u{0}request",
+            "runtime-agent:\u{1b}request",
+            "runtime-agent:\u{9b}request",
+        ] {
+            assert_eq!(
+                resolve_runtime_agent_image(&json!({ "runtimeAgentImage": value })),
+                None,
+                "{value:?}"
+            );
+        }
     }
 
     /// `docker compose` runs with the environment build_env returns, and the Docker CLI,
@@ -1900,8 +2213,8 @@ mod tests {
     /// runtime compose files turn other variables into host paths, images, ports and the proxy
     /// sidecar. A request's metadata.env, for any provider, changes none of that apart from the
     /// CPU and memory limits the controller sets from the runtime's size; it changes only what
-    /// the runtime container receives. The image comes from the provider or the request's
-    /// top-level metadata, never from metadata.env.
+    /// the runtime container receives. The image comes from the provider or, where its operator
+    /// allows it, the request's top-level metadata, never from metadata.env.
     #[test]
     fn a_request_changes_only_what_reaches_the_runtime_container() {
         // The checkouts, codex volumes and caches the allocator and build_env create all land
@@ -1915,70 +2228,10 @@ mod tests {
         let mut allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
         allocator.controller_base_url = None;
 
-        let docker_and_host_settings: serde_json::Map<String, JsonValue> = [
-            // The Docker CLI, Compose and BuildKit.
-            ("DOCKER_HOST", "tcp://elsewhere.test:2375"),
-            ("DOCKER_CONTEXT", "elsewhere"),
-            ("DOCKER_CONFIG", "/tmp/elsewhere-docker-config"),
-            ("DOCKER_CERT_PATH", "/tmp/elsewhere-certs"),
-            ("DOCKER_TLS_VERIFY", "0"),
-            ("COMPOSE_FILE", "/tmp/elsewhere-compose.yml"),
-            ("COMPOSE_PROJECT_NAME", "elsewhere"),
-            ("COMPOSE_PROFILES", "elsewhere"),
-            ("COMPOSE_ENV_FILES", "/tmp/elsewhere.env"),
-            ("BUILDKIT_HOST", "tcp://elsewhere.test:1234"),
-            ("BUILDX_BUILDER", "elsewhere"),
-            // The process itself: loader, shell, proxies, TLS, Go and git.
-            ("PATH", "/tmp/elsewhere-bin"),
-            ("HOME", "/tmp/elsewhere-home"),
-            ("TMPDIR", "/tmp/elsewhere-tmp"),
-            ("XDG_CONFIG_HOME", "/tmp/elsewhere-config"),
-            ("LD_PRELOAD", "/tmp/elsewhere.so"),
-            ("LD_LIBRARY_PATH", "/tmp/elsewhere-lib"),
-            ("DYLD_INSERT_LIBRARIES", "/tmp/elsewhere.dylib"),
-            ("BASH_ENV", "/tmp/elsewhere-shell-init"),
-            ("HTTP_PROXY", "http://elsewhere.test:8080"),
-            ("HTTPS_PROXY", "http://elsewhere.test:8443"),
-            ("ALL_PROXY", "socks5://elsewhere.test:1080"),
-            ("NO_PROXY", "*"),
-            ("http_proxy", "http://elsewhere.test:8080"),
-            ("SSL_CERT_FILE", "/tmp/elsewhere-ca.pem"),
-            ("GODEBUG", "x509ignoreCN=1"),
-            ("GIT_DIR", "/tmp/elsewhere-repo/.git"),
-            ("GIT_CONFIG_GLOBAL", "/tmp/elsewhere-gitconfig"),
-            ("GIT_SSH_COMMAND", "/tmp/elsewhere-ssh"),
-            // What the runtime compose files interpolate outside the runtime's environment.
-            ("RUNTIME_REPO_HOST", "/"),
-            ("RUNTIME_CACHE_HOST", "/var/run"),
-            ("RUNTIME_CODEX_VOLUME", "/root"),
-            ("PROXY_CODEX_VOLUME", "/etc"),
-            ("INSTAFY_ENV_DIR", "/tmp/elsewhere-env"),
-            (
-                "PROXY_CREDENTIAL_LEASE_ENV_FILE",
-                "/tmp/elsewhere-lease.env",
-            ),
-            ("RUNTIME_PROXY_IMAGE", "elsewhere/proxy:latest"),
-            ("PROXY_CONTROLLER_BASE_URL", "https://elsewhere.test"),
-            ("CONTROLLER_BASE_URL", "https://elsewhere.test"),
-            ("CONTROLLER_INTERNAL_TOKEN", "elsewhere"),
-            ("PROXY_SIGNING_SECRET", "elsewhere"),
-            ("OPENAI_API_KEY", "elsewhere"),
-            ("ORIGIN_GIT_AUTHOR_NAME", "elsewhere"),
-            ("ORIGIN_HOST_PORT", "22"),
-            ("PROXY_PORT", "22"),
-            // What picks the image, or once asked the allocator to build one.
-            ("RUNTIME_AGENT_IMAGE", "elsewhere/runtime:latest"),
-            ("RUNTIME_AGENT_BUILD_TARGET", "elsewhere"),
-            ("RUNTIME_AGENT_FORCE_BUILD", "1"),
-            // Read inside a runtime, but no runtime compose file passes it on.
-            (
-                "INSTAFY_SHARED_BROWSER_APPROVAL_DIR",
-                "/tmp/elsewhere-approvals",
-            ),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), JsonValue::String(value.to_string())))
-        .collect();
+        let docker_and_host_settings: serde_json::Map<String, JsonValue> = DOCKER_AND_HOST_SETTINGS
+            .iter()
+            .map(|(key, value)| (key.to_string(), JsonValue::String(value.to_string())))
+            .collect();
         let without_metadata = |envs: Vec<(String, String)>| {
             envs.into_iter()
                 .filter(|(key, _)| key != "RUNTIME_METADATA")
@@ -1993,9 +2246,9 @@ mod tests {
         ] {
             let mut request = sample_request(Some(json!({ "env": {} })));
             request.provider = provider.to_string();
-            let unset = allocator.build_env(&request, 54332).expect("runtime env");
+            let unset = launch_env(&allocator, &request);
             request.metadata = Some(json!({ "env": docker_and_host_settings }));
-            let requested = allocator.build_env(&request, 54332).expect("runtime env");
+            let requested = launch_env(&allocator, &request);
             assert_eq!(
                 without_metadata(requested),
                 without_metadata(unset),
@@ -2013,8 +2266,8 @@ mod tests {
             }
         })));
         request.provider = "external-http".to_string();
-        let envs = allocator.build_env(&request, 54332).expect("runtime env");
-        assert_eq!(env_value(&envs, "CODEX_MODEL"), Some("chosen-model"));
+        let envs = launch_env(&allocator, &request);
+        assert_eq!(env_value(&envs, "CODEX_MODEL"), None);
         assert_eq!(
             env_value(&envs, "ORIGIN_GIT_REMOTE_URL"),
             Some("https://git.example.test/space.git")
@@ -2037,65 +2290,406 @@ mod tests {
     }
 
     #[test]
-    fn no_runtime_container_variable_is_one_docker_or_the_process_reads() {
-        assert!(
-            RUNTIME_CONTAINER_ENV_KEYS
-                .windows(2)
-                .all(|pair| pair[0] < pair[1]),
-            "keep RUNTIME_CONTAINER_ENV_KEYS sorted and unique"
+    fn the_runtime_variable_lists_hold_together() {
+        // What only a custom provider's operator sets of the managed launch keys, written out:
+        // a change to it is a change to who decides the Shared Browser's egress and display.
+        assert_eq!(
+            EXACT_ONLY_LAUNCH_ENV_KEYS,
+            [
+                "INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS",
+                "INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV",
+                "INSTAFY_BROWSER_EGRESS_ISOLATION",
+                "INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS",
+                "INSTAFY_BROWSER_EGRESS_PROXY_BIND",
+                "INSTAFY_VNC_DEPTH",
+                "INSTAFY_VNC_HOST",
+            ]
         );
-        // Every name belongs to one of the runtime's own families or is one of CHECKED_NAMES,
-        // checked one by one, and no Docker tool or the `docker compose` process takes a setting
-        // from those families or names (the JS compose check covers the names the compose files
-        // themselves use). Any other name, even one a runtime compose file passes into the
-        // runtime, needs the same check before it joins CHECKED_NAMES: OTEL_*, SSH_AUTH_SOCK and
-        // TZ, for example, would fail it.
-        const RUNTIME_FAMILIES: [&str; 5] =
-            ["CODEX_", "INSTAFY_", "ORIGIN_", "RUNTIME_", "SUPABASE_"];
-        const CHECKED_NAMES: [&str; 4] = [
-            "OPENAI_BASE_URL",
-            "PROXY_BASE_URL",
-            "PROXY_TOKEN_TTL_SECONDS",
-            "USE_PROXY_FOR_LLM",
-        ];
-        for key in RUNTIME_CONTAINER_ENV_KEYS {
+        for (name, list) in [
+            ("EXACT_ONLY_LAUNCH_ENV_KEYS", EXACT_ONLY_LAUNCH_ENV_KEYS),
+            (
+                "OPERATOR_ONLY_RUNTIME_ENV_KEYS",
+                OPERATOR_ONLY_RUNTIME_ENV_KEYS,
+            ),
+            (
+                "REQUEST_DERIVED_RUNTIME_ENV_KEYS",
+                REQUEST_DERIVED_RUNTIME_ENV_KEYS,
+            ),
+        ] {
             assert!(
-                RUNTIME_FAMILIES
-                    .iter()
-                    .any(|family| key.starts_with(family))
-                    || CHECKED_NAMES.contains(key),
-                "{key} is outside the runtime's own variable families"
+                list.windows(2).all(|pair| pair[0] < pair[1]),
+                "keep {name} sorted and unique"
             );
-            for prefix in [
-                "DOCKER_",
-                "COMPOSE_",
-                "BUILDKIT_",
-                "BUILDX_",
-                "LD_",
-                "DYLD_",
-                "GIT_",
-                "GO",
-                "OTEL_",
-                "SSH_",
-                "SSL_",
-                "XDG_",
+        }
+        for key in EXACT_ONLY_LAUNCH_ENV_KEYS {
+            assert!(is_allowed_managed_runtime_env_key(key), "{key}");
+        }
+        for key in OPERATOR_ONLY_RUNTIME_ENV_KEYS
+            .iter()
+            .chain(REQUEST_DERIVED_RUNTIME_ENV_KEYS)
+        {
+            assert!(!is_allowed_managed_runtime_env_key(key), "{key}");
+        }
+        for key in REQUEST_DERIVED_RUNTIME_ENV_KEYS {
+            assert!(!OPERATOR_ONLY_RUNTIME_ENV_KEYS.contains(key), "{key}");
+        }
+        for (key, _) in CUSTOM_LAUNCH_ENV {
+            assert!(is_allowed_managed_runtime_env_key(key), "{key}");
+            assert!(!EXACT_ONLY_LAUNCH_ENV_KEYS.contains(key), "{key}");
+        }
+    }
+
+    /// For a provider other than exact instafy_cloud a launch request sets the managed launch
+    /// keys but the operator's browser policy, and nothing else: not the runtime's model routing,
+    /// sandbox, timings, capabilities or credentials, nor what build_env derives from the
+    /// request's own fields, whatever the value's type. For exact instafy_cloud the operator's
+    /// browser policy comes through the controller, which strips a client's value first. What the
+    /// provider service's own environment sets still reaches Compose, which inherits it.
+    #[test]
+    fn a_launch_sets_only_the_launch_keys_its_provider_takes() {
+        let scratch = ScratchDir::new("instafy-launch-keys");
+        let allocator = scratch_allocator(&scratch, false);
+        for provider in CUSTOM_PROVIDERS.iter().chain(&["instafy-cloud"]) {
+            let exact = is_exact_managed_provider(provider);
+            let mut request = sample_request(Some(json!({ "env": {} })));
+            request.provider = provider.to_string();
+            let unset = launch_env(&allocator, &request);
+            for value in [
+                json!("chosen"),
+                json!(7),
+                json!(true),
+                json!(["chosen"]),
+                json!({ "chosen": true }),
             ] {
-                assert!(!key.starts_with(prefix), "{key}");
+                let refused: serde_json::Map<String, JsonValue> = OPERATOR_ONLY_RUNTIME_ENV_KEYS
+                    .iter()
+                    .chain(REQUEST_DERIVED_RUNTIME_ENV_KEYS)
+                    .chain(if exact {
+                        &[][..]
+                    } else {
+                        EXACT_ONLY_LAUNCH_ENV_KEYS
+                    })
+                    .map(|key| (key.to_string(), value.clone()))
+                    .collect();
+                request.metadata = Some(json!({ "env": refused }));
+                let requested = launch_env(&allocator, &request);
+                assert_eq!(requested, unset, "{provider} with {value}");
             }
-            assert!(
-                !matches!(
-                    *key,
-                    "PATH" | "HOME" | "TMPDIR" | "SHELL" | "BASH_ENV" | "ENV"
-                ),
-                "{key}"
+
+            let launch: serde_json::Map<String, JsonValue> = CUSTOM_LAUNCH_ENV
+                .iter()
+                .map(|(key, value)| (key.to_string(), json!(value)))
+                .collect();
+            request.metadata = Some(json!({ "env": launch }));
+            let envs = launch_env(&allocator, &request);
+            for (key, value) in CUSTOM_LAUNCH_ENV {
+                assert_eq!(env_value(&envs, key), Some(*value), "{provider}: {key}");
+            }
+            let metadata: JsonValue =
+                serde_json::from_str(env_value(&envs, "RUNTIME_METADATA").expect("metadata"))
+                    .expect("metadata JSON");
+            assert_eq!(metadata["env"], json!(launch), "{provider}");
+
+            // The WebRTC switch: the controller's relay policy applies to the string "1" alone,
+            // so a provider other than exact instafy_cloud takes only a string; exact
+            // instafy_cloud's controller has already put every value in that form.
+            for (value, on_exact, on_custom) in [
+                (json!("1"), Some("1"), Some("1")),
+                (json!("0"), Some("0"), Some("0")),
+                (json!(true), Some("1"), None),
+                (json!(false), Some("0"), None),
+                (json!(1), Some("1"), None),
+                (json!(1.0), Some("1.0"), None),
+                (json!(0), Some("0"), None),
+                (json!(["1"]), None, None),
+                (json!({ "enabled": "1" }), None, None),
+            ] {
+                request.metadata =
+                    Some(json!({ "env": { "INSTAFY_BROWSER_WEBRTC_ENABLED": value } }));
+                let envs = launch_env(&allocator, &request);
+                assert_eq!(
+                    env_value(&envs, "INSTAFY_BROWSER_WEBRTC_ENABLED"),
+                    if exact { on_exact } else { on_custom },
+                    "{provider}: {value}"
+                );
+            }
+        }
+    }
+
+    /// A request value reaches the runtime on one line or not at all, and the Shared Browser's
+    /// display is a local one, for every provider.
+    #[test]
+    fn a_request_value_is_one_line_and_a_display_is_local() {
+        let scratch = ScratchDir::new("instafy-request-values");
+        let allocator = scratch_allocator(&scratch, false);
+        for provider in ["hosted", "instafy-cloud"] {
+            let launch = |env: JsonValue| {
+                let mut request = sample_request(Some(json!({ "env": env })));
+                request.provider = provider.to_string();
+                let envs = launch_env(&allocator, &request);
+                for (name, value) in &envs {
+                    assert!(!value.chars().any(breaks_env_line), "{provider}: {name}");
+                }
+                envs
+            };
+            for value in [
+                format!("1280x720\nRUNTIME_LEASE_ID={}", Uuid::new_v4()),
+                "1280x720\r".to_string(),
+                "1280\u{0}x720".to_string(),
+                "1280\u{7f}x720".to_string(),
+                "1280\u{85}x720".to_string(),
+                "1280\u{2028}x720".to_string(),
+                "1280\u{2029}x720".to_string(),
+            ] {
+                let envs = launch(json!({ "INSTAFY_VNC_GEOMETRY": value }));
+                assert_eq!(env_value(&envs, "INSTAFY_VNC_GEOMETRY"), None, "{value:?}");
+                let metadata = env_value(&envs, "RUNTIME_METADATA").expect("metadata");
+                assert!(!metadata.contains("INSTAFY_VNC_GEOMETRY"), "{value:?}");
+            }
+
+            // A JSON list laid out over several lines arrives on one.
+            let envs = launch(json!({
+                "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON":
+                    "[\n  {\"urls\": [\"stun:stun.example.test:19302\"], \"note\": \"a\u{2028}b\"}\n]"
+            }));
+            let ice = env_value(&envs, "INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON").expect("ice");
+            assert_eq!(
+                ice,
+                r#"[{"note":"a\u2028b","urls":["stun:stun.example.test:19302"]}]"#
             );
-            assert!(!key.to_ascii_uppercase().ends_with("_PROXY"), "{key}");
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(ice).unwrap(),
+                json!([{ "urls": ["stun:stun.example.test:19302"], "note": "a\u{2028}b" }])
+            );
+
+            for (display, accepted) in [
+                (":0", true),
+                (":1", true),
+                (":47", true),
+                (":9999", true),
+                (":01", false),
+                (":10000", false),
+                (":", false),
+                ("1", false),
+                (":1.0", false),
+                (": 1", false),
+                ("host:0", false),
+                ("display.example.test:0", false),
+            ] {
+                let envs = launch(json!({ "INSTAFY_BROWSER_DISPLAY": display }));
+                assert_eq!(
+                    env_value(&envs, "INSTAFY_BROWSER_DISPLAY"),
+                    accepted.then_some(display),
+                    "{provider}: {display}"
+                );
+            }
+        }
+
+        // A provider other than exact instafy_cloud takes an array or object value as JSON, on
+        // one line.
+        let mut request = sample_request(Some(json!({
+            "env": { "INSTAFY_VNC_GEOMETRY": { "note": "a\nb\u{2029}c" } }
+        })));
+        request.provider = "hosted".to_string();
+        let envs = launch_env(&allocator, &request);
+        assert_eq!(
+            env_value(&envs, "INSTAFY_VNC_GEOMETRY"),
+            Some(r#"{"note":"a\nb\u2029c"}"#)
+        );
+    }
+
+    /// The origin fields of a request reach the runtime as the runtime reads them, or not at all.
+    #[test]
+    fn a_request_names_its_origin_only_as_the_runtime_reads_it() {
+        let scratch = ScratchDir::new("instafy-request-origin");
+        let allocator = scratch_allocator(&scratch, false);
+        for provider in ["hosted", "instafy-cloud"] {
+            let mut request = sample_request(None);
+            request.provider = provider.to_string();
+            for (mode, expected) in [
+                ("hosted", Some("hosted")),
+                (" Desktop ", Some("desktop")),
+                ("EFS", Some("efs")),
+                ("bogus", None),
+                ("hosted\nRUNTIME_LEASE_ID=x", None),
+                ("", None),
+            ] {
+                request.origin_mode = Some(mode.to_string());
+                let envs = launch_env(&allocator, &request);
+                assert_eq!(env_value(&envs, "ORIGIN_MODE"), expected, "{mode:?}");
+            }
+            request.origin_mode = None;
+
+            request.origin_protocols = ["http", "ws", "http,ws", "HTTP", "", "a\nb", "x+y.z-1"]
+                .into_iter()
+                .map(String::from)
+                .chain(["p".repeat(33)])
+                .collect();
+            request.origin_metadata = Some(json!({ "note": "a\nb\u{2028}c\u{85}d" }));
+            let envs = launch_env(&allocator, &request);
+            assert_eq!(
+                env_value(&envs, "ORIGIN_PROTOCOLS"),
+                Some("http,ws,x+y.z-1")
+            );
+            let origin_metadata = env_value(&envs, "ORIGIN_METADATA").expect("origin metadata");
+            assert!(!origin_metadata.chars().any(breaks_env_line));
+            assert_eq!(
+                serde_json::from_str::<JsonValue>(origin_metadata).unwrap(),
+                json!({ "note": "a\nb\u{2028}c\u{85}d" })
+            );
+
+            request.origin_protocols = vec!["a,b".to_string()];
+            let envs = launch_env(&allocator, &request);
+            assert_eq!(env_value(&envs, "ORIGIN_PROTOCOLS"), None);
+        }
+    }
+
+    /// Whatever a launch request chooses reaches only a managed launch key, one of
+    /// REQUEST_DERIVED_RUNTIME_ENV_KEYS, or the image of a provider whose operator lets requests
+    /// choose it; and each of REQUEST_DERIVED_RUNTIME_ENV_KEYS is set from the request.
+    #[test]
+    fn what_a_request_chooses_reaches_only_its_own_variables() {
+        const MARK: &str = "requestchoice";
+        let scratch = ScratchDir::new("instafy-request-mark");
+        let mut env = serde_json::Map::new();
+        for key in OPERATOR_ONLY_RUNTIME_ENV_KEYS
+            .iter()
+            .chain(REQUEST_DERIVED_RUNTIME_ENV_KEYS)
+            .chain(EXACT_ONLY_LAUNCH_ENV_KEYS)
+            .chain(CUSTOM_LAUNCH_ENV.iter().map(|(key, _)| key))
+            .chain(DOCKER_AND_HOST_SETTINGS.iter().map(|(key, _)| key))
+            .chain(&[
+                "PROXY_UPSTREAM_OPENAI_ENDPOINT",
+                "RUNTIME_PROVIDER",
+                "SPACE_ID",
+                // Names that only look like a launch key.
+                "INSTAFY_ANYTHING",
+                "ORIGIN_ANYTHING",
+                "RUNTIME_ANYTHING",
+                "instafy_vnc_port",
+                "Instafy_Browser_Egress_Isolation",
+                " INSTAFY_VNC_PORT",
+                "INSTAFY_VNC_PORT ",
+                "INSTAFY_VNC_PORT=1",
+            ])
+        {
+            env.insert(key.to_string(), json!(format!("{MARK}-{key}")));
+        }
+        // A value the display check keeps.
+        env.insert("INSTAFY_BROWSER_DISPLAY".to_string(), json!(":1"));
+        for from_request in [false, true] {
+            let allocator = scratch_allocator(&scratch, from_request);
+            for provider in CUSTOM_PROVIDERS.iter().chain(&["instafy-cloud"]) {
+                let mut request = sample_request(Some(json!({
+                    "runtimeAgentImage": format!("registry.example.test/{MARK}:tag"),
+                    "runtime_agent_image": format!("registry.example.test/{MARK}:other"),
+                    "note": MARK,
+                    "env": env,
+                })));
+                request.provider = provider.to_string();
+                request.origin_mode = Some("hosted".to_string());
+                request.origin_protocols = vec![MARK.to_string()];
+                request.origin_metadata = Some(json!({ "note": MARK }));
+                let envs = launch_env(&allocator, &request);
+                for (name, value) in &envs {
+                    if value.contains(MARK) {
+                        assert!(
+                            is_allowed_managed_runtime_env_key(name)
+                                || REQUEST_DERIVED_RUNTIME_ENV_KEYS.contains(&name.as_str())
+                                || (name == "RUNTIME_AGENT_IMAGE"
+                                    && from_request
+                                    && !is_exact_managed_provider(provider)),
+                            "{provider}: {name} carries what the request chose"
+                        );
+                    }
+                }
+                for key in REQUEST_DERIVED_RUNTIME_ENV_KEYS {
+                    assert!(env_value(&envs, key).is_some(), "{provider}: {key}");
+                }
+
+                // Without the request's own fields, none of them is set.
+                request.metadata = None;
+                request.origin_mode = None;
+                request.origin_protocols = Vec::new();
+                request.origin_metadata = None;
+                let envs = launch_env(&allocator, &request);
+                for key in REQUEST_DERIVED_RUNTIME_ENV_KEYS {
+                    assert_eq!(env_value(&envs, key), None, "{provider}: {key}");
+                }
+            }
+        }
+    }
+
+    /// The runtime's copy of its launch metadata (RUNTIME_METADATA) keeps the request's other
+    /// fields as they came, holds as its env only what the request set here, and reaches the
+    /// runtime on one line, for every provider.
+    #[test]
+    fn the_runtime_metadata_holds_only_what_the_request_set() {
+        let scratch = ScratchDir::new("instafy-runtime-metadata");
+        let allocator = scratch_allocator(&scratch, false);
+        let note = "a\u{85}b\u{2028}c\u{9b}d\ne\u{7f}f\u{2029}g";
+        let read = |envs: &[(String, String)]| -> JsonValue {
+            let raw = env_value(envs, "RUNTIME_METADATA").expect("metadata");
+            assert!(!raw.chars().any(breaks_env_line), "{raw:?}");
+            serde_json::from_str(raw).expect("metadata JSON")
+        };
+        for provider in ["hosted", "instafy-cloud"] {
+            let mut request = sample_request(Some(json!({
+                "note": note,
+                "nested": { "list": [1, "two", { "three": note }] },
+                "env": {
+                    "INSTAFY_VNC_GEOMETRY": "1280x720",
+                    "INSTAFY_ENABLE_BROWSER_SESSION": true,
+                    "INSTAFY_VNC_PORT": null,
+                    "INSTAFY_BROWSER_RENDER_SCALE": "",
+                    "INSTAFY_BROWSER_DISPLAY": "display.example.test:0",
+                    "CODEX_MODEL": "chosen-model",
+                    "RUNTIME_METADATA": "chosen",
+                    "PATH": "/tmp/elsewhere-bin",
+                },
+            })));
+            request.provider = provider.to_string();
+            let metadata = read(&launch_env(&allocator, &request));
+            assert_eq!(metadata["note"], note, "{provider}");
+            assert_eq!(
+                metadata["nested"],
+                json!({ "list": [1, "two", { "three": note }] }),
+                "{provider}"
+            );
+            assert_eq!(
+                metadata["env"],
+                json!({
+                    "INSTAFY_ENABLE_BROWSER_SESSION": "1",
+                    "INSTAFY_VNC_GEOMETRY": "1280x720",
+                }),
+                "{provider}"
+            );
+
+            // An env that is no object sets nothing and is left out, and metadata without one
+            // gets none.
+            for env in [
+                json!("INSTAFY_VNC_GEOMETRY=1280x720"),
+                json!(["INSTAFY_VNC_GEOMETRY"]),
+                JsonValue::Null,
+            ] {
+                request.metadata = Some(json!({ "note": "kept", "env": env }));
+                let envs = launch_env(&allocator, &request);
+                assert_eq!(env_value(&envs, "INSTAFY_VNC_GEOMETRY"), None);
+                assert_eq!(read(&envs), json!({ "note": "kept" }), "{provider}: {env}");
+            }
+            request.metadata = Some(json!({ "note": "kept" }));
+            assert_eq!(
+                read(&launch_env(&allocator, &request)),
+                json!({ "note": "kept" }),
+                "{provider}"
+            );
         }
     }
 
     #[test]
     fn managed_webdev_uses_provider_pinned_image_and_ignores_spoofed_env() {
-        let mut config = ProviderConfig::default_docker();
+        let scratch = ScratchDir::new("instafy-webdev-image");
+        let mut config = scratch_config(&scratch);
         config.runtime_agent_image = Some("runtime-agent:base-sha".to_string());
         config.runtime_agent_webdev_image = Some("runtime-agent:webdev-sha".to_string());
         let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
@@ -2143,7 +2737,7 @@ mod tests {
         request.provider = "instafy-cloud".to_string();
         request.lease_id = lease_id;
 
-        let envs = allocator.build_env(&request, 54332).expect("runtime env");
+        let envs = launch_env(&allocator, &request);
         assert_eq!(
             env_value(&envs, "RUNTIME_AGENT_IMAGE"),
             Some("runtime-agent:webdev-sha")
@@ -2212,7 +2806,8 @@ mod tests {
 
     #[test]
     fn managed_webdev_rejects_spoofed_or_missing_lease_generation() {
-        let mut config = ProviderConfig::default_docker();
+        let scratch = ScratchDir::new("instafy-webdev-generation");
+        let mut config = scratch_config(&scratch);
         config.runtime_agent_webdev_image = Some("runtime-agent:webdev-sha".to_string());
         let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
         let mut request = sample_request(Some(json!({
@@ -2230,24 +2825,28 @@ mod tests {
 
     #[test]
     fn exact_managed_base_ignores_caller_image_and_capability_overrides() {
-        let mut config = ProviderConfig::default_docker();
-        config.runtime_agent_image = Some("runtime-agent:base-sha".to_string());
-        let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
-        let mut request = sample_request(Some(json!({
-            "runtimeAgentImage": "attacker/image:direct",
-            "env": {
-                "RUNTIME_AGENT_IMAGE": "attacker/image:env",
-                "RUNTIME_CAPABILITIES": "{\"spoofed\":true}",
-            }
-        })));
-        request.provider = "instafy-cloud".to_string();
+        let scratch = ScratchDir::new("instafy-exact-image");
+        for from_request in [false, true] {
+            let mut config = scratch_config(&scratch);
+            config.runtime_agent_image = Some("runtime-agent:base-sha".to_string());
+            config.runtime_agent_image_from_request = from_request;
+            let allocator = DockerRuntimeAllocator::new(&config).expect("allocator");
+            let mut request = sample_request(Some(json!({
+                "runtimeAgentImage": "attacker/image:direct",
+                "env": {
+                    "RUNTIME_AGENT_IMAGE": "attacker/image:env",
+                    "RUNTIME_CAPABILITIES": "{\"spoofed\":true}",
+                }
+            })));
+            request.provider = "instafy-cloud".to_string();
 
-        let envs = allocator.build_env(&request, 54332).expect("runtime env");
-        assert_eq!(
-            env_value(&envs, "RUNTIME_AGENT_IMAGE"),
-            Some("runtime-agent:base-sha")
-        );
-        assert_eq!(env_value(&envs, "RUNTIME_CAPABILITIES"), None);
+            let envs = launch_env(&allocator, &request);
+            assert_eq!(
+                env_value(&envs, "RUNTIME_AGENT_IMAGE"),
+                Some("runtime-agent:base-sha")
+            );
+            assert_eq!(env_value(&envs, "RUNTIME_CAPABILITIES"), None);
+        }
     }
 
     #[test]

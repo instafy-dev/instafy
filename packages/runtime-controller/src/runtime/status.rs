@@ -502,7 +502,9 @@ fn origin_info_from_status_row(row: &tokio_postgres::Row) -> Option<RuntimeEnsur
 }
 
 /// The image a launch asked for: its top-level `runtimeAgentImage`. An image named only in
-/// `metadata.env` is not one, since neither the Docker nor the Hetzner allocator starts it.
+/// `metadata.env` is not one, since neither the Docker nor the Hetzner allocator starts it. A
+/// custom Docker provider starts the requested image only where its operator lets a launch pick
+/// it (`RUNTIME_AGENT_IMAGE_FROM_REQUEST`), so this is what was asked for, not always what runs.
 fn extract_runtime_image_from_metadata(metadata: Option<&JsonValue>) -> Option<String> {
     let object = metadata?.as_object()?;
     object

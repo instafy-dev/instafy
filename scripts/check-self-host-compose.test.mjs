@@ -210,14 +210,36 @@ const NOT_FORWARDED_TO_RUNTIME = new Map([
   ["INSTAFY_BROWSER_WEBRTC_BIND", "not-forwarded-yet"],
 ]);
 
+// The managed launch keys: the string literals of the one `matches!(key, ...)`
+// in is_allowed_managed_runtime_env_key. Anything else in its body (a guard,
+// a wildcard, a prefix test, a second statement) fails here instead of
+// passing with a list that leaves it out.
 function allocatorManagedEnvAllowlist() {
   const source = fs.readFileSync(path.join(REPO_ROOT, ALLOCATOR_ALLOWLIST_FILE), "utf8");
-  const body = source.match(
-    /fn is_allowed_managed_runtime_env_key\(key: &str\) -> bool \{\n([\s\S]*?)\n\}\n/,
-  )?.[1];
-  assert.ok(body, `${ALLOCATOR_ALLOWLIST_FILE}: is_allowed_managed_runtime_env_key not found`);
-  const withoutComments = body.replace(/\/\/.*$/gm, "");
-  return [...withoutComments.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((match) => match[1]);
+  return managedEnvAllowlistIn(source, ALLOCATOR_ALLOWLIST_FILE);
+}
+
+function managedEnvAllowlistIn(source, label) {
+  const definitions = [
+    ...source.matchAll(/\bfn is_allowed_managed_runtime_env_key\(key: &str\) -> bool \{\n([\s\S]*?)\n\}\n/g),
+  ];
+  assert.equal(definitions.length, 1, `${label}: expected one is_allowed_managed_runtime_env_key`);
+  const names = [];
+  const rest = definitions[0][1]
+    .replace(/\/\/.*$/gm, "")
+    .replace(/"([A-Za-z_][A-Za-z0-9_]*)"/g, (_, name) => {
+      names.push(name);
+      return "";
+    })
+    .replace(/\s+/g, "");
+  assert.equal(
+    rest,
+    `matches!(key,${"|".repeat(Math.max(names.length - 1, 0))})`,
+    `${label}: is_allowed_managed_runtime_env_key holds more than one match of names`,
+  );
+  assert.ok(names.length > 0, `${label}: no managed launch keys`);
+  assert.equal(new Set(names).size, names.length, `${label}: a managed launch key is listed twice`);
+  return names;
 }
 
 // A Compose file's lines, as the checks here read it by hand so they need no
@@ -331,26 +353,112 @@ test("the provider runtime's values drop a trailing comment and their quotes", (
   });
 });
 
-// Compose, the Docker CLI and the dynamic loader read the environment of the
-// `docker compose` process that carries a launch request's variables, and
-// Compose puts the variables a runtime Compose file uses outside the runtime's
-// `environment:` into other services, mounts, env_file paths, images, ports,
-// build settings and resource limits. So for a provider other than exact
-// instafy_cloud the allocator takes from a request the managed launch keys,
-// whose CPU and memory limits the controller sets from the runtime's size, and
-// otherwise exactly the variables either file passes into the runtime
-// container's `environment:` and neither file uses anywhere else.
+// What a launch request decides in the environment of the `docker compose`
+// process (allocator/docker.rs): the managed launch keys (allocator/mod.rs),
+// and the variables build_env derives from the request's own fields
+// (REQUEST_DERIVED_RUNTIME_ENV_KEYS). Compose, the Docker CLI and the dynamic
+// loader read that environment, and Compose puts the variables a runtime
+// Compose file uses outside the runtime's `environment:` into other services,
+// mounts, env_file paths, images, ports, build settings and resource limits.
+// So apart from the CPU and memory limits, which the controller sets from the
+// runtime's size, each of them must be a variable the runtime Compose files use
+// only inside the runtime container. Every other variable the files pass into
+// the runtime container is the provider's or its operator's
+// (OPERATOR_ONLY_RUNTIME_ENV_KEYS), set in the provider service's own
+// environment, which Compose inherits: a launch never sets it.
 const ALLOCATOR_DOCKER_FILE = "packages/runtime-provider-core/src/allocator/docker.rs";
 
-function allocatorRuntimeContainerEnvKeys() {
-  const source = fs.readFileSync(path.join(REPO_ROOT, ALLOCATOR_DOCKER_FILE), "utf8");
-  const body = source.match(
-    /\nconst RUNTIME_CONTAINER_ENV_KEYS: &\[&str\] = &\[\n([\s\S]*?)\n\];\n/,
-  )?.[1];
-  assert.ok(body, `${ALLOCATOR_DOCKER_FILE}: RUNTIME_CONTAINER_ENV_KEYS not found`);
-  const withoutComments = body.replace(/\/\/.*$/gm, "");
-  return [...withoutComments.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((match) => match[1]);
+// A `const NAME: &[&str] = &[...]` list in a Rust file: exactly one
+// definition, holding only string literals and comments, with no name twice,
+// so that an edit this parse does not follow fails here instead of passing
+// with a shorter list.
+function rustStringList(file, name) {
+  return rustStringListIn(fs.readFileSync(path.join(REPO_ROOT, file), "utf8"), file, name);
 }
+
+function rustStringListIn(source, file, name) {
+  const definitions = [
+    ...source.matchAll(new RegExp(String.raw`\nconst ${name}: &\[&str\] = &\[\n([\s\S]*?)\n\];\n`, "g")),
+  ];
+  assert.equal(definitions.length, 1, `${file}: expected one definition of ${name}`);
+  const names = [];
+  const rest = definitions[0][1]
+    .replace(/\/\/.*$/gm, "")
+    .replace(/"([A-Za-z_][A-Za-z0-9_]*)",?/g, (_, entry) => {
+      names.push(entry);
+      return "";
+    });
+  assert.match(rest, /^\s*$/, `${file}: ${name} holds more than names: ${rest.trim()}`);
+  assert.ok(names.length > 0, `${file}: ${name} is empty`);
+  assert.equal(new Set(names).size, names.length, `${file}: ${name} names a variable twice`);
+  return names;
+}
+
+// The allocator's lists of who sets which variable.
+function allocatorEnvLists() {
+  const lists = {
+    managed: allocatorManagedEnvAllowlist(),
+    exactOnly: rustStringList(ALLOCATOR_DOCKER_FILE, "EXACT_ONLY_LAUNCH_ENV_KEYS"),
+    operatorOnly: rustStringList(ALLOCATOR_DOCKER_FILE, "OPERATOR_ONLY_RUNTIME_ENV_KEYS"),
+    requestDerived: rustStringList(ALLOCATOR_DOCKER_FILE, "REQUEST_DERIVED_RUNTIME_ENV_KEYS"),
+  };
+  // Guard the parses themselves.
+  for (const [list, key] of [
+    ["managed", "INSTAFY_ENABLE_BROWSER_SESSION"],
+    ["exactOnly", "INSTAFY_BROWSER_EGRESS_ISOLATION"],
+    ["operatorOnly", "ORIGIN_SKIP_AUTH"],
+    ["operatorOnly", "PROXY_BASE_URL"],
+    ["requestDerived", "RUNTIME_METADATA"],
+  ]) {
+    assert.ok(lists[list].includes(key), `the ${list} list parse is missing ${key}`);
+  }
+  return lists;
+}
+
+test("the allocator list parses fail on Rust they do not follow", () => {
+  const allowlist = (body) =>
+    `\npub(crate) fn is_allowed_managed_runtime_env_key(key: &str) -> bool {\n${body}\n}\n`;
+  assert.deepEqual(
+    managedEnvAllowlistIn(
+      allowlist(`    matches!(\n        key,\n        // A comment.\n        "A_KEY"\n            | "B_KEY"\n    )`),
+      "self-test",
+    ),
+    ["A_KEY", "B_KEY"],
+  );
+  for (const body of [
+    `    matches!(\n        key,\n        "A_KEY" | _\n    )`,
+    `    matches!(\n        key,\n        "A_KEY" | other if other.starts_with("B_")\n    )`,
+    `    key.starts_with("A_") || matches!(\n        key,\n        "B_KEY"\n    )`,
+    `    matches!(\n        key,\n        "A_KEY" | concat!("B_", "KEY")\n    )`,
+    `    matches!(\n        key,\n        "A_KEY" | "A_KEY"\n    )`,
+    `    matches!(\n        key,\n    )`,
+  ]) {
+    assert.throws(() => managedEnvAllowlistIn(allowlist(body), "self-test"), Error, body);
+  }
+  assert.throws(
+    () => managedEnvAllowlistIn(allowlist(`    matches!(key, "A_KEY")`).repeat(2), "self-test"),
+    Error,
+    "two definitions",
+  );
+
+  const list = (body) => `\nconst SOME_KEYS: &[&str] = &[\n${body}\n];\n`;
+  assert.deepEqual(
+    rustStringListIn(list(`    "A_KEY",\n    // A comment.\n    "B_KEY",`), "self-test", "SOME_KEYS"),
+    ["A_KEY", "B_KEY"],
+  );
+  for (const body of [
+    `    "A_KEY",\n    OTHER_KEYS[0],`,
+    `    "A_KEY",\n    "A_KEY",`,
+    `    // Only a comment.`,
+  ]) {
+    assert.throws(() => rustStringListIn(list(body), "self-test", "SOME_KEYS"), Error, body);
+  }
+  assert.throws(
+    () => rustStringListIn(list(`    "A_KEY",`).repeat(2), "self-test", "SOME_KEYS"),
+    Error,
+    "two definitions",
+  );
+});
 
 // Where a YAML node can start on a line: after the indentation, after a `- `
 // or `? ` indicator or a `: ` value indicator, and inside a flow collection.
@@ -804,12 +912,30 @@ test("the Compose variable scan reads a CRLF line ending as an LF", () => {
   );
 });
 
-test("apart from the size limits, a launch request sets only variables the runtime Compose files keep inside the runtime", () => {
-  const requestKeys = allocatorRuntimeContainerEnvKeys();
-  // Guard the parses themselves: an empty list would pass vacuously.
-  for (const key of ["CODEX_API_ENDPOINT", "ORIGIN_GIT_REMOTE_URL", "USE_PROXY_FOR_LLM"]) {
-    assert.ok(requestKeys.includes(key), `RUNTIME_CONTAINER_ENV_KEYS parse is missing ${key}`);
+test("a launch request sets only variables the runtime Compose files keep inside the runtime, and each other runtime variable is the operator's", () => {
+  const { managed, exactOnly, operatorOnly, requestDerived } = allocatorEnvLists();
+  for (const key of exactOnly) {
+    assert.ok(managed.includes(key), `EXACT_ONLY_LAUNCH_ENV_KEYS lists ${key}, which is no managed launch key`);
   }
+  for (const [first, firstName, second, secondName] of [
+    [managed, "the managed launch keys", operatorOnly, "OPERATOR_ONLY_RUNTIME_ENV_KEYS"],
+    [managed, "the managed launch keys", requestDerived, "REQUEST_DERIVED_RUNTIME_ENV_KEYS"],
+    [operatorOnly, "OPERATOR_ONLY_RUNTIME_ENV_KEYS", requestDerived, "REQUEST_DERIVED_RUNTIME_ENV_KEYS"],
+  ]) {
+    for (const key of first) {
+      assert.ok(!second.includes(key), `${key} is in both ${firstName} and ${secondName}`);
+    }
+  }
+  // What a launch decides stays among the runtime's own names, none of them a
+  // setting the Docker CLI, Compose, BuildKit, the loader, the shell, git, Go,
+  // TLS or an HTTP client reads; the scan below covers what the Compose files
+  // themselves read.
+  const requestSet = [...managed, ...requestDerived];
+  for (const key of requestSet) {
+    assert.match(key, /^(?:INSTAFY|ORIGIN|RUNTIME)_/, `${key} is outside the runtime's own variable families`);
+    assert.doesNotMatch(key, /_PROXY$/i, `${key} reads as a proxy setting`);
+  }
+
   const environment = new Set();
   const elsewhere = new Map();
   for (const composeFile of [COMPOSE_FILE, PROVIDER_COMPOSE_FILE]) {
@@ -841,28 +967,27 @@ test("apart from the size limits, a launch request sets only variables the runti
     assert.ok(elsewhere.has(key), `Compose parse is missing ${key} outside the runtime environment`);
   }
 
-  for (const key of requestKeys) {
+  for (const key of requestSet) {
     assert.ok(
       !elsewhere.has(key),
       `${elsewhere.get(key)} uses ${key} outside the runtime container's environment, so a launch request must not set it`,
     );
-    assert.ok(
-      environment.has(key),
-      `no runtime Compose file passes ${key} to the runtime container: drop it from RUNTIME_CONTAINER_ENV_KEYS`,
-    );
+  }
+  for (const [list, listName] of [
+    [requestDerived, "REQUEST_DERIVED_RUNTIME_ENV_KEYS"],
+    [operatorOnly, "OPERATOR_ONLY_RUNTIME_ENV_KEYS"],
+  ]) {
+    for (const key of list) {
+      assert.ok(
+        environment.has(key),
+        `no runtime Compose file passes ${key} to the runtime container: drop it from ${listName}`,
+      );
+    }
   }
   for (const key of environment) {
     assert.ok(
-      elsewhere.has(key) || requestKeys.includes(key),
-      `the runtime container takes ${key} only from its environment: add it to RUNTIME_CONTAINER_ENV_KEYS so a launch on a provider other than exact instafy_cloud can still set it (a Rust test there keeps the list to the runtime's own name families and a few names checked one by one; this test keeps out the names the Compose files use anywhere else), or exempt it here if only the provider's operator may set it, as for a name a Docker tool or the process reads (TZ, *_PROXY and the like)`,
-    );
-  }
-  // Exact instafy_cloud's allowlist holds to the same rule, its size limits on
-  // the runtime's `cpus:` and `mem_limit:` apart.
-  for (const key of allocatorManagedEnvAllowlist()) {
-    assert.ok(
-      !elsewhere.has(key),
-      `${elsewhere.get(key)} uses the allowlisted ${key} outside the runtime container's environment`,
+      elsewhere.has(key) || managed.includes(key) || operatorOnly.includes(key) || requestDerived.includes(key),
+      `the runtime container takes ${key} only from its environment, and ${ALLOCATOR_DOCKER_FILE} does not say who sets it: add it to OPERATOR_ONLY_RUNTIME_ENV_KEYS, so that only the provider's operator sets it, in the provider service's own environment, or, if a launch must choose it, make it a managed launch key in ${ALLOCATOR_ALLOWLIST_FILE} or a variable build_env derives from the request (REQUEST_DERIVED_RUNTIME_ENV_KEYS), which this test then keeps inside the runtime container`,
     );
   }
 });
@@ -1032,9 +1157,8 @@ test(
     if (!composeShowsEnvFiles) {
       t.diagnostic("this Compose cannot show env_file paths, so only the line scan checks them");
     }
-    const keys = [
-      ...new Set([...allocatorRuntimeContainerEnvKeys(), ...allocatorManagedEnvAllowlist()]),
-    ];
+    const { managed, requestDerived } = allocatorEnvLists();
+    const keys = [...new Set([...managed, ...requestDerived])];
     for (const key of SIZE_LIMIT_VALUES.keys()) {
       assert.equal(NOT_FORWARDED_TO_RUNTIME.get(key), "compose-level", `${key} is no size limit`);
       assert.ok(keys.includes(key), `${key} is not a variable a launch request may set`);
@@ -1066,11 +1190,13 @@ test(
         // limits size it, and the line scan saw each variable Compose passed
         // into the runtime container.
         const runtime = result.set.services.runtime;
-        assert.equal(
-          runtime.environment.ORIGIN_GIT_REMOTE_URL,
-          requestValue("ORIGIN_GIT_REMOTE_URL"),
-          `${composeFile}: the launch request's ORIGIN_GIT_REMOTE_URL never reached the runtime`,
-        );
+        for (const key of ["ORIGIN_GIT_REMOTE_URL", "RUNTIME_METADATA", "ORIGIN_METADATA"]) {
+          assert.equal(
+            runtime.environment[key],
+            requestValue(key),
+            `${composeFile}: the launch request's ${key} never reached the runtime`,
+          );
+        }
         assert.equal(String(runtime.cpus), requestValue("RUNTIME_CPU_LIMIT"), `${composeFile}: cpus`);
         // 1234m, which Compose renders in bytes.
         assert.equal(String(runtime.mem_limit), String(1234 * 1024 * 1024), `${composeFile}: mem_limit`);
@@ -1104,25 +1230,25 @@ test(
   (t) => {
     const helper = ["  helper:", "    image: helper"];
     const cases = [
-      ["another service's value", [...helper, "    environment:", "      HELPER_MODEL: ${CODEX_MODEL:-}"], "services.helper.environment.HELPER_MODEL"],
-      ["a test of whether it is set", [...helper, "    environment:", "      HELPER_HAS_MODEL: ${CODEX_MODEL:+set}"], "services.helper.environment.HELPER_HAS_MODEL"],
-      ["an entry passed through", [...helper, "    environment:", "      - CODEX_MODEL"], "services.helper.environment.CODEX_MODEL"],
+      ["another service's value", [...helper, "    environment:", "      HELPER_MODEL: ${INSTAFY_VNC_GEOMETRY:-}"], "services.helper.environment.HELPER_MODEL"],
+      ["a test of whether it is set", [...helper, "    environment:", "      HELPER_HAS_MODEL: ${INSTAFY_VNC_GEOMETRY:+set}"], "services.helper.environment.HELPER_HAS_MODEL"],
+      ["an entry passed through", [...helper, "    environment:", "      - INSTAFY_VNC_GEOMETRY"], "services.helper.environment.INSTAFY_VNC_GEOMETRY"],
       ["a size limit", [...helper, "    environment:", "      HELPER_MEMORY: ${RUNTIME_MEMORY_LIMIT:-4g}"], "services.helper.environment.HELPER_MEMORY"],
-      ["a service under a profile", [...helper, "    profiles:", "      - debug", "    environment:", "      HELPER_MODEL: ${CODEX_MODEL:-}"], "services.helper.environment.HELPER_MODEL"],
-      ["the runtime's other settings", ["    labels:", "      model: ${CODEX_MODEL:-}"], "services.runtime.labels.model"],
-      ["a default behind a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:-${CODEX_MODEL:+1}2}"], "services.runtime.cpus"],
-      ["a test beside a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:+${CODEX_MODEL:+1}}${RUNTIME_CPU_LIMIT:-2}"], "services.runtime.cpus"],
-      ["a lifecycle hook", [...helper, "    post_start:", "      - command: ./warm.sh", "        environment:", "          - CODEX_MODEL"], "services.helper.post_start.0.environment.CODEX_MODEL", "optional"],
-      ["a watch action", [...helper, "    develop:", "      watch:", "        - path: ./src", "          target: /src", "          action: sync+exec", "          exec:", "            command: ./reload.sh", "            environment:", "              CODEX_MODEL:"], "services.helper.develop.watch.0.exec.environment.CODEX_MODEL", "optional"],
-      ["a secret", [...helper, "    secrets:", "      - model", "secrets:", "  model:", "    environment: CODEX_MODEL"], "secrets.model.environment", "optional"],
-      ["a config", [...helper, "    configs:", "      - model", "configs:", "  model:", "    environment: CODEX_MODEL"], "configs.model.environment", "optional"],
+      ["a service under a profile", [...helper, "    profiles:", "      - debug", "    environment:", "      HELPER_MODEL: ${INSTAFY_VNC_GEOMETRY:-}"], "services.helper.environment.HELPER_MODEL"],
+      ["the runtime's other settings", ["    labels:", "      model: ${INSTAFY_VNC_GEOMETRY:-}"], "services.runtime.labels.model"],
+      ["a default behind a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:-${INSTAFY_VNC_GEOMETRY:+1}2}"], "services.runtime.cpus"],
+      ["a test beside a size limit", ["    cpus: ${RUNTIME_CPU_LIMIT:+${INSTAFY_VNC_GEOMETRY:+1}}${RUNTIME_CPU_LIMIT:-2}"], "services.runtime.cpus"],
+      ["a lifecycle hook", [...helper, "    post_start:", "      - command: ./warm.sh", "        environment:", "          - INSTAFY_VNC_GEOMETRY"], "services.helper.post_start.0.environment.INSTAFY_VNC_GEOMETRY", "optional"],
+      ["a watch action", [...helper, "    develop:", "      watch:", "        - path: ./src", "          target: /src", "          action: sync+exec", "          exec:", "            command: ./reload.sh", "            environment:", "              INSTAFY_VNC_GEOMETRY:"], "services.helper.develop.watch.0.exec.environment.INSTAFY_VNC_GEOMETRY", "optional"],
+      ["a secret", [...helper, "    secrets:", "      - model", "secrets:", "  model:", "    environment: INSTAFY_VNC_GEOMETRY"], "secrets.model.environment", "optional"],
+      ["a config", [...helper, "    configs:", "      - model", "configs:", "  model:", "    environment: INSTAFY_VNC_GEOMETRY"], "configs.model.environment", "optional"],
     ];
     if (composeShowsEnvFiles) {
-      cases.push(["an env file's path", ["    env_file:", "      - path: ${CODEX_MODEL:-/dev/null}", "        required: false"], "services.runtime.env_file.0.path"]);
+      cases.push(["an env file's path", ["    env_file:", "      - path: ${INSTAFY_VNC_GEOMETRY:-/dev/null}", "        required: false"], "services.runtime.env_file.0.path"]);
     } else {
       t.diagnostic("an env file's path: skipped, this Compose cannot show env_file paths");
     }
-    const keys = ["CODEX_MODEL", "ORIGIN_GIT_REMOTE_URL", ...SIZE_LIMIT_VALUES.keys()];
+    const keys = ["INSTAFY_VNC_GEOMETRY", "ORIGIN_GIT_REMOTE_URL", ...SIZE_LIMIT_VALUES.keys()];
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-compose-reads-"));
     try {
       fs.writeFileSync(path.join(root, "empty.env"), "");
@@ -1138,7 +1264,7 @@ test(
           "    mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}",
           "    environment:",
           "      ORIGIN_GIT_REMOTE_URL: ${ORIGIN_GIT_REMOTE_URL:-}",
-          "      CODEX_MODEL: ${CODEX_MODEL:-}",
+          "      INSTAFY_VNC_GEOMETRY: ${INSTAFY_VNC_GEOMETRY:-}",
         ];
         const text = lines[0].startsWith("    ") ? [...runtime.slice(0, 4), ...lines, ...runtime.slice(4)] : [...runtime, ...lines];
         fs.writeFileSync(file, `${text.join("\n")}\n`);
@@ -1166,7 +1292,7 @@ test(
           "    mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}",
           "    environment:",
           "      ORIGIN_GIT_REMOTE_URL: ${ORIGIN_GIT_REMOTE_URL:-}",
-          "      CODEX_MODEL:",
+          "      INSTAFY_VNC_GEOMETRY:",
           "",
         ].join("\n"),
       );

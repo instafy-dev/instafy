@@ -86,11 +86,18 @@ pub(crate) fn canonical_managed_runtime_env_value(value: &JsonValue) -> Option<J
     Some(JsonValue::String(rendered))
 }
 
+/// Whether `provider` names exact instafy_cloud, read as the controller reads a provider id
+/// (`normalize_identifier` in runtime-controller's provider_identifiers.rs): trimmed, ASCII
+/// lowercased, with each run of `-`, `_` and ASCII whitespace one separator. Another whitespace
+/// character is part of a name there, so it is here too; otherwise a provider the controller
+/// treats as custom, keeping its clients' launch values, would get exact instafy_cloud's here.
 pub(crate) fn is_exact_managed_provider(provider: &str) -> bool {
     let normalized = provider
         .trim()
         .to_ascii_lowercase()
-        .split(|character: char| character == '-' || character == '_' || character.is_whitespace())
+        .split(|character: char| {
+            character == '-' || character == '_' || character.is_ascii_whitespace()
+        })
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("_");
@@ -445,6 +452,42 @@ mod tests {
         let mut config = ProviderConfig::default_docker();
         config.runtime_allocator_required = false;
         config
+    }
+
+    #[test]
+    fn only_the_controllers_instafy_cloud_id_is_exact() {
+        for provider in [
+            "instafy_cloud",
+            "instafy-cloud",
+            " Instafy Cloud ",
+            "INSTAFY--cloud",
+            "_instafy_cloud_",
+            "instafy\tcloud",
+            "instafy\ncloud",
+            "\u{a0}instafy_cloud\u{3000}",
+        ] {
+            assert!(is_exact_managed_provider(provider), "{provider:?}");
+        }
+        for provider in [
+            "instafy\u{b}cloud",
+            "instafy\u{85}cloud",
+            "instafy\u{a0}cloud",
+            "instafy\u{1680}cloud",
+            "instafy\u{2000}cloud",
+            "instafy\u{200a}cloud",
+            "instafy\u{2028}cloud",
+            "instafy\u{2029}cloud",
+            "instafy\u{202f}cloud",
+            "instafy\u{205f}cloud",
+            "instafy\u{3000}cloud",
+            "instafycloud",
+            "instafy_cloud_eu",
+            "instafy-cloud-custom",
+            "external-http",
+            "",
+        ] {
+            assert!(!is_exact_managed_provider(provider), "{provider:?}");
+        }
     }
 
     #[test]
