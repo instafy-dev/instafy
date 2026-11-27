@@ -103,7 +103,8 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+|\/+$/g, "").trim();
 }
 
-function threadMessagesOf(message: ChatMessage): readonly ChatMessage[] {
+/** The messages of a thread row (`agent_job_thread`), or none for any other message. */
+export function threadMessagesOf(message: ChatMessage): readonly ChatMessage[] {
   if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") {
     return [];
   }

@@ -9,6 +9,7 @@ import type {
   CameraPermissionState,
   CameraStatusSnapshot,
 } from "./types";
+import { decodeDataUrlToBlob } from "../utils/decodeDataUrlToBlob";
 
 interface NativeCameraExtensionPlugin {
   getStatus(): Promise<CameraStatusSnapshot>;
@@ -145,35 +146,6 @@ function resolveVirtualCameraLens(lens: string | null | undefined): CameraLensId
   return lens === "rear" || lens === "external" || lens === "front" ? lens : "front";
 }
 
-function decodeImageDataUrlToBlob(dataUrl: string): Blob | null {
-  if (!dataUrl.startsWith("data:")) {
-    return null;
-  }
-  const commaIndex = dataUrl.indexOf(",");
-  if (commaIndex < 0) {
-    return null;
-  }
-  const metadata = dataUrl.slice("data:".length, commaIndex);
-  const payload = dataUrl.slice(commaIndex + 1);
-  const metadataParts = metadata
-    .split(";")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const mimeType = metadataParts[0] && metadataParts[0] !== "base64" ? metadataParts[0] : "";
-  const isBase64 = metadataParts.includes("base64");
-
-  try {
-    const raw = isBase64 ? atob(payload) : decodeURIComponent(payload);
-    const bytes = new Uint8Array(raw.length);
-    for (let index = 0; index < raw.length; index += 1) {
-      bytes[index] = raw.charCodeAt(index);
-    }
-    return new Blob([bytes], { type: mimeType || "application/octet-stream" });
-  } catch {
-    return null;
-  }
-}
-
 async function decodeVirtualCameraImageDimensions(
   blob: Blob,
 ): Promise<{ width: number; height: number } | null> {
@@ -230,7 +202,7 @@ async function captureVirtualCameraPhoto(options?: {
   }
 
   try {
-    const decodedBlob = decodeImageDataUrlToBlob(testOptions.imageDataUrl);
+    const decodedBlob = decodeDataUrlToBlob(testOptions.imageDataUrl);
     const blob = decodedBlob
       ? decodedBlob
       : await fetch(testOptions.imageDataUrl).then((response) => response.blob());

@@ -1,3 +1,5 @@
+import { isSameLocalDay } from "../../../utils/time";
+
 export type ManagedAiAllowance = {
   enabled: boolean;
   available: boolean;
@@ -21,14 +23,6 @@ export function isManagedAiAllowanceUsedUp(
       !managedAi.available &&
       managedAi.dailyPromptLimit > 0 &&
       managedAi.remainingPrompts === 0,
-  );
-}
-
-function isSameLocalDay(left: Date, right: Date): boolean {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
   );
 }
 

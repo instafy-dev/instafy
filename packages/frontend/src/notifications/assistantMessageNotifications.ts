@@ -4,6 +4,7 @@ import { canonicalNotificationUrl, safeNotificationBody } from "./notificationCo
 import { Capacitor } from "@capacitor/core";
 import { ensureWebPushSubscriptionRegistered, hasActiveWebPushSubscription, unregisterWebPushSubscription } from "./webPushRegistration";
 import { requestNativePushTokenRegistered, unregisterNativePushToken } from "./nativePushRegistration";
+import { logNotificationDebug } from "./notificationsDebug";
 
 type DesktopNotificationPayload = {
   title: string;
@@ -15,19 +16,7 @@ type DesktopNotificationPayload = {
 
 const ENABLED_KEY = "instafy.notifications.enabled";
 const NUDGE_SEEN_KEY = "instafy.notifications.browser_nudge_seen";
-const DEBUG_KEY = "instafy.notifications.debug";
 const FORCE_LOCAL_KEY = "instafy.notifications.force_local";
-
-function notificationsDebugEnabled(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(DEBUG_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 
 function notificationsForceLocalEnabled(): boolean {
   if (typeof window === "undefined") {
@@ -38,17 +27,6 @@ function notificationsForceLocalEnabled(): boolean {
   } catch {
     return false;
   }
-}
-
-function logNotificationDebug(message: string, details?: Record<string, unknown>) {
-  if (!notificationsDebugEnabled()) {
-    return;
-  }
-  if (details) {
-    console.info(`[notifications] ${message}`, details);
-    return;
-  }
-  console.info(`[notifications] ${message}`);
 }
 
 function getDesktopBridge(): { notify: (payload: DesktopNotificationPayload) => Promise<unknown> } | null {

@@ -7,7 +7,7 @@ import {
   clampFloatingSurfacePositionToStudioViewport,
 } from "../../../utils/floatingSurfacePosition";
 import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
-import type { OpenTextFileOptions, ViewerState } from "./useFilesPanelViewerState";
+import { findEntryByPath, type OpenTextFileOptions, type ViewerState } from "./useFilesPanelViewerState";
 import type { StudioDirectoryListingListener } from "../useStudioKnownFiles";
 import type { CodeFile } from "../../../types";
 import {
@@ -141,20 +141,6 @@ function clampExplorerMenuPosition(clientX: number, clientY: number) {
     surfaceHeight: 240,
     padding: 12,
   });
-}
-
-function findEntryByPath(
-  map: DirectoryEntries,
-  path: string,
-  getParentPath: (path: string) => string | null,
-  normalizePath: (path: string) => string,
-): ControllerWorkspaceEntry | null {
-  const normalized = normalizePath(path);
-  const entries = map[getParentPath(normalized) ?? ""];
-  if (!entries) {
-    return null;
-  }
-  return entries.find((entry) => normalizePath(entry.path) === normalized) ?? null;
 }
 
 export function useFilesPanelWorkspaceTree({

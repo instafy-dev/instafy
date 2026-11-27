@@ -10,7 +10,7 @@ type ProviderHostSurfacePolicyNoticeProps = {
   entry: ProviderHostSurfaceEntry;
 };
 
-function formatSurfaceLabel(surface: string) {
+export function formatSurfaceLabel(surface: string) {
   switch (surface) {
     case "settings_card":
       return "Settings card";

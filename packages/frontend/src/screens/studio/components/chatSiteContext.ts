@@ -1,8 +1,8 @@
 import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { ChatMessage } from "../types";
-import { getMessageType } from "./chatMessageMetadata";
 import { extractAgentJobId } from "./chatMessagePresentation";
 import { sitePreviewFromMessage } from "./sitePreviewRequest";
+import { threadMessagesOf } from "./chatLaterChanges";
 
 /**
  * The chat's site: a preview card in any of its turns. Files a turn changes
@@ -137,18 +137,6 @@ export function ChatSiteSettledProvider({ historyReady, chatKey, children }: {
 export function pageFolderOf(workspacePath: string): string | null {
   const [top, name, ...inside] = workspacePath.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").split("/");
   return top === "sites" && name && inside.length > 0 ? name : null;
-}
-
-function threadMessagesOf(message: ChatMessage): readonly ChatMessage[] {
-  if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") {
-    return [];
-  }
-  const metadata = message.metadata;
-  const threadMessages =
-    metadata && typeof metadata === "object" && !Array.isArray(metadata)
-      ? (metadata as Record<string, unknown>).threadMessages
-      : null;
-  return Array.isArray(threadMessages) ? (threadMessages as ChatMessage[]) : [];
 }
 
 /** The chat's site, from its rows and the turns inside them; null when no row carries a site's preview card. */

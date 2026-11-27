@@ -1,5 +1,5 @@
 import { instafyBuildInfo } from "../../config/buildInfo";
-import { hasWindow } from "./shared";
+import { readStorageValue, writeStorageValue } from "../../utils/trimmedLocalStorage";
 
 const FALLBACK_DEVICE_ID_STORAGE_KEY = "instafy.ota.deviceId";
 const CURRENT_BUNDLE_VERSION_STORAGE_KEY = "instafy.ota.current.bundleVersion";
@@ -73,33 +73,6 @@ function emptyPendingState(): NativeOtaPendingState {
     bundle_version: null,
     git_sha: null,
   };
-}
-
-function readStorageValue(key: string): string | null {
-  if (!hasWindow()) {
-    return null;
-  }
-  try {
-    const value = window.localStorage.getItem(key)?.trim() ?? "";
-    return value || null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStorageValue(key: string, value: string | null) {
-  if (!hasWindow()) {
-    return;
-  }
-  try {
-    if (value && value.trim()) {
-      window.localStorage.setItem(key, value.trim());
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // ignore storage failures
-  }
 }
 
 export function getOrCreateFallbackNativeOtaDeviceId(): string | null {

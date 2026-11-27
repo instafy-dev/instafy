@@ -6,6 +6,7 @@ import {
   type LocalProviderSummary,
 } from "../capabilities/localProviderHostClient";
 import { supportsExtensionRemoteDeviceUi } from "./extensionFamilyUiRegistry";
+import { useFreshnessClock } from "./useFreshnessClock";
 
 function formatDeviceListSummary(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -224,22 +225,6 @@ function formatHostHealthSummary(
     tone: "muted" as const,
     text: "Checking extension status…",
   };
-}
-
-function useFreshnessClock() {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 30_000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  return nowMs;
 }
 
 export function HostExtensionHealthSummary({

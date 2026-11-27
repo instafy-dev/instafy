@@ -13,6 +13,7 @@ import {
 } from "../runtimeSizePreference";
 import { RuntimeOptionMeta } from "./RuntimeOptionMeta";
 import {
+  formatCpuLimitCores,
   formatCpuPct,
   formatUsagePair,
   resolveTunnelHostname,
@@ -40,17 +41,6 @@ function formatRuntimeTimestamp(value?: string | null): string | null {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function formatCpuLimitCores(value: number | null | undefined): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const rounded = Math.round(value * 10) / 10;
-  if (Number.isInteger(rounded)) {
-    return `${rounded} cores`;
-  }
-  return `${rounded.toFixed(1)} cores`;
 }
 
 function formatRuntimeResources(option: RuntimeMenuOption): {

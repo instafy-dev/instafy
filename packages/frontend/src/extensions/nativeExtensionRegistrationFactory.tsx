@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import type { BuiltInProviderFamilyDefinition } from "@instafy/provider-contract/builtins";
 import { Text } from "../components/Text";
 import type { ProjectProviderSelectedDevice } from "../capabilities/projectProviderAccess";
@@ -11,6 +10,7 @@ import type {
   NativeExtensionSetupPanelProps,
   NativeExtensionSummary,
 } from "./nativeExtensionTypes";
+import { useFreshnessClock } from "./useFreshnessClock";
 
 type NativeExtensionRegistrationFactoryInput = {
   family: BuiltInProviderFamilyDefinition;
@@ -181,22 +181,6 @@ function formatHealthFreshnessLabel(checkedAt: string | null | undefined, nowMs:
     return "Checked 1 hour ago.";
   }
   return `Checked ${diffHours} hours ago.`;
-}
-
-function useFreshnessClock() {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 30_000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  return nowMs;
 }
 
 export function ExtensionHealthSummaryBlock({

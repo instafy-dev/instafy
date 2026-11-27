@@ -167,7 +167,7 @@ function createEntryFromWorkspaceFile(file: CodeFile): ControllerWorkspaceEntry 
   };
 }
 
-function findEntryByPath(
+export function findEntryByPath(
   map: DirectoryEntries,
   path: string,
   getParentPath: (path: string) => string | null,
