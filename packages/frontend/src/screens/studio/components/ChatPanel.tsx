@@ -1333,7 +1333,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const updateWorkspace = useCodeUpdater();
   const { mode: filesVersioningMode, originId: filesVersioningOriginId } = useActiveWorkspaceVersioning();
   const [imageLightbox, setImageLightbox] = useState<ImageLightboxState | null>(null);
-  const [sendingAttachment, setSendingAttachment] = useState(false);
+  const [attachmentOperationPending, setSendingAttachment] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2145,6 +2145,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handleComposerDrop,
     handleComposerPaste,
     handleImageInputChange,
+    hasSendingAttachments,
     imageAttachments,
     imageInputRef,
     markImageAttachmentsSending,
@@ -2158,6 +2159,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     unavailableReason: chatAttachmentsUnavailableReason,
   });
+  // A panel round trip remounts ChatPanel while the original upload can still
+  // finish. Its retained files must keep every send path disabled until then.
+  const sendingAttachment = attachmentOperationPending || hasSendingAttachments;
   // Send page to Octo: a press in either browser reads its page once and
   // stages it here, like a paste. Only people who can add attachments see it.
   const { send: sendPageToOcto, pendingViewer: sendPagePendingViewer } = useSendPageToOcto({

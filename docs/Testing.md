@@ -74,6 +74,13 @@ Review these connected stories, including actions after scrolling rather than sc
 | Recover browser controls | Open and close the mobile keyboard utility, type, switch Shared/Personal, and exercise error/retry pending/completed states. Check focus and controls after resize. | [Browser keyboard/status fixture](../packages/frontend/tests/fixtures/browser-keyboard-status/README.md); remote page input and streaming need a live transport. |
 | Find a visited website | Filter recent sites, navigate by keyboard, clear history, cancel an address draft, and correct an invalid address. Check focus after Tab/Shift+Tab, rotation, control loss and enlarged text. | [Browser address fixture](../packages/frontend/tests/fixtures/browser-address-review/README.md) uses production controls and local history with inert navigation. |
 
+Staged chat attachments stay in account-scoped session memory when a Studio panel replaces
+the composer. Test Home/settings/Files round trips as well as Chat/Browser switching: those
+panels unmount the composer. Images and sent-page files must return to their originating chat,
+and completing an upload while away must remove only the files that send carried. Signing out
+releases the previews. Unsent files are not persisted across a page reload; the separate text
+draft restoration and server queue persistence checks do not imply file persistence.
+
 For the signed-in local app, follow [development setup](../DEV_SETUP.md) and mint a throwaway
 local user with `node scripts/mint-test-user.mjs --json`. Use its returned storage key rather
 than assuming a project reference. Keep the session data out of logs, screenshots and tracked

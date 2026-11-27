@@ -53,5 +53,9 @@ diagnostic counters in the screenshots. Retry completion is controlled by
 `finishRetry()` so busy state can be inspected reliably.
 
 Reducing the browser viewport to 420px simulates available space when a keyboard
-is present. It does **not** validate physical Android/iOS keyboard appearance,
+is present. Personal Browser recovery also checks 320/390px widths at 100%,
+150% and 200% root-font size: after scrolling, the entire Retry control must fit
+inside the status card and retain focus while retrying. A clickable center alone
+does not prove that its label or touch target is unclipped.
+This does **not** validate physical Android/iOS keyboard appearance,
 safe-area behavior or native IME integration; those need a real device pass.
