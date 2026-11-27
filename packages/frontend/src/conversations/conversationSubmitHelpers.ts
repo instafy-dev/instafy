@@ -98,10 +98,6 @@ export function isLearnPrompt(prompt: string): boolean {
   return lowered.startsWith("/learn");
 }
 
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-}
-
 /** The longest attachment `fileName` a message records. */
 export const CHAT_UPLOAD_FILE_NAME_MAX_LENGTH = 80;
 

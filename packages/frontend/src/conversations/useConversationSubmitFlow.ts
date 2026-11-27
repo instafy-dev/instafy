@@ -2,7 +2,6 @@ import { useCallback, useMemo, useRef } from "react";
 import {
   controllerClient,
 } from "../sdk/instafy";
-import { runtimeEntryIsDispatchable, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { generateUUID } from "../utils/uuid";
 import { LOCAL_CAPABILITY_DEFINITIONS } from "../capabilities/localCapabilityCatalog";
 import { resolveSingleLocalCapabilityHandleForPrompt } from "../capabilities/localCapabilityRuntime";
@@ -12,11 +11,6 @@ import {
   resolvePromptAgentSelection,
   startsWithAssistantMention,
 } from "./assistantMentions";
-import {
-  buildPromptAdvisoryScopeClaims,
-  decideTopLevelAgentCollaborationModes,
-  GLOBAL_AGENT_COLLABORATION_SKILL_PATH,
-} from "./agentCollaborationPolicy";
 import { runLocalCapabilityConversationFlow } from "./localCapabilityConversationFlow";
 import { parseTerminalCommandRequest } from "./terminalCommand";
 import { createConversationTaskQueue } from "./conversationTaskQueue";
@@ -40,17 +34,11 @@ import {
   resolveLocalCapabilityAssistantHandle,
 } from "../assistants/localBuiltInAssistantCatalog";
 import {
-  getWebdevRuntimeEnv,
-  WEBDEV_RUNTIME_DISPLAY_NAME,
-  WEBDEV_RUNTIME_FLAVOR,
-} from "../runtime/utils/webdevRuntime";
-import {
   buildConversationClientMetadata,
   createConversationMessage,
   isLearnPrompt,
   patchConversationMessageMetadata,
   resolveSubmittedImageFiles,
-  sleep,
   uploadConversationAttachments,
 } from "./conversationSubmitHelpers";
 import {
@@ -91,11 +79,11 @@ const {
   resolveParticipation: resolveControllerConversationParticipation,
   updateMetadata: updateControllerConversationMetadata,
 } = controllerClient.conversations;
-const { ensure: ensureRuntime, fetchStatus: fetchRuntimeStatus } = controllerClient.runtimes;
 
 type RuntimeDispatchOverride = SubmitConversationRuntimeOverride | null;
 
-type WebdevRuntimeNeed = "screenshot" | "node";
+const GLOBAL_AGENT_COLLABORATION_SKILL_PATH =
+  ".agents/skills/instafy-agent-collaboration/SKILL.md";
 
 function isDedicatedAgentThreadHandle(handle: string): boolean {
   const resolved = resolveBuiltInAssistantHandle(handle);
@@ -119,10 +107,6 @@ export function buildAssistantCapabilityContextForTargets(
     resolvedHandles,
     LOCAL_CAPABILITY_DEFINITIONS,
   );
-}
-
-function detectWebdevRuntimeNeed(): WebdevRuntimeNeed | null {
-  return null;
 }
 
 // The removed "Auto-save assistant file changes" setting stored its choice
@@ -167,7 +151,6 @@ export function useConversationSubmitFlow({
 
   const {
     resolveProjectId,
-    resolveRuntimeTarget,
     ensureConversation,
     handleCreateConversation,
     handleInputChange,
@@ -741,29 +724,10 @@ export function useConversationSubmitFlow({
       } else {
         stickyMentionedAgentByConversationRef.current.delete(displayConversationId);
       }
-      const topLevelAgentCollaborationModes =
-        explicitTopLevelAgentHandles.length > 0
-          ? decideTopLevelAgentCollaborationModes({
-              prompt: trimmed,
-              explicitHandles: explicitTopLevelAgentHandles,
-              hasAttachments: attachmentFiles.length > 0,
-              hasTerminalIntent: Boolean(terminalRequest),
-            })
-          : {};
-      const threadedExplicitAgentHandles =
-        explicitTopLevelAgentHandles.filter(
-          (handle) => topLevelAgentCollaborationModes[handle] === "thread",
-        );
-      const inlineExplicitAgentHandles =
-        explicitTopLevelAgentHandles.filter(
-          (handle) => topLevelAgentCollaborationModes[handle] === "inline",
-        );
+      // A message never starts a thread of an agent's own by its words:
+      // skills and the model ask for one with a structured action.
       const topLevelAgentCollaborationMode =
-        explicitTopLevelAgentHandles.length > 0
-          ? threadedExplicitAgentHandles.length > 0
-            ? "thread"
-            : "inline"
-          : null;
+        explicitTopLevelAgentHandles.length > 0 ? "inline" : null;
       if (
         effectiveAgentSelection.activeHandles.length > 0 ||
         effectiveAgentSelection.mentionedHandles.length > 0
@@ -1000,328 +964,8 @@ export function useConversationSubmitFlow({
         }
       }
 
-      if (threadedExplicitAgentHandles.length > 0) {
-        const parentControllerId = await ensureControllerConversationId(
-          projectId,
-          sourceConversation,
-        );
-        if (!parentControllerId) {
-          showStatus("Controller unavailable. Try again shortly.", "error", 4000);
-          return;
-        }
-        displayConversationControllerId = parentControllerId;
-        const advisoryScopeClaims = buildPromptAdvisoryScopeClaims(trimmed);
-
-        for (const handle of threadedExplicitAgentHandles) {
-          const existingThread =
-            conversations.find(
-              (entry) =>
-                entry.parentConversationId === parentControllerId &&
-                entry.threadKind === "agent" &&
-                (entry.ownerAgent?.handle === handle ||
-                  entry.extraAgentHandles.includes(handle)),
-            ) ?? null;
-          const threadConversation =
-            existingThread ??
-            createConversation({
-              title: `@${handle}`,
-              visibility: sourceConversation.visibility,
-              parentConversationId: parentControllerId,
-              threadKind: "agent",
-              ownerAgent: { id: null, handle },
-              originMessageId: userMessage.id,
-              assistantEnabled: false,
-              extraAgentHandles: [handle],
-              select: false,
-            });
-          const threadPromptMetadata = {
-            ...(promptMetadata ?? {}),
-            agentSelection: {
-              active: [handle],
-              mentions: [handle],
-            },
-            agentCollaboration: {
-              mode: "thread",
-              policySkillPath: GLOBAL_AGENT_COLLABORATION_SKILL_PATH,
-              linkedThreadLocalId: threadConversation.localId,
-              parentConversationLocalId: sourceConversation.localId,
-            },
-            linkedThreadId: threadConversation.localId,
-            ...(advisoryScopeClaims.length > 0
-              ? { advisoryScopeClaims }
-              : {}),
-            agentThread: {
-              ownerHandle: handle,
-              parentConversationId: parentControllerId,
-              sourceConversationId: sourceConversation.controllerId ?? parentControllerId,
-            },
-          };
-          await dispatch(
-            threadConversation.localId,
-            dispatchTrimmed,
-            threadPromptMetadata,
-            options?.runtimeOverride,
-            threadConversation,
-            terminalRequest ? "terminal_command" : undefined,
-            options?.expectedLaneIdle ?? false,
-          );
-        }
-        if (inlineExplicitAgentHandles.length === 0) {
-          return;
-        }
-        promptMetadata = {
-          ...(promptMetadata ?? {}),
-          agentSelection: {
-            active: inlineExplicitAgentHandles,
-            mentions: inlineExplicitAgentHandles,
-          },
-          agentCollaboration: {
-            mode: "inline",
-            policySkillPath: GLOBAL_AGENT_COLLABORATION_SKILL_PATH,
-          },
-        };
-      }
-
       if (shouldRunAssistant) {
-        let runtimeOverride: RuntimeDispatchOverride | undefined = options?.runtimeOverride ?? undefined;
-
-        const hasExplicitPersonalBrowserRuntime =
-          promptMetadata?.browserTransport === "desktop-personal" &&
-          Boolean(runtimeOverride?.runtimeId);
-        const webdevNeed = terminalRequest || hasExplicitPersonalBrowserRuntime
-          ? null
-          : detectWebdevRuntimeNeed();
-        if (webdevNeed) {
-          const runtimeSnapshot = await fetchRuntimeStatus({
-            projectId,
-            accessToken: null,
-            quietOnAbort: true,
-          }).catch(() => null);
-          const statuses = Array.isArray(runtimeSnapshot?.runtimes)
-            ? runtimeSnapshot.runtimes
-            : runtimeStatuses ?? [];
-          const { runtimeId, runtimeDisplayName } = resolveRuntimeTarget(targetConversation);
-          const existingEntry =
-            runtimeId && statuses.length > 0
-              ? statuses.find((entry) => entry.runtimeId === runtimeId) ?? null
-              : null;
-          const alreadyWebdevNameMatch =
-            (runtimeDisplayName ?? "").toLowerCase().includes("webdev") ||
-            (runtimeDisplayName ?? "").toLowerCase().includes("playwright") ||
-            (existingEntry?.displayName ?? "").toLowerCase().includes("webdev") ||
-            (existingEntry?.displayName ?? "").toLowerCase().includes("playwright");
-          const alreadyWebdev =
-            alreadyWebdevNameMatch &&
-            runtimeEntryIsDispatchable(existingEntry);
-
-          if (alreadyWebdev && runtimeId) {
-            runtimeOverride = {
-              runtimeId,
-              runtimeDisplayName:
-                existingEntry?.displayName ?? runtimeDisplayName ?? WEBDEV_RUNTIME_DISPLAY_NAME,
-              preferRuntime: true,
-            };
-          } else {
-            const existingWebdevReady = statuses.find((entry) => {
-              if (!runtimeEntryIsDispatchable(entry)) {
-                return false;
-              }
-              const name = (entry.displayName ?? "").toLowerCase();
-              return name.includes("webdev") || name.includes("playwright");
-            });
-
-            const actionLabel =
-              webdevNeed === "screenshot"
-                ? "take the screenshot"
-                : "run Node tooling";
-
-            const switchMessage = {
-              ...createConversationMessage(
-                "assistant",
-                `Switching to the Webdev runtime (Playwright) so I can ${actionLabel}…`,
-                null,
-                {
-                  messageType: "runtime_switch",
-                  details: {
-                    status: "in_progress",
-                    target: "webdev",
-                    reason: webdevNeed,
-                  },
-                  kind: "runtime-switch",
-                  target: "webdev",
-                  reason: webdevNeed,
-                },
-              ),
-              messageType: "runtime_switch",
-            };
-            appendMessages(targetConversationId, [switchMessage]);
-            showStatus("Switching to Webdev runtime…", "info", 4000);
-
-            if (existingWebdevReady?.runtimeId) {
-              runtimeOverride = {
-                runtimeId: existingWebdevReady.runtimeId,
-                runtimeDisplayName: existingWebdevReady.displayName ?? WEBDEV_RUNTIME_DISPLAY_NAME,
-                preferRuntime: true,
-              };
-              updateMessage(targetConversationId, switchMessage.id, (previous) => {
-                const previousMetadata =
-                  previous.metadata && typeof previous.metadata === "object"
-                    ? (previous.metadata as Record<string, unknown>)
-                    : {};
-                const previousDetails =
-                  previousMetadata.details && typeof previousMetadata.details === "object"
-                    ? (previousMetadata.details as Record<string, unknown>)
-                    : {};
-                return {
-                  ...previous,
-                  content:
-                    "Switching to the Webdev runtime (Playwright). It’s already ready; running your request now…",
-                  metadata: {
-                    ...previousMetadata,
-                    details: {
-                      ...previousDetails,
-                      status: "completed",
-                    },
-                    runtimePreference: {
-                      runtimeId: existingWebdevReady.runtimeId,
-                      source: "conversation",
-                      displayName: existingWebdevReady.displayName ?? WEBDEV_RUNTIME_DISPLAY_NAME,
-                    },
-                  },
-                };
-              });
-            } else {
-              const autoCloudRuntime =
-                statuses.find((entry) => runtimeEntryIsReady(entry) && entry.isLocal === false) ?? null;
-              const autoRuntime = autoCloudRuntime ?? statuses.find((entry) => runtimeEntryIsReady(entry)) ?? null;
-              const provider = existingEntry?.provider ?? autoRuntime?.provider ?? "instafy-cloud";
-              const requestedRuntimeId = generateUUID();
-
-              updateMessage(targetConversationId, switchMessage.id, (previous) => {
-                const previousMetadata =
-                  previous.metadata && typeof previous.metadata === "object"
-                    ? (previous.metadata as Record<string, unknown>)
-                    : {};
-                const previousDetails =
-                  previousMetadata.details && typeof previousMetadata.details === "object"
-                    ? (previousMetadata.details as Record<string, unknown>)
-                    : {};
-                return {
-                  ...previous,
-                  content:
-                    "Switching to the Webdev runtime (Playwright). Starting it now; I’ll run your request as soon as it’s ready…",
-                  metadata: {
-                    ...previousMetadata,
-                    details: {
-                      ...previousDetails,
-                      status: "in_progress",
-                    },
-                    runtimePreference: {
-                      runtimeId: requestedRuntimeId,
-                      source: "conversation",
-                      displayName: WEBDEV_RUNTIME_DISPLAY_NAME,
-                    },
-                  },
-                };
-              });
-
-              try {
-                const webdevRuntimeEnv = getWebdevRuntimeEnv();
-                const ensured = await ensureRuntime({
-                  projectId,
-                  provider,
-                  displayName: WEBDEV_RUNTIME_DISPLAY_NAME,
-                  runtimeId: requestedRuntimeId,
-                  metadata: {
-                    runtimeFlavor: WEBDEV_RUNTIME_FLAVOR,
-                    env: {
-                      ...webdevRuntimeEnv,
-                      INSTAFY_ENABLE_BROWSER_SESSION: "1",
-                    },
-                  },
-                });
-                const ensuredRuntimeId = ensured?.runtimeId?.trim() ?? "";
-                if (!ensuredRuntimeId) {
-                  throw new Error("Unable to provision the Webdev runtime.");
-                }
-
-                let ready = false;
-                const deadline = Date.now() + 8 * 60_000;
-                while (Date.now() < deadline) {
-                  const status = await fetchRuntimeStatus({
-                    projectId,
-                    accessToken: null,
-                    quietOnAbort: true,
-                  }).catch(() => null);
-                  const entry =
-                    status?.runtimes?.find((candidate) => candidate.runtimeId === ensuredRuntimeId) ?? null;
-                  if (entry && runtimeEntryIsDispatchable(entry)) {
-                    ready = true;
-                    updateMessage(targetConversationId, switchMessage.id, (previous) => {
-                      const previousMetadata =
-                        previous.metadata && typeof previous.metadata === "object"
-                          ? (previous.metadata as Record<string, unknown>)
-                          : {};
-                      const previousDetails =
-                        previousMetadata.details && typeof previousMetadata.details === "object"
-                          ? (previousMetadata.details as Record<string, unknown>)
-                          : {};
-                      return {
-                        ...previous,
-                        content:
-                          "Switching to the Webdev runtime (Playwright). It’s ready; running your request now…",
-                        metadata: {
-                          ...previousMetadata,
-                          details: {
-                            ...previousDetails,
-                            status: "completed",
-                          },
-                        },
-                      };
-                    });
-                    break;
-                  }
-                  await sleep(2000);
-                }
-                if (!ready) {
-                  throw new Error("Webdev runtime is taking longer than expected to start.");
-                }
-
-                runtimeOverride = {
-                  runtimeId: ensuredRuntimeId,
-                  runtimeDisplayName: WEBDEV_RUNTIME_DISPLAY_NAME,
-                  preferRuntime: true,
-                };
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                updateMessage(targetConversationId, switchMessage.id, (previous) => {
-                  const previousMetadata =
-                    previous.metadata && typeof previous.metadata === "object"
-                      ? (previous.metadata as Record<string, unknown>)
-                      : {};
-                  const previousDetails =
-                    previousMetadata.details && typeof previousMetadata.details === "object"
-                      ? (previousMetadata.details as Record<string, unknown>)
-                      : {};
-                  return {
-                    ...previous,
-                    content: `Switching to the Webdev runtime (Playwright) failed (${message}).`,
-                    metadata: {
-                      ...previousMetadata,
-                      details: {
-                        ...previousDetails,
-                        status: "failed",
-                      },
-                      runtimePreference: null,
-                    },
-                  };
-                });
-                showStatus(`Unable to start Webdev runtime: ${message}`, "error", 5000);
-                return;
-              }
-            }
-          }
-        }
+        const runtimeOverride: RuntimeDispatchOverride | undefined = options?.runtimeOverride ?? undefined;
 
         if (displayConversationId !== targetConversationId && displayConversationControllerId) {
           await recordControllerConversationMessage({
@@ -1373,8 +1017,6 @@ export function useConversationSubmitFlow({
       recordMessageToController,
       removeUnsentMessage,
       resolveProjectId,
-      resolveRuntimeTarget,
-      runtimeStatuses,
       sendPromptToController,
       setConversationGoal,
       showStatus,

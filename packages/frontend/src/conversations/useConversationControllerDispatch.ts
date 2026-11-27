@@ -624,7 +624,6 @@ export function useConversationControllerDispatch({
 
   return {
     resolveProjectId,
-    resolveRuntimeTarget,
     ensureConversation,
     handleCreateConversation,
     handleInputChange,
