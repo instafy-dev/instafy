@@ -5,6 +5,8 @@ import {
   readLocalSupabaseStatusEnv,
   resolveLocalSupabaseDbUrl,
 } from "./lib/localSupabaseEnv.mjs";
+import { LOCAL_SUPABASE_PROJECT_DIR, localSupabasePorts } from "./lib/localSupabasePorts.mjs";
+import { readSupabaseProjectId } from "./lib/supabaseEmailTemplateMounts.mjs";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: "inherit", ...options });
@@ -35,13 +37,32 @@ function resolveDbUrl() {
   return dbUrl;
 }
 
+// Without psql the SQL runs inside the database container. The Supabase CLI names it
+// supabase_db_<project_id>, and it is this checkout's database only when dbUrl uses the config's
+// [db] port, so another stack's database is never written through it.
+function localDbContainer(dbUrl) {
+  const explicit = (process.env.SUPABASE_DB_CONTAINER || "").trim();
+  if (explicit) return explicit;
+  const { dbPort } = localSupabasePorts();
+  let urlPort = "";
+  try {
+    urlPort = new URL(dbUrl).port || "5432";
+  } catch {}
+  if (urlPort !== String(dbPort)) {
+    throw new Error(
+      `psql is not installed, and the database URL is not this checkout's Supabase database (port ${dbPort} in supabase/supabase/config.toml). Install psql or set SUPABASE_DB_CONTAINER.`,
+    );
+  }
+  return `supabase_db_${readSupabaseProjectId(LOCAL_SUPABASE_PROJECT_DIR)}`;
+}
+
 function runSql(dbUrl, sql) {
   if (commandExists("psql")) {
     run("psql", ["-d", dbUrl, "-v", "ON_ERROR_STOP=1", "-c", sql]);
     return;
   }
 
-  const container = (process.env.SUPABASE_DB_CONTAINER || "supabase_db_supabase").trim();
+  const container = localDbContainer(dbUrl);
   run("docker", [
     "exec",
     "-i",

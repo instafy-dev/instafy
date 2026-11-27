@@ -6,6 +6,10 @@ import { primeProcessEnvFromLocalSupabase } from "./lib/localSupabaseEnv.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
+// scripts/supabase-stack.mjs exits with this code when it cannot refresh the Supabase CLI's copy of
+// the migrations. The stack is fine then, and recycling it would only stop it: `supabase:up`
+// refuses for the same reason.
+const MIGRATIONS_COPY_EXIT_CODE = 3;
 
 function normalizeArgs(rawArgs) {
   if (rawArgs.length > 0 && rawArgs[0] === "--") {
@@ -21,7 +25,7 @@ function printHelp() {
       "  node scripts/test-e2e-supabase.mjs [-- <playwright args...>]",
       "",
       "Behavior:",
-      "  - resets the local Supabase database",
+      "  - rebuilds the local Supabase database from supabase/migrations (pnpm supabase:reset)",
       "  - primes local Supabase env for frontend Playwright runs",
       "  - delegates to node scripts/test-e2e.mjs run -- <args>",
     ].join("\n"),
@@ -47,17 +51,14 @@ async function main() {
     return;
   }
 
-  const resetArgs = [
-    "exec",
-    "supabase",
-    "--workdir",
-    "supabase",
-    "db",
-    "reset",
-    "--local",
-    "--yes",
-  ];
+  // Not a raw `supabase db reset`: that rebuilds from whatever copy of the migrations the CLI's
+  // folder holds, which may be stale; `pnpm supabase:reset` refreshes it first.
+  const resetArgs = ["supabase:reset"];
   let resetCode = await runCommand("pnpm", resetArgs);
+  if (resetCode === MIGRATIONS_COPY_EXIT_CODE) {
+    console.error("[test:e2e:supabase] Left the local Supabase stack as it is.");
+    process.exit(resetCode);
+  }
   if (resetCode !== 0) {
     console.warn("[test:e2e:supabase] Local Supabase reset failed; recycling the local stack and retrying once.");
     await runCommand("pnpm", ["supabase:down"]);

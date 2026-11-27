@@ -247,6 +247,7 @@ Instafy Studio now always targets a real Supabase instance (hosted or local). Co
    ```bash
    pnpm stack:up               # Supabase + controller (+ proxy)
    ```
+   A first `pnpm stack:up` builds the controller and the provider service with Cargo before it starts them, so it can take several minutes; set `RUNTIME_CONTROLLER_BOOT_ATTEMPTS` to give a slow machine's controller longer to start. To run a second stack beside another, see [A second stack beside another](docs/Local-Dev.md#a-second-stack-beside-another).
    
    **Testing the Studio BYOC onboarding flow locally**
    
@@ -412,6 +413,8 @@ template is not exported and those variables are not read by the controller-back
 | `Credits panel disabled` | Ensure `VITE_CONTROLLER_URL` is set and the controller is running; sign in so the browser can fetch a Supabase session token for `/credits/status`. |
 | Dev server port conflict | Pass `--host`/`--port` to `vite` or set `PORT` env variable. |
 | Missing packages | Re-run `pnpm install`; the repo relies on ESM-compatible versions of dependencies. |
+| A new migration is missing locally, or `Remote migration versions not found in local migrations directory` | The Supabase CLI reads migrations only from its ignored copy in `supabase/supabase/migrations`, which `pnpm supabase:up`, `pnpm supabase:migrate`, `pnpm supabase:reset` and `pnpm stack:up` refresh from `supabase/migrations` first; a raw `supabase start` or `supabase db reset` does not. If it still fails, the database has migrations this checkout lacks, for example from another worktree: update this checkout or, if no other checkout needs that database's data, rebuild it with `pnpm supabase:reset`. |
+| `Controller failed to start on port … within timeout` | The controller is built before this wait, which times only its startup. Read the log the error names, and raise `RUNTIME_CONTROLLER_BOOT_ATTEMPTS` (120 one-second attempts by default) for a slow machine. |
 
 ---
 
@@ -492,6 +495,6 @@ pnpm test:e2e:supabase
 
 If a run gets stuck (or you launched it from an IDE and lost the terminal), you can check/kill it via `pnpm test:e2e:status` and `pnpm test:e2e:stop` (the runner writes a pidfile to `tmp/test-e2e.pid`).
 
-`pnpm test:e2e:supabase` resets the local Supabase database, primes the local Supabase URL + anon key + service-role key into the Playwright build/test env, and then delegates to the same root `pnpm test:e2e` runner so schema regressions surface against a fresh local stack.
+`pnpm test:e2e:supabase` rebuilds the local Supabase database from `supabase/migrations` (`pnpm supabase:reset`, which deletes its data), primes the local Supabase URL + anon key + service-role key into the Playwright build/test env, and then delegates to the same root `pnpm test:e2e` runner so schema regressions surface against a fresh local stack.
 
 If the runtime stack is already up (check with `pnpm runtime:status` or `pnpm stack:check`), Playwright now reuses it and skips teardown automatically, so you can iterate quickly without extra flags.
