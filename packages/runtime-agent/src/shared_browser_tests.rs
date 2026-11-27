@@ -14781,6 +14781,14 @@ fn a_covered_click_is_refused_at_once_in_words() {
             "",
             "{mode} was clicked"
         );
+        // Nothing was clicked, so the action feed lists no click: it would draw
+        // a pointer and a ripple on the control for a click that never came
+        // (a dogfood run, Nov 22: three refused clicks each looked made).
+        assert!(
+            !fixture.action_log().contains("\"type\":\"click\""),
+            "{mode} listed a click: {}",
+            fixture.action_log()
+        );
     }
     let fixture = EmbeddedControllerFixture::new();
     let snapshot = fixture.routine_snapshot("click-cover-goes");
@@ -14789,6 +14797,16 @@ fn a_covered_click_is_refused_at_once_in_words() {
     assert_eq!(
         std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
         "0\n"
+    );
+    // The click that landed once the cover went is listed, once.
+    assert_eq!(
+        fixture
+            .action_log()
+            .matches(r#""type":"click","label":"Click \"Show details\"""#)
+            .count(),
+        1,
+        "{}",
+        fixture.action_log()
     );
 }
 
