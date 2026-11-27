@@ -133,6 +133,8 @@ mod tests_idle_lease_poll;
 #[cfg(test)]
 mod tests_job_trigger;
 #[cfg(test)]
+mod tests_lock_waits;
+#[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_ai_web_search;
