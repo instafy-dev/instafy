@@ -1,4 +1,4 @@
-import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lexical";
+import type { EditorConfig, NodeKey, SerializedTextNode } from "lexical";
 import { TextNode } from "lexical";
 import { MENTION_CLASSES } from "../../../../components/mentionStyles";
 
@@ -85,8 +85,4 @@ export class AgentMentionNode extends TextNode {
 
 export function $createAgentMentionNode(params: { handle: string; displayName: string }): AgentMentionNode {
   return new AgentMentionNode(params.handle, params.displayName);
-}
-
-export function $isAgentMentionNode(node: LexicalNode | null | undefined): node is AgentMentionNode {
-  return node instanceof AgentMentionNode;
 }

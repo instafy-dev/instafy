@@ -11,7 +11,6 @@ import { useOctoScrollMotionSnapshot } from "./OctoScrollMotionScope";
 
 export {
   OctoScrollMotionScope,
-  useOctoScrollMotionSnapshot,
 } from "./OctoScrollMotionScope";
 
 export type OctoMarkMotion = "idle" | "thinking";

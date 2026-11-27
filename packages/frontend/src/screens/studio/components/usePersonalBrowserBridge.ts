@@ -11,12 +11,8 @@ import {
 } from "./personalBrowserApprovalPolicy";
 
 export {
-  PERSONAL_BROWSER_OWNER_TIER_POLICY_VERSION,
   personalBrowserKnownHosts,
-  personalBrowserOwnerTier,
-  personalBrowserRoutineAvailable,
   resolvePersonalBrowserApprovalMode,
-  type PersonalBrowserApprovalMode,
 } from "./personalBrowserApprovalPolicy";
 
 export type BrowserTransport = "personal" | "shared";

@@ -1,11 +1,7 @@
 export type {
-  ExtensionProviderHostSurfaceId,
   ProviderHostSurfaceEntry,
   ProviderHostSurfaceResolvedPolicy,
   ProviderHostSurfaceSandboxDescriptor,
-  ProviderHostSurfaceSelectionId,
-  ProviderHostSurfaceSelectionOptions,
-  SettingsProviderHostSurfaceId,
 } from "./providerHostSurfaceTypes";
 
 export {

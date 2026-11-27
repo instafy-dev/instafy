@@ -54,7 +54,6 @@ export const DARK_RAIL_BLUR_BG_CLASS = "dark:bg-[var(--color-studio-dark-rail-bl
 export const DARK_RAIL_SURFACE_CLASS = `${DARK_RAIL_BG_CLASS} ${DARK_DIVIDER_BORDER_CLASS}`;
 
 export const DARK_PANEL_BG_CLASS = "dark:bg-[var(--color-studio-dark-panel)]";
-export const DARK_PANEL_STRONG_BG_CLASS = "dark:bg-[var(--color-studio-dark-panel-strong)]";
 export const DARK_PANEL_SOFT_BG_CLASS = "dark:bg-[var(--color-studio-dark-panel-soft)]";
 export const DARK_PANEL_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-panel-border)]";
 export const DARK_PANEL_SURFACE_CLASS = `${DARK_PANEL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`;
@@ -79,7 +78,6 @@ export const DARK_RAISED_CONTROL_CLASS =
 
 export const DARK_ACTIVE_BG_CLASS = "dark:bg-[var(--color-studio-dark-active)]";
 export const DARK_ACTIVE_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-active-border)]";
-export const DARK_ACTIVE_RING_CLASS = "dark:ring-[color:var(--color-studio-dark-active-border)]";
 export const DARK_ACTIVE_SURFACE_CLASS = `${DARK_ACTIVE_BG_CLASS} ${DARK_ACTIVE_BORDER_CLASS}`;
 
 export const DARK_RAIL_HOVER_CLASS =
@@ -91,5 +89,3 @@ export const DARK_CONTROL_HOVER_CLASS =
 export const DARK_PANEL_SHADOW_CLASS = "dark:[box-shadow:var(--shadow-studio-dark-panel)]";
 
 export const DARK_FLOATING_SHADOW_CLASS = "dark:[box-shadow:var(--shadow-studio-dark-floating)]";
-
-export const DARK_INSET_HIGHLIGHT_CLASS = "dark:[box-shadow:var(--shadow-studio-dark-inset)]";

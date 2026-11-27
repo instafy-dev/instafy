@@ -20,8 +20,6 @@ import { useComposerAccessInvites } from "./useComposerAccessInvites";
 import { useComposerDeviceHandoff } from "./useComposerDeviceHandoff";
 import { useWorkspaceControls } from "../workspaceControls";
 
-export { buildAuthenticatedDeviceHandoffUrl } from "./useComposerDeviceHandoff";
-
 type ComposerInviteModalProps = {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;

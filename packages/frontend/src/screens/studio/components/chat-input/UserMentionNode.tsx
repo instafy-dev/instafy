@@ -1,4 +1,4 @@
-import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lexical";
+import type { EditorConfig, NodeKey, SerializedTextNode } from "lexical";
 import { TextNode } from "lexical";
 import { MENTION_CLASSES } from "../../../../components/mentionStyles";
 
@@ -98,8 +98,4 @@ export function $createUserMentionNode(params: {
   displayName: string;
 }): UserMentionNode {
   return new UserMentionNode(params.userId, params.handle, params.displayName);
-}
-
-export function $isUserMentionNode(node: LexicalNode | null | undefined): node is UserMentionNode {
-  return node instanceof UserMentionNode;
 }

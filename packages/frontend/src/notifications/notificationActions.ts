@@ -44,5 +44,3 @@ export function installNotificationActionListeners(): () => void {
     for (const handle of handles) void handle.remove();
   };
 }
-
-export { processNotificationClickDestination } from "./notificationClickDestination";

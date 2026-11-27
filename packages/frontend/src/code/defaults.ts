@@ -22,5 +22,3 @@ export function createDefaultCodeWorkspace(seedFiles: CodeFile[] = defaultFiles)
     lastAppliedAt: null
   };
 }
-
-export const DEFAULT_CODE_FILES = defaultFiles;

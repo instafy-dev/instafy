@@ -120,12 +120,6 @@ function applySimulatedDeviceToggleAction(
   return next;
 }
 
-export function getSimulatedDevicePowerState(
-  deviceId: SimulatedDeviceId,
-): SimulatedDevicePowerState {
-  return SIMULATED_DEVICE_POWER.get(deviceId) ?? "off";
-}
-
 export function resetSimulatedDevicePowerState() {
   SIMULATED_DEVICE_POWER.clear();
   SIMULATED_DEVICE_POWER.set("desk_lamp", "off");

@@ -1,5 +1,4 @@
 import type {
-  ProviderHostSurfaceContribution,
   ProviderSummary,
   ProviderUiSurfaceAction,
   ProviderUiSurfaceControl,
@@ -175,8 +174,4 @@ export function providerHostSurfaceHasActionBinding(
       typeof binding?.hostBindingId === "string" ? binding.hostBindingId : null,
     ) === normalizedBindingId;
   });
-}
-
-export function getProviderHostSurfaceSections(surface: ProviderHostSurfaceContribution | null | undefined) {
-  return readSurfaceSections(surface?.metadata);
 }

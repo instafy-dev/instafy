@@ -63,10 +63,6 @@ export function setStoredTouchModeOverride(value: TouchModeOverride) {
   window.dispatchEvent(new CustomEvent(TOUCH_MODE_OVERRIDE_EVENT));
 }
 
-export function resolveTouchLikeInput(): boolean {
-  return readTouchModeUrlOverride() ?? readStoredTouchModeOverride() ?? detectTouchLikeInput();
-}
-
 type TouchModeDebugState = {
   effectiveTouchLikeInput: boolean;
   hardwareTouchLikeInput: boolean;
