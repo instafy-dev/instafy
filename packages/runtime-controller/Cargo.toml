@@ -37,7 +37,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 uuid = { version = "1", features = ["serde", "v4", "v5"] }
-jsonwebtoken = "9"
+# Only the aws_lc_rs backend may be on: with rust_crypto as well it still
+# builds, but every sign and verify panics.
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10"
 subtle = "2"

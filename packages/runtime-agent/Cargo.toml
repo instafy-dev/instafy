@@ -52,7 +52,10 @@ codex-apply-patch = { path = "../../codex/codex-rs/apply-patch" }
 # image and desktop builds enable `code-mode-host` and build `-p codex-code-mode-host`.
 codex-code-mode-host = { path = "../../codex/codex-rs/code-mode-host", optional = true }
 origin-http-server = { path = "../origin-http-server" }
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+# Only the aws_lc_rs backend may be on: with rust_crypto as well it still
+# builds, but every sign and verify panics. Codex shares this graph and is
+# still on jsonwebtoken 9; if it moves to 10, it must use aws_lc_rs too.
+jsonwebtoken = { version = "10.4", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sysinfo = "0.30"
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }

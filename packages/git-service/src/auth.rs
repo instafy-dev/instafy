@@ -42,8 +42,12 @@ impl TokenValidator {
         })?;
         let kid = header.kid.as_deref();
         let algorithm = header.alg;
+        // The controller signs these tokens with EdDSA only. Refuse any other
+        // algorithm here, before a key lookup or JWKS refresh, rather than
+        // leaving it to the crypto backend to reject the key's family.
+        require_eddsa(algorithm)?;
 
-        let mut validation = Validation::new(algorithm_for_decode(algorithm));
+        let mut validation = Validation::new(Algorithm::EdDSA);
         validation.validate_exp = true;
         validation.leeway = 5;
         if let Some(aud) = expected_audience {
@@ -187,9 +191,54 @@ pub fn extract_token(headers: &HeaderMap) -> Result<String, ServiceError> {
     ))
 }
 
-fn algorithm_for_decode(header_alg: Algorithm) -> Algorithm {
-    match header_alg {
-        Algorithm::EdDSA => Algorithm::EdDSA,
-        other => other,
+fn require_eddsa(header_alg: Algorithm) -> Result<(), ServiceError> {
+    if header_alg != Algorithm::EdDSA {
+        return Err(ServiceError::unauthorized(
+            "tokens must use the EdDSA signing algorithm",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    /// A token whose header names `alg`. Only the header is read before the
+    /// algorithm check, so the claims and signature never matter.
+    fn token_with_algorithm(alg: &str) -> String {
+        let header =
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"alg":"{alg}","typ":"JWT","kid":"edge"}}"#));
+        let claims = URL_SAFE_NO_PAD.encode(r#"{"sub":"user","exp":4102444800}"#);
+        format!("{header}.{claims}.c2lnbmF0dXJl")
+    }
+
+    #[test]
+    fn token_algorithm_is_pinned_to_eddsa() {
+        assert!(require_eddsa(Algorithm::EdDSA).is_ok());
+        for algorithm in [Algorithm::HS256, Algorithm::RS256, Algorithm::ES256] {
+            assert!(require_eddsa(algorithm).is_err(), "{algorithm:?} accepted");
+        }
+    }
+
+    // Nothing serves the JWKS URL, so a key lookup would fail with a fetch
+    // error instead: the algorithm error shows the token was refused first.
+    #[tokio::test]
+    async fn non_eddsa_tokens_are_refused_before_any_key_lookup() {
+        let validator = TokenValidator::new(
+            reqwest::Client::new(),
+            reqwest::Url::parse("http://127.0.0.1:9/.well-known/jwks.json").expect("JWKS URL"),
+        );
+        for alg in ["HS256", "RS256", "ES256"] {
+            let error = validator
+                .validate(&token_with_algorithm(alg), Some("git"))
+                .await
+                .expect_err("a non-EdDSA token");
+            assert!(
+                matches!(&error, ServiceError::Unauthorized(message) if message.contains("EdDSA")),
+                "{alg}: unexpected error {error:?}"
+            );
+        }
     }
 }

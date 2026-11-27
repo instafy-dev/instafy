@@ -133,3 +133,68 @@ fn der_to_pem(der: &[u8]) -> String {
     pem.push_str("-----END PUBLIC KEY-----\n");
     pem
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_lc_rs::rand::SystemRandom;
+    use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+    use jsonwebtoken::errors::ErrorKind;
+    use jsonwebtoken::{decode, encode, EncodingKey, Header, Validation};
+    use serde_json::{json, Value};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A fresh Ed25519 key as (PKCS#8 private key, raw public key).
+    fn generate_key() -> (Vec<u8>, Vec<u8>) {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("generate key");
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("parse generated key");
+        (pkcs8.as_ref().to_vec(), pair.public_key().as_ref().to_vec())
+    }
+
+    fn sign(pkcs8: &[u8]) -> String {
+        let exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_secs()
+            + 600;
+        let header = Header {
+            kid: Some("edge".to_string()),
+            ..Header::new(Algorithm::EdDSA)
+        };
+        let claims = json!({ "sub": "user", "exp": exp });
+        encode(&header, &claims, &EncodingKey::from_ed_der(pkcs8)).expect("sign")
+    }
+
+    // TokenValidator refreshes the JWKS only when a decode fails with
+    // InvalidSignature, so pin that kind as well as the accepted path.
+    #[test]
+    fn jwks_key_accepts_its_own_signature_and_rejects_another_keys() {
+        let (pkcs8, public_key) = generate_key();
+        let (other_pkcs8, _) = generate_key();
+        let set: JwkSet = serde_json::from_value(json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "alg": "EdDSA",
+                "kid": "edge",
+                "x": URL_SAFE_NO_PAD.encode(&public_key)
+            }]
+        }))
+        .expect("parse JWKS");
+        let jwks = Ed25519Jwks::from_jwk_set(set).expect("build JWKS keys");
+        let key = jwks.decoding_key(Some("edge")).expect("key for kid");
+        let mut validation = Validation::new(jwks.algorithm());
+        validation.validate_aud = false;
+
+        let accepted = decode::<Value>(&sign(&pkcs8), &key, &validation).expect("own signature");
+        assert_eq!(accepted.claims["sub"], "user");
+
+        let error = decode::<Value>(&sign(&other_pkcs8), &key, &validation)
+            .expect_err("another key's signature");
+        assert!(
+            matches!(error.kind(), ErrorKind::InvalidSignature),
+            "unexpected error kind: {:?}",
+            error.kind()
+        );
+    }
+}
