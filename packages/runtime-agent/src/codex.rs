@@ -7829,6 +7829,17 @@ fn repair_codex_config_file(workspace_dir: &Path) -> Result<bool> {
 }
 
 fn sanitize_codex_config_runtime(existing: &str) -> String {
+    // Strip stale `[mcp_servers.playwright]` blocks so the runtime does not advertise
+    // browser tools that are unavailable in this execution path.
+    sanitize_codex_config(existing, |server_name| {
+        !server_name.eq_ignore_ascii_case("playwright")
+    })
+}
+
+/// A Codex `config.toml` with one `experimental_use_rmcp_client` line and one
+/// `[mcp_servers.<name>]` block per name, the first of each, and only the
+/// blocks `keep` says to keep.
+pub(crate) fn sanitize_codex_config(existing: &str, keep: impl Fn(&str) -> bool) -> String {
     let lines: Vec<&str> = existing.lines().collect();
     let mut retained_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut index = 0usize;
@@ -7860,9 +7871,7 @@ fn sanitize_codex_config_runtime(existing: &str) -> String {
                 }
                 index += 1;
             }
-            // Strip stale `[mcp_servers.playwright]` blocks so the runtime does not advertise
-            // browser tools that are unavailable in this execution path.
-            if server_name.eq_ignore_ascii_case("playwright") {
+            if !keep(server_name) {
                 continue;
             }
             if !seen_mcp_blocks.insert(server_name.to_string()) {
@@ -7880,9 +7889,14 @@ fn sanitize_codex_config_runtime(existing: &str) -> String {
         index += 1;
     }
 
-    let mut compacted = Vec::with_capacity(retained_lines.len());
+    compact_blank_lines(retained_lines)
+}
+
+/// The lines joined, with runs of blank lines as one and none at the end.
+pub(crate) fn compact_blank_lines(lines: Vec<String>) -> String {
+    let mut compacted = Vec::with_capacity(lines.len());
     let mut previous_blank = false;
-    for line in retained_lines {
+    for line in lines {
         let is_blank = line.trim().is_empty();
         if is_blank && previous_blank {
             continue;
@@ -7900,7 +7914,7 @@ fn sanitize_codex_config_runtime(existing: &str) -> String {
     compacted.join("\n")
 }
 
-fn parse_mcp_server_header(stripped: &str) -> Option<&str> {
+pub(crate) fn parse_mcp_server_header(stripped: &str) -> Option<&str> {
     if !stripped.starts_with("[mcp_servers.") || !stripped.ends_with(']') {
         return None;
     }

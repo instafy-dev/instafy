@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{JobExecution, JobMessage};
+use crate::codex::{compact_blank_lines, parse_mcp_server_header, sanitize_codex_config};
 
 const MANIFEST_RELATIVE_PATH: &str = ".instafy/mcp/servers.json";
 const CODEX_MANAGED_MCP_BLOCK_START: &str = "# instafy-managed-mcp-servers:start";
@@ -888,71 +889,7 @@ fn render_manifest_to_codex_config(workspace_dir: &Path, manifest: &McpManifest)
 }
 
 fn sanitize_codex_config_for_managed_mcp(existing: &str) -> String {
-    let lines: Vec<&str> = existing.lines().collect();
-    let mut retained_lines: Vec<String> = Vec::with_capacity(lines.len());
-    let mut index = 0usize;
-    let mut seen_mcp_blocks: HashSet<String> = HashSet::new();
-    let mut seen_rmcp_setting = false;
-
-    while index < lines.len() {
-        let current = lines[index];
-        let trimmed = current.trim();
-        let stripped = trimmed.split('#').next().unwrap_or("").trim();
-
-        if stripped.starts_with("experimental_use_rmcp_client") {
-            if !seen_rmcp_setting {
-                retained_lines.push(current.to_string());
-                seen_rmcp_setting = true;
-            }
-            index += 1;
-            continue;
-        }
-
-        if let Some(server_name) = parse_mcp_server_header(stripped) {
-            let block_start = index;
-            index += 1;
-            while index < lines.len() {
-                let next = lines[index].trim();
-                let next_stripped = next.split('#').next().unwrap_or("").trim();
-                if next_stripped.starts_with('[') {
-                    break;
-                }
-                index += 1;
-            }
-
-            if !seen_mcp_blocks.insert(server_name.to_string()) {
-                continue;
-            }
-            retained_lines.extend(
-                lines[block_start..index]
-                    .iter()
-                    .map(|line| (*line).to_string()),
-            );
-            continue;
-        }
-
-        retained_lines.push(current.to_string());
-        index += 1;
-    }
-
-    let mut compacted = Vec::with_capacity(retained_lines.len());
-    let mut previous_blank = false;
-    for line in retained_lines {
-        let is_blank = line.trim().is_empty();
-        if is_blank && previous_blank {
-            continue;
-        }
-        compacted.push(line);
-        previous_blank = is_blank;
-    }
-    while compacted
-        .last()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        compacted.pop();
-    }
-    compacted.join("\n")
+    sanitize_codex_config(existing, |_| true)
 }
 
 fn strip_managed_mcp_block(existing: &str) -> String {
@@ -972,35 +909,7 @@ fn strip_managed_mcp_block(existing: &str) -> String {
             lines.push(line.to_string());
         }
     }
-    let mut compacted = Vec::with_capacity(lines.len());
-    let mut previous_blank = false;
-    for line in lines {
-        let is_blank = line.trim().is_empty();
-        if is_blank && previous_blank {
-            continue;
-        }
-        compacted.push(line);
-        previous_blank = is_blank;
-    }
-    while compacted
-        .last()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        compacted.pop();
-    }
-    compacted.join("\n")
-}
-
-fn parse_mcp_server_header(stripped: &str) -> Option<&str> {
-    if !stripped.starts_with("[mcp_servers.") || !stripped.ends_with(']') {
-        return None;
-    }
-    let inner = &stripped["[mcp_servers.".len()..stripped.len() - 1];
-    if inner.is_empty() {
-        return None;
-    }
-    Some(inner)
+    compact_blank_lines(lines)
 }
 
 fn strip_mcp_server_blocks(existing: &str, names_to_strip: &HashSet<String>) -> String {
@@ -1042,24 +951,7 @@ fn strip_mcp_server_blocks(existing: &str, names_to_strip: &HashSet<String>) -> 
         index += 1;
     }
 
-    let mut compacted = Vec::with_capacity(output.len());
-    let mut previous_blank = false;
-    for line in output {
-        let is_blank = line.trim().is_empty();
-        if is_blank && previous_blank {
-            continue;
-        }
-        compacted.push(line);
-        previous_blank = is_blank;
-    }
-    while compacted
-        .last()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        compacted.pop();
-    }
-    compacted.join("\n")
+    compact_blank_lines(output)
 }
 
 fn escape_toml_string(value: &str) -> String {
