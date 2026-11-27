@@ -3,6 +3,8 @@
  * reload shows it again. The prompt itself only hands off to the Add AI
  * connection modal.
  */
+import { isRecord } from "../../../utils/isRecord";
+
 export type AiConnectWizardMode = "default" | "personal_only";
 
 export type AiConnectWizardStoredStateV1 = {
@@ -13,10 +15,6 @@ export type AiConnectWizardStoredStateV1 = {
 };
 
 const MAX_AGE_MS = 12 * 60 * 60 * 1000;
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeMode(value: unknown): AiConnectWizardMode {
   return value === "personal_only" ? "personal_only" : "default";
@@ -39,7 +37,7 @@ export function readAiConnectWizardState(storageKey: string): AiConnectWizardSto
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
-    if (!isObject(parsed)) return null;
+    if (!isRecord(parsed)) return null;
     if (parsed.version !== 1) return null;
 
     const open = typeof parsed.open === "boolean" ? parsed.open : false;

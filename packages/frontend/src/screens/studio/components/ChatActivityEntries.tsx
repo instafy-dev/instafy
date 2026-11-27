@@ -23,6 +23,7 @@ import { normalizeActivityText, splitActivityLeadAndDetails, truncate } from "./
 import { extractLocalCapabilityArtifact } from "./chatMessagePresentation";
 import { resolveSpineToneFromStatus, ThreadSpine } from "./ThreadSpine";
 import { summaryToggleClass } from "./ChatFileChangeList";
+import { isRecord } from "../../../utils/isRecord";
 
 type NotchedMessageShellProps = {
   align: "left" | "right";
@@ -55,10 +56,6 @@ type SharedRenderProps = {
   ChatFileChangeList: ComponentType<ChatFileChangeListProps>;
   chatLeftSpineOffsetClass: string;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function resolveMessageStatus(message: ChatMessage): {
   status: string | null;

@@ -2,6 +2,7 @@ import type {
   ControllerProjectIntegration,
   ControllerProviderRequestRecord,
 } from "../services/runtimeController";
+import { isRecord } from "../utils/isRecord";
 
 const ATTACHED_PROJECT_INTEGRATION_STATUSES = new Set([
   "attached",
@@ -9,10 +10,6 @@ const ATTACHED_PROJECT_INTEGRATION_STATUSES = new Set([
   "connected",
   "enabled",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 export function integrationIsAttached(
   integration: ControllerProjectIntegration | null | undefined,

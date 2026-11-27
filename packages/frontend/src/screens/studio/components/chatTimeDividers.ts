@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../types";
 import { isBrowserNoticePrompt, isUnsentBrowserNoticePrompt } from "./browserHandBack";
+import { isRecord } from "../../../utils/isRecord";
 
 const IDLE_GAP_MS = 60 * 60 * 1000;
 
@@ -16,10 +17,6 @@ function sameLocalDay(left: Date, right: Date): boolean {
 
 function hiddenNotice(message: Pick<ChatMessage, "id" | "role" | "metadata">): boolean {
   return isBrowserNoticePrompt(message) && isUnsentBrowserNoticePrompt(message);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** A folded run still represents activity through its last known sent row. */

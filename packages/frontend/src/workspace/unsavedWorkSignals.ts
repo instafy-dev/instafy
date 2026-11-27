@@ -5,11 +5,9 @@
  * list learns it should refresh.
  */
 
-const RECOVERY_ARTIFACT_KINDS = new Set(["origin/apply", "origin/refresh"]);
+import { isRecord } from "../utils/isRecord";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const RECOVERY_ARTIFACT_KINDS = new Set(["origin/apply", "origin/refresh"]);
 
 function readRef(value: unknown): string | null {
   if (typeof value === "string") {

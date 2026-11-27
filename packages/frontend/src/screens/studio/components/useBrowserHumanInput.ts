@@ -5,6 +5,7 @@ import {
   CONTROL_ACTION_NO_ANSWER,
   CONTROL_ACTION_OFFLINE,
 } from "./SharedBrowserCollaborationControls";
+import { isRecord } from "../../../utils/isRecord";
 
 export type BrowserHumanInputRequest = {
   version: 1;
@@ -28,10 +29,6 @@ export const BROWSER_HUMAN_INPUT_CONTINUE_PROMPT =
  * goes to Octo only.
  */
 export const LET_OCTO_CONTINUE = "Let Octo continue";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * A prompt that a press of Let Octo continue sent: what it dispatched (its

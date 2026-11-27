@@ -1,9 +1,6 @@
 import type { ChatMessage } from "../types";
 import { getControllerConversationNoticeKind } from "./controllerConversationNotice";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function normalizeMetadataMessageType(value: unknown): string | null {
   if (typeof value !== "string") {

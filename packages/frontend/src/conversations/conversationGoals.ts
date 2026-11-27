@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../screens/studio/types";
+import { isRecord } from "../utils/isRecord";
 
 export type ConversationGoalStatus =
   | "active"
@@ -87,10 +88,6 @@ export interface GoalRunSignal {
   hasActivity: boolean;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function normalizeString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -138,7 +135,7 @@ function makeGoalId(): string {
 export function extractConversationGoalFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): ConversationGoal | null {
-  if (!isPlainObject(metadata)) {
+  if (!isRecord(metadata)) {
     return null;
   }
   return normalizeConversationGoal(
@@ -147,7 +144,7 @@ export function extractConversationGoalFromMetadata(
 }
 
 export function normalizeConversationGoal(value: unknown): ConversationGoal | null {
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   const objective = normalizeString(value.objective);
@@ -471,7 +468,7 @@ export function activeGoalPromptMetadata(
 }
 
 function extractGoalMetadataId(value: unknown): string | null {
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   return normalizeString(value.id ?? value.goalId ?? value.goal_id);
@@ -483,22 +480,22 @@ function resolvePromptMetadataRecord(
   if (!metadata) {
     return null;
   }
-  if (isPlainObject(metadata.prompt_metadata)) {
+  if (isRecord(metadata.prompt_metadata)) {
     return metadata.prompt_metadata;
   }
-  if (isPlainObject(metadata.promptMetadata)) {
+  if (isRecord(metadata.promptMetadata)) {
     return metadata.promptMetadata;
   }
   return null;
 }
 
 function extractMessageRunId(message: ChatMessage): string | null {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   return normalizeString(metadata?.runId ?? metadata?.run_id);
 }
 
 function extractPromptGoalId(message: ChatMessage): string | null {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const promptMetadata = resolvePromptMetadataRecord(metadata);
   return extractGoalMetadataId(promptMetadata?.goal) ?? extractGoalMetadataId(metadata?.goal);
 }
@@ -507,15 +504,15 @@ function resolveGoalContinuationRecord(message: ChatMessage): Record<string, unk
   if (message.role !== "user") {
     return null;
   }
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const promptMetadata = resolvePromptMetadataRecord(metadata);
-  return isPlainObject(metadata?.goalContinuation)
+  return isRecord(metadata?.goalContinuation)
     ? metadata.goalContinuation
-    : isPlainObject(metadata?.goal_continuation)
+    : isRecord(metadata?.goal_continuation)
       ? metadata.goal_continuation
-      : isPlainObject(promptMetadata?.goalContinuation)
+      : isRecord(promptMetadata?.goalContinuation)
         ? promptMetadata.goalContinuation
-        : isPlainObject(promptMetadata?.goal_continuation)
+        : isRecord(promptMetadata?.goal_continuation)
           ? promptMetadata.goal_continuation
           : null;
 }
@@ -529,7 +526,7 @@ function extractGoalContinuationTurn(message: ChatMessage): number | null {
 }
 
 function isGoalRunActivityMessage(message: ChatMessage): boolean {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const messageType =
     normalizeMessageType(message.messageType) ??
     normalizeMessageType(metadata?.messageType) ??
@@ -545,7 +542,7 @@ function isGoalRunVisibleAssistantText(message: ChatMessage): boolean {
   if (message.role !== "assistant" || !message.content.trim()) {
     return false;
   }
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const messageType =
     normalizeMessageType(message.messageType) ??
     normalizeMessageType(metadata?.messageType) ??
@@ -879,9 +876,9 @@ function hasNonRecoverableAiRequestFailure(value: unknown): boolean {
 }
 
 function messageErrorSignals(message: ChatMessage): unknown[] {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
-  const details = isPlainObject(metadata?.details) ? metadata.details : null;
-  const event = isPlainObject(details?.event) ? details.event : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
+  const details = isRecord(metadata?.details) ? metadata.details : null;
+  const event = isRecord(details?.event) ? details.event : null;
   return [
     message.content,
     metadata?.errorMessage,
@@ -895,7 +892,7 @@ export function isNonRecoverableRunErrorMessage(
   message: ChatMessage,
   runId: string | null = null,
 ): boolean {
-  const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+  const metadata = isRecord(message.metadata) ? message.metadata : null;
   const messageType =
     normalizeMessageType(message.messageType) ??
     normalizeMessageType(metadata?.messageType) ??

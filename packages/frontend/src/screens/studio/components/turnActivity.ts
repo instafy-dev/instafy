@@ -17,6 +17,7 @@ import { displayActivityHost } from "./activityHost";
 import { BROWSER_BUILD_REQUEST_NOTE_KEY } from "./browserHandBack";
 import { isEmptyCommandExecution } from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
+import { isRecord } from "../../../utils/isRecord";
 
 export type ActivityRole = "content" | "outcome" | "quiet";
 export type ActivityDone = string | { one: string; other?: string; some?: string };
@@ -53,10 +54,6 @@ const ROLES: readonly string[] = ["content", "outcome", "quiet"];
 const APPROVALS: readonly string[] = ["once", "routine", "free", "denied", "expired"];
 const ENTRY_KEYS = new Set(["key", "role", "live", "done", "count", "when", "result", "host", "pageKey", "step", "approval"]);
 const ALPHABETIC = /^\p{Alphabetic}$/u;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Plain words: letters, ASCII digits, single spaces and a little punctuation, no address. */
 export function isPlainLabelText(text: string): boolean {

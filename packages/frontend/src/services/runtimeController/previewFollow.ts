@@ -11,6 +11,7 @@ import {
   runtimeControllerEnabled,
 } from "./core";
 import { ServerSentEventParser } from "./runs";
+import { isRecord } from "../../utils/isRecord";
 
 export type FollowPerson = { id: string; name: string; avatarUrl?: string | null };
 
@@ -24,8 +25,6 @@ export type FollowPresence = {
   followerList?: FollowPerson[];
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const readString = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 const readNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 

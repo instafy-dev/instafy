@@ -19,6 +19,7 @@
  * them only from its own frame at the viewer's origin.
  */
 import { parseSiteAsk, type SiteAsk } from "./siteAsks";
+import { isRecord } from "../../../../utils/isRecord";
 
 export const HOST_MESSAGE_SOURCE = "instafy-host";
 export const HOST_MESSAGE_VERSION = 1;
@@ -136,9 +137,6 @@ export type SiteEvent =
   | { type: "ask-invalid"; id: string }
   /** The page's first view is drawn (one that lists "ready" in its `layout-ack` draws itself after it loads). */
   | { type: "ready" };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const MAX_SUPPORTS = 16;
 

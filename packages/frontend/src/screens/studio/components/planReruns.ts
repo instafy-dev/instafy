@@ -4,16 +4,14 @@
 // The new job names the job it reruns in `metadata.multiAgentPlan.<reason>.of`;
 // the controller's group status names it the other way, as `retriedAs`.
 
+import { isRecord } from "../../../utils/isRecord";
+
 export type PlanRerun = {
   /** The job that ran the agent again. */
   jobId: string;
   /** Why: "turn_continuation", "rate_limit", "user_input", or another controller reason. */
   reason: string;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function stringField(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

@@ -48,10 +48,7 @@ import type {
   ControllerProjectIntegration,
   ControllerProviderRequestRecord,
 } from "../services/runtimeController";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+import { isRecord } from "../utils/isRecord";
 
 function normalizeLens(value: unknown): CameraLensId | null {
   return value === "rear" || value === "front" || value === "external" ? value : null;

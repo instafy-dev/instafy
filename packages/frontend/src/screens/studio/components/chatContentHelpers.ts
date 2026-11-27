@@ -1,9 +1,6 @@
 import type { ChatMessage } from "../types";
 import { extractMessageDetails } from "./chatMessageMetadata";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function extractCommandOutputFromSummary(content: string): string | null {
   const trimmed = content.trim();

@@ -11,6 +11,7 @@ import { isCurrentUserChatMessage } from "./chatMessageDetailHelpers";
 import { isBrowserNoticePrompt } from "./browserHandBack";
 import { getMessageType } from "./chatMessageMetadata";
 import type { ConversationRosterAgent } from "./conversationRosterMembers";
+import { isRecord } from "../../../utils/isRecord";
 
 export type ChatTranscriptIdentityLayout = "solo" | "participants";
 
@@ -34,10 +35,6 @@ type IdentityLayoutInput = {
 
 /** The rail's Octo: the viewer's own saved Octo by id, once the rail has loaded it. */
 type RailOcto = { id: string | null };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /**
  * Octo's own tile, no picture and no hatchling: the face the solo typing row

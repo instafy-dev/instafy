@@ -25,7 +25,6 @@ import {
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
   hasRecommendationOrigin,
-  isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
   toolSourceOf,
@@ -45,6 +44,7 @@ import {
   CONTROLLER_CONVERSATION_LIST_LIMIT,
   controllerConversationHasRemoteMessages,
 } from "./conversationRemoteHistory";
+import { isRecord } from "../utils/isRecord";
 
 const CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS = 30_000;
 // A hydration that fails outright (no session token yet, controller hiccup)
@@ -373,7 +373,7 @@ export function useConversationControllerSync({
           return;
         }
 
-        const metadata = isPlainObject(remote.metadata) ? remote.metadata : {};
+        const metadata = isRecord(remote.metadata) ? remote.metadata : {};
         const hasRemoteMessages = controllerConversationHasRemoteMessages(remote);
         const titleFromMetadata = extractConversationTitleFromMetadata(metadata);
         const localIdFromMetadata = extractConversationLocalIdFromMetadata(metadata);

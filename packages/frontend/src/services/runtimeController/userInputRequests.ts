@@ -1,5 +1,6 @@
 import { isUUID } from "../../utils/uuid";
 import { readControllerError, resolveControllerRequestContext, runtimeControllerEnabled } from "./core";
+import { isRecord } from "../../utils/isRecord";
 
 export type UserInputQuestion = {
   id: string;
@@ -19,10 +20,6 @@ export type UserInputRequest = {
   agentHandle?: string;
   expiredReason?: string;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function boundedText(value: unknown, maximum: number, allowEmpty = false): value is string {
   return typeof value === "string" && !value.includes("\0") && (allowEmpty || value.trim().length > 0) && [...value].length <= maximum;

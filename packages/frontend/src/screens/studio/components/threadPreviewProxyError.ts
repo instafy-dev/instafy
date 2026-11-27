@@ -2,13 +2,10 @@ import { resolveRetryingStatusPresentation } from "../../../conversations/runFai
 import type { ChatMessage } from "../types";
 import { getMessageType } from "./chatMessageMetadata";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
+import { isRecord } from "../../../utils/isRecord";
 
 const SUCCESSFUL_RUN_STATUSES = new Set(["success", "succeeded", "completed", "merged"]);
 const FAILED_RUN_STATUSES = new Set(["failed", "error"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizedField(record: Record<string, unknown> | null, key: string): string {
   const value = record?.[key];

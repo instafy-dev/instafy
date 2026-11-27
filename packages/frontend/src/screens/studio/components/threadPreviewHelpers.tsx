@@ -19,6 +19,7 @@ import type { ThreadCompactUpdateKind } from "./threadPreviewState";
 import type { ChatMessage } from "../types";
 import { isNonRecoverableRunErrorMessage } from "../../../conversations/conversationGoals";
 import { isSynthesizedTerminalThreadMessage } from "./threadPreviewRunData";
+import { isRecord } from "../../../utils/isRecord";
 
 export const THREAD_ACTIVE_STATES = new Set([
   "in_progress",
@@ -88,10 +89,6 @@ export function stripShellWrapperFromCommand(command: string): string {
     current = body;
   }
   return current;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeProgressLabelForComparison(value: string): string {

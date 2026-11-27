@@ -1,11 +1,9 @@
+import { isRecord } from "../utils/isRecord";
+
 export type ProviderEventHostReaction =
   | "record_only"
   | "surface_in_conversation"
   | "candidate_agent_trigger";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 export function resolveProviderEventHostReaction(value: unknown): ProviderEventHostReaction {
   if (!isRecord(value)) {

@@ -1,9 +1,6 @@
 import type { ConversationState } from "../../../conversations/ConversationsProvider";
 import type { ChatMessage } from "../types";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function resolvePromptMetadata(
   metadata: Record<string, unknown> | null | undefined,

@@ -1,8 +1,5 @@
 import type { ChatMessage } from "../types";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function normalizeMessageType(message: ChatMessage): string {
   const direct = typeof message.messageType === "string" ? message.messageType.trim().toLowerCase() : "";

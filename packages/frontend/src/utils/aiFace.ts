@@ -3,6 +3,7 @@ import {
   resolveBuiltInAssistantHandle,
 } from "../assistants/localBuiltInAssistantCatalog";
 import { hashStringToNumber, normalizeAgentAvatarHandle, normalizeCustomAgentAvatarSrc } from "./agentAvatar";
+import { isRecord } from "./isRecord";
 
 // One resolver for every AI face (docs/Brand.md, "Octo's hatchlings"). Octo
 // is its tile; every other AI without a picture of its own wears one of
@@ -117,10 +118,6 @@ export function resolveAiFace(identity: AiFaceIdentity): ResolvedAiFace {
     normalizeCustomAgentAvatarSrc(identity.avatarUrl) ?? normalizeCustomAgentAvatarSrc(identity.avatarSeed);
   const drawn = resolveDrawnAiFace(identity);
   return src ? { kind: "picture", src, fallback: drawn } : drawn;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

@@ -14,6 +14,7 @@ import {
 } from "./logging";
 import { parseRetryAfterMs } from "./originErrors";
 import { reportControllerProjectNotFound } from "./projectNotFound";
+import { isRecord } from "../../utils/isRecord";
 
 const RUN_EVENT_KINDS = [
   "run.queued",
@@ -188,7 +189,7 @@ export async function fetchRunResultFromController(
         ? (normalizedStatus as ControllerRunResult["status"])
         : "pending";
 
-    const resultData = isPlainObject(payload.result)
+    const resultData = isRecord(payload.result)
       ? (payload.result as ControllerRunResultData)
       : null;
 
@@ -1071,7 +1072,7 @@ function mapRunSnapshotToRecord(
     typeof snapshot.progress === "number"
       ? snapshot.progress
       : Number(snapshot.progress ?? 0) || 0;
-  const metadataValue = isPlainObject(snapshot.metadata)
+  const metadataValue = isRecord(snapshot.metadata)
     ? (snapshot.metadata as Record<string, unknown>)
     : null;
 
@@ -1121,8 +1122,4 @@ function normalizeRunStatus(
     default:
       return undefined;
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

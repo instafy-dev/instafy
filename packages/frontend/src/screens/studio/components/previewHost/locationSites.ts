@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { isRecord } from "../../../../utils/isRecord";
 
 /**
  * Which sites shown in Studio have received the person's location.
@@ -54,9 +55,6 @@ export const LOCATION_SITES_LIMIT = 50;
 export function locationSiteKey(site: LocationSiteIdentity): string {
   return JSON.stringify([site.projectId, site.title.trim(), site.port, site.path || "/"]);
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 function readRecord(value: unknown): LocationSiteRecord | null {
   if (!isRecord(value)) return null;

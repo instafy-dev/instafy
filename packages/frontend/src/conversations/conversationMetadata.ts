@@ -3,6 +3,7 @@ import {
   extractRuntimePreferenceDetails,
   type RuntimePreferenceDetails,
 } from "../runtime/runtimePreferenceUtils";
+import { isRecord } from "../utils/isRecord";
 
 export type ConversationVisibility = "public" | "private";
 
@@ -30,12 +31,6 @@ function normalizeMessageTypeValue(value: unknown): string | null {
     return null;
   }
   return trimmed.toLowerCase();
-}
-
-export function isPlainObject(
-  value: unknown,
-): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** A delivered finding starts a separate chat; it is not the user's local send. */
@@ -119,12 +114,12 @@ function normalizeUuidLikeValue(value: unknown): string | null {
 export function extractConversationOwnerAgentFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): ConversationOwnerAgent | null {
-  if (!isPlainObject(metadata)) {
+  if (!isRecord(metadata)) {
     return null;
   }
-  const ownerAgent = isPlainObject(metadata.ownerAgent)
+  const ownerAgent = isRecord(metadata.ownerAgent)
     ? metadata.ownerAgent
-    : isPlainObject(metadata.owner_agent)
+    : isRecord(metadata.owner_agent)
       ? metadata.owner_agent
       : null;
   if (!ownerAgent) {
@@ -141,7 +136,7 @@ export function extractConversationOwnerAgentFromMetadata(
 export function extractConversationOriginMessageIdFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): string | null {
-  if (!isPlainObject(metadata)) {
+  if (!isRecord(metadata)) {
     return null;
   }
   return normalizeUuidLikeValue(
@@ -152,7 +147,7 @@ export function extractConversationOriginMessageIdFromMetadata(
 export function extractConversationDelegatedByAgentIdFromMetadata(
   metadata: Record<string, unknown> | null | undefined,
 ): string | null {
-  if (!isPlainObject(metadata)) {
+  if (!isRecord(metadata)) {
     return null;
   }
   return normalizeUuidLikeValue(
@@ -195,7 +190,7 @@ export function extractConversationLocalIdFromMessageMetadata(
   }
   const candidate =
     metadata.conversation_metadata ?? metadata.conversationMetadata;
-  if (!isPlainObject(candidate)) {
+  if (!isRecord(candidate)) {
     return null;
   }
   const raw = candidate.localId ?? candidate.local_id;
@@ -241,7 +236,7 @@ export function extractConversationLifecycleFromMetadata(
   if (direct) {
     return direct;
   }
-  if (isPlainObject(raw)) {
+  if (isRecord(raw)) {
     const fromObject = normalizeConversationLifecycleStatus(raw.status);
     if (fromObject) {
       return fromObject;
@@ -280,7 +275,7 @@ export function resolveConversationVisibility(
 export function computePlanSignature(message: ChatMessage): string | null {
   const type = normalizeMessageTypeValue(message.messageType);
   let resolvedType = type;
-  if (!resolvedType && isPlainObject(message.metadata)) {
+  if (!resolvedType && isRecord(message.metadata)) {
     resolvedType =
       normalizeMessageTypeValue(message.metadata.messageType) ??
       normalizeMessageTypeValue(message.metadata.message_type);
@@ -288,10 +283,10 @@ export function computePlanSignature(message: ChatMessage): string | null {
   if (resolvedType !== "todo_list") {
     return null;
   }
-  if (!isPlainObject(message.metadata)) {
+  if (!isRecord(message.metadata)) {
     return `plan:${message.content.trim()}`;
   }
-  const details = isPlainObject(message.metadata.details)
+  const details = isRecord(message.metadata.details)
     ? message.metadata.details
     : null;
   const items = details && Array.isArray(details.items) ? details.items : null;
@@ -304,7 +299,7 @@ export function deriveRuntimePreferenceFromMessages(
 ): ConversationRuntimePreference | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    const metadata = isPlainObject(message.metadata) ? message.metadata : null;
+    const metadata = isRecord(message.metadata) ? message.metadata : null;
     const preference = extractRuntimePreferenceDetails(null, metadata);
     if (preference) {
       return preference;

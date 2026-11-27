@@ -20,10 +20,7 @@ import {
 import type { ChatMessage } from "../types";
 import { browserRequestFromContinuationPrompt, readBrowserRequestOf } from "./browserRequest";
 import { getMessageType } from "./chatMessageMetadata";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function stringField(record: Record<string, unknown> | null, keys: readonly string[]): string {
   for (const key of keys) {

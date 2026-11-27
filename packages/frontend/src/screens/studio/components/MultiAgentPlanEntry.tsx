@@ -17,6 +17,7 @@ import { extractAgentJobId } from "./chatMessagePresentation";
 import { collectPlanReruns, type PlanRerun } from "./planReruns";
 import { PlanRerunNotice } from "./PlanRerunNotice";
 import { ViewerAgentsContext } from "./viewerAgents";
+import { isRecord } from "../../../utils/isRecord";
 
 // Supplied by the chat's existing hydrated run feed. Message bodies do not
 // need to subscribe to composer/history providers or start separate polling.
@@ -24,10 +25,6 @@ export const MultiAgentRunsContext = createContext<{
   runs: Readonly<Record<string, RunRecord>>;
   scopeKey: string | null;
 }>({ runs: {}, scopeKey: null });
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 type MultiAgentPlanAgent = {
   handle: string;

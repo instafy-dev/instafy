@@ -11,10 +11,8 @@ import {
   deriveLocalCapabilityPromptMetadataPatch,
   type LocalCapabilityStatusValue,
 } from "../capabilities/localCapabilityRuntime";
-import {
-  isMetadataRecord,
-  mergeLocalCapabilityMetadata,
-} from "./localCapabilityMetadata";
+import { mergeLocalCapabilityMetadata } from "./localCapabilityMetadata";
+import { isRecord } from "../utils/isRecord";
 import { generateUUID } from "../utils/uuid";
 
 type UpdateConversationMessage = (
@@ -91,7 +89,7 @@ function normalizeLocalCapabilityStatusUpdate(status: LocalCapabilityStatusValue
   }
   return {
     text: status.text,
-    metadata: isMetadataRecord(status.metadata) ? status.metadata : null,
+    metadata: isRecord(status.metadata) ? status.metadata : null,
   };
 }
 
@@ -114,7 +112,7 @@ export async function runLocalCapabilityConversationFlow(
     );
 
     options.updateMessage(options.displayConversationId, options.userMessageId, (previous) => {
-      const previousMetadata = isMetadataRecord(previous.metadata) ? previous.metadata : null;
+      const previousMetadata = isRecord(previous.metadata) ? previous.metadata : null;
       return {
         ...previous,
         metadata: mergeLocalCapabilityMetadata(previousMetadata, nextPromptMetadata),
@@ -149,8 +147,8 @@ export async function runLocalCapabilityConversationFlow(
     extraMetadata?: Record<string, unknown> | null,
   ) => {
     options.updateMessage(options.conversationId, assistantMessage.id, (previous) => {
-      const previousMetadata = isMetadataRecord(previous.metadata) ? previous.metadata : {};
-      const previousLocalCapability = isMetadataRecord(previousMetadata.localCapability)
+      const previousMetadata = isRecord(previous.metadata) ? previous.metadata : {};
+      const previousLocalCapability = isRecord(previousMetadata.localCapability)
         ? previousMetadata.localCapability
         : {};
       const normalizedExtraMetadata = extraMetadata ? { ...extraMetadata } : null;
@@ -213,7 +211,7 @@ export async function runLocalCapabilityConversationFlow(
 
   const assistantResponseText =
     capabilityResult.responseText ?? `${assistantLabel} finished the local capability action.`;
-  const resultMetadata = isMetadataRecord(capabilityResult.metadata) ? capabilityResult.metadata : null;
+  const resultMetadata = isRecord(capabilityResult.metadata) ? capabilityResult.metadata : null;
   const capabilityEvents = collectCapabilityEventRecords(
     resultMetadata?.capabilityEvents,
     observedCapabilityEvents,
@@ -223,7 +221,7 @@ export async function runLocalCapabilityConversationFlow(
     capabilityEvents,
   );
   const resultLocalCapability =
-    resultMetadata && isMetadataRecord(resultMetadata.localCapability)
+    resultMetadata && isRecord(resultMetadata.localCapability)
       ? resultMetadata.localCapability
       : null;
   const assistantMetadata = {
@@ -266,8 +264,8 @@ export async function runLocalCapabilityConversationFlow(
   );
   if (recordedAssistantMessage) {
     options.updateMessage(options.conversationId, assistantMessage.id, (previous) => {
-      const previousMetadata = isMetadataRecord(previous.metadata) ? previous.metadata : null;
-      const recordedMetadata = isMetadataRecord(recordedAssistantMessage.metadata)
+      const previousMetadata = isRecord(previous.metadata) ? previous.metadata : null;
+      const recordedMetadata = isRecord(recordedAssistantMessage.metadata)
         ? recordedAssistantMessage.metadata
         : null;
       return {

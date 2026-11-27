@@ -14,6 +14,7 @@ import {
   SPEECH_SYNTHESIS_CAPABILITY_ID,
   SPEECH_TRANSCRIPTION_CAPABILITY_ID,
 } from "./speechCapabilityMetadata";
+import { isRecord } from "../utils/isRecord";
 
 type SpeechPreferenceStorage = Pick<Storage, "getItem" | "setItem" | "removeItem"> | null | undefined;
 
@@ -37,10 +38,6 @@ function deriveSpeechPreferenceSource(options: {
     return "local";
   }
   return "project";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeOptionalString(value: unknown) {

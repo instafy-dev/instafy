@@ -14,6 +14,7 @@ import {
   resolveCurrentClientNativeRuntimeProviderForCapability,
   resolveCurrentClientNativeRuntimeProviderId,
 } from "../extensions/nativeRuntimeProviderRegistry";
+import { isRecord } from "../utils/isRecord";
 export {
   getNativeRuntimeFallbackProvider,
   listCurrentClientNativeRuntimeProviders,
@@ -26,10 +27,6 @@ const ATTACHED_PROJECT_INTEGRATION_STATUSES = new Set([
   "connected",
   "enabled",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function normalizeStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {

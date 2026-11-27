@@ -1,4 +1,5 @@
 import { normalizeCustomAgentHandle } from "../assistants/localBuiltInAssistantCatalog";
+import { isRecord } from "../utils/isRecord";
 
 export interface ConversationRoutingPreferences {
   assistantEnabled: boolean;
@@ -11,10 +12,6 @@ export const DEFAULT_CONVERSATION_ROUTING_PREFERENCES: ConversationRoutingPrefer
 });
 
 const CONVERSATION_ROUTING_METADATA_PREFIX = "instafy_conversation_routing_v1_";
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 export function getConversationRoutingMetadataKey(userId: string): string {
   return `${CONVERSATION_ROUTING_METADATA_PREFIX}${userId}`;
@@ -48,7 +45,7 @@ function normalizeConversationRoutingPreferencesValue(
       extraAgentHandles: [],
     };
   }
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return null;
   }
   const assistantEnabled =

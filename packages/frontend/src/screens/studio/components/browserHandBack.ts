@@ -11,6 +11,7 @@ import {
   isUnsentBrowserRequestNotice,
   readBrowserRequestOf,
 } from "./browserRequest";
+import { isRecord } from "../../../utils/isRecord";
 
 /**
  * Hand-back: once a browser turn that continued Octo's card for something it
@@ -37,10 +38,6 @@ export const BROWSER_HAND_BACK_PROMPT = "Continue building with what the browser
  * person's message and then the building turn (routedBrowserFold.ts).
  */
 export const BROWSER_BUILD_REQUEST_NOTE_KEY = "browserBuildRequest";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function promptMetadataRecords(metadata: unknown): Record<string, unknown>[] {
   if (!isRecord(metadata)) return [];

@@ -53,10 +53,7 @@ import { getBuiltInAssistantDisplayName, getDefaultAssistantHandle } from "../..
 import { ChatTimeDivider } from "./ChatTimeDivider";
 import { buildChatTimeDividers } from "./chatTimeDividers";
 import { useChatTimelineClock } from "./useChatTimelineClock";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function stringField(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

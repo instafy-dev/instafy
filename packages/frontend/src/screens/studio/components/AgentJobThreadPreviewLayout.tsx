@@ -66,6 +66,7 @@ import { TurnActivityLine } from "./TurnActivityLine";
 import { useSteadyActivityLabel } from "./useSteadyActivityLabel";
 import { detailsOnlySummary, type DetailItem, type TurnActivity } from "./turnActivity";
 import { TurnBrowserApprovalRow, type TurnBrowserApproval } from "./turnBrowserApproval";
+import { isRecord } from "../../../utils/isRecord";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const NO_EARLIER_ATTEMPTS: EarlierAttemptDetails[] = [];
@@ -82,10 +83,6 @@ function tryLabel(index: number): string {
 /** The line of a turn that ran no step itself after it was tried again: "Took two tries". */
 function retriedTurnLine(tries: number): string {
   return `Took ${TRY_COUNTS[tries - 2] ?? tries} tries`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeAgentHandle(value: unknown): string | null {
