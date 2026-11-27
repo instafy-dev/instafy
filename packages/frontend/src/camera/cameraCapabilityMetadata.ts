@@ -6,8 +6,6 @@ export {
   CAMERA_LENSES_RESOURCE_URI,
   CAMERA_OBSERVATION_CAPABILITY_ID,
   CAMERA_PROVIDER_ID,
-  CAMERA_PROVIDER_TITLE,
-  CAMERA_PROVIDER_TYPE,
   CAMERA_STATUS_RESOURCE_URI,
 } from "@instafy/provider-contract/builtins";
 
@@ -34,5 +32,3 @@ export const CAMERA_OBSERVATION_ACTIONS: CapabilityActionDefinition[] = [
       "Capture a fresh front-camera photo of what the user is showing and answer what it looks like.",
   },
 ];
-
-export const CAMERA_OBSERVATION_ACTION_IDS = CAMERA_OBSERVATION_ACTIONS.map((action) => action.id);

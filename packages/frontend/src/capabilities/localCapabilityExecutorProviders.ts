@@ -16,9 +16,6 @@ export const LOCAL_CAPABILITY_EXECUTOR_PROVIDERS: CapabilityExecutorProviderDefi
   ReturnType<typeof createFrontendFeatureServices>
 >[] = Array.from(APPLICATION_FRONTEND_REGISTRATION_INPUTS.capabilityExecutorProviders);
 
-export const LOCAL_CAPABILITY_EXECUTOR_PROVIDER_REGISTRY =
-  APPLICATION_FRONTEND_REGISTRATION_INPUTS.capabilityExecutorProviderRegistry;
-
 export function createLocalCapabilityExecutorRegistry(
   context: LocalCapabilityExecutorProviderContext,
 ) {

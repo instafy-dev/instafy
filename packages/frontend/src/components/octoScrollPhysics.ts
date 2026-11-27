@@ -12,8 +12,6 @@
  * with the caller because this module deliberately has no browser dependencies.
  */
 
-export const OCTO_SCROLL_ARM_COUNT = 4;
-
 export type OctoScrollPoint = Readonly<{
   x: number;
   y: number;

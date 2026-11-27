@@ -10,14 +10,6 @@ function ProviderFavicon({ src, className }: { src: string; className?: string }
   return <img src={src} alt="" aria-hidden="true" className={className} decoding="async" draggable={false} />;
 }
 
-export function AnthropicIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className={className}>
-      <path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z" />
-    </svg>
-  );
-}
-
 export function ZaiIcon({ className }: { className?: string }) {
   return <ProviderFavicon src="/provider-icons/zai.svg" className={className} />;
 }

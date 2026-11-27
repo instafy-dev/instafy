@@ -1,4 +1,4 @@
-import type { EditorConfig, LexicalNode, NodeKey, SerializedTextNode } from "lexical";
+import type { EditorConfig, NodeKey, SerializedTextNode } from "lexical";
 import { TextNode } from "lexical";
 import type { AssistantMentionToken } from "../../../../conversations/assistantMentions";
 import { getAssistantMentionClass, resolveAssistantMentionToken } from "../assistantMentionUI";
@@ -69,10 +69,4 @@ export class AssistantMentionNode extends TextNode {
 
 export function $createAssistantMentionNode(token: AssistantMentionToken): AssistantMentionNode {
   return new AssistantMentionNode(token);
-}
-
-export function $isAssistantMentionNode(
-  node: LexicalNode | null | undefined
-): node is AssistantMentionNode {
-  return node instanceof AssistantMentionNode;
 }

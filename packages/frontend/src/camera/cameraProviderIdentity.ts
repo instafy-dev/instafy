@@ -5,7 +5,6 @@ import {
 import {
   createExtensionProviderInstanceId,
   matchesExtensionProviderFamily,
-  parseExtensionProviderId,
 } from "../providers/extensionProviderId";
 import { CAMERA_PROVIDER_ID } from "./cameraCapabilityMetadata";
 import type { CameraStatusSnapshot } from "./types";
@@ -16,14 +15,6 @@ function normalizeString(value: string | null | undefined) {
 
 export function isCameraProviderId(value: string | null | undefined) {
   return matchesExtensionProviderFamily(value, CAMERA_PROVIDER_ID);
-}
-
-export function getCameraProviderInstanceId(value: string | null | undefined) {
-  const identity = parseExtensionProviderId(value);
-  if (!identity || identity.familyId !== CAMERA_PROVIDER_ID) {
-    return null;
-  }
-  return identity.instanceId;
 }
 
 export function createCameraProviderInstanceId(deviceId: string | null | undefined) {

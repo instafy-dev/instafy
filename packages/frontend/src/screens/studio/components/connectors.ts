@@ -8,8 +8,6 @@ import { FreeFinanceMark, NotionMark, SlackMark } from "./connectorMarks";
 // for may appear. Never fetched, never merged with server data, never editable
 // from the UI: a name shown here is one a reviewer approved in this file.
 
-export type ConnectorKind = "skill" | "github" | "other";
-
 /**
  * "available" routes and confirms as usual. "soon" is listed only in the
  * Connect sheet, greyed with a "Soon" Badge and never pressable

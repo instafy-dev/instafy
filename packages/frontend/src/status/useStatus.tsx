@@ -16,4 +16,3 @@ export function useStatus(): StatusContextValue {
 }
 
 export type { StatusIntent };
-export { statusBehavior, type StatusBehavior } from "./statusBehavior";

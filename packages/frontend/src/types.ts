@@ -85,17 +85,6 @@ export interface ProjectOrgInfo {
 
 export type WorkspaceEntryKind = "file" | "directory" | "other";
 
-export interface WorkspaceEntry {
-  name: string;
-  path: string;
-  kind: WorkspaceEntryKind;
-  size?: number | null;
-  modified?: string | null;
-  mimeType?: string | null;
-  extension?: string | null;
-  hasChildren?: boolean;
-}
-
 export interface CodeFile {
   id: string;
   path: string;

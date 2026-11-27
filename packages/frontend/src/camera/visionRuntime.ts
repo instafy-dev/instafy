@@ -4,12 +4,6 @@ import type {
   VisionObservation,
 } from "./visionTypes";
 
-export type {
-  VisionClassifierRegistration,
-  VisionClassifyResult,
-  VisionObservation,
-} from "./visionTypes";
-
 export async function classifyCapturedImage(
   webPath: string,
   question: string,
@@ -24,10 +18,8 @@ export async function classifyCapturedImage(
 type VisionObservationSubscriber = (observation: VisionObservation) => void;
 
 const visionObservationSubscribers = new Set<VisionObservationSubscriber>();
-let latestVisionObservation: VisionObservation | null = null;
 
 export function recordVisionObservation(observation: VisionObservation): void {
-  latestVisionObservation = observation;
   for (const subscriber of Array.from(visionObservationSubscribers)) {
     try {
       subscriber(observation);
@@ -44,13 +36,4 @@ export function subscribeVisionObservations(
   return () => {
     visionObservationSubscribers.delete(subscriber);
   };
-}
-
-export function getLatestVisionObservation(): VisionObservation | null {
-  return latestVisionObservation;
-}
-
-export function resetVisionRuntimeForTest(): void {
-  latestVisionObservation = null;
-  visionObservationSubscribers.clear();
 }

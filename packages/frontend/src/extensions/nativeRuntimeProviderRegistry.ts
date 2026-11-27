@@ -125,11 +125,6 @@ export function resolveNativeRuntimeFamilyRegistration(input: {
   );
 }
 
-export function supportsNativeProviderRuntimeOnThisClient(providerId?: string | null) {
-  const registration = resolveNativeRuntimeFamilyRegistration({ providerId });
-  return registration ? registration.supportsOnClient(getCurrentPlatform()) : false;
-}
-
 export function providerSupportsRemoteNativeExtension(providerId?: string | null) {
   return (
     resolveNativeRuntimeFamilyRegistration({ providerId })?.supportsRemoteNativeExtension === true
@@ -144,16 +139,6 @@ export function getNativeRuntimeFallbackProvider(
     return null;
   }
   return getNativeRuntimeFallbackProviderForRegistration(registration, providerId);
-}
-
-export function getNativeRuntimeFallbackProviderForCapability(
-  capabilityId: CapabilityId | null | undefined,
-): LocalProviderSummary | null {
-  const registration = resolveNativeRuntimeFamilyRegistration({ capabilityId });
-  if (!registration) {
-    return null;
-  }
-  return getNativeRuntimeFallbackProvider(registration.familyId);
 }
 
 export async function resolveCurrentClientNativeRuntimeProviderForCapability(

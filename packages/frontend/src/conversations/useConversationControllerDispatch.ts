@@ -29,12 +29,6 @@ import type { TurnEngineSendRefusal } from "./turnEngineSendRefusal";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
-export interface ConversationDispatchResult {
-  ok: boolean;
-  errorMessage?: string;
-  turnEngineRefusal?: TurnEngineSendRefusal;
-}
-
 /**
  * The controller's refusal of a send because a turn it would start runs on a
  * turn engine that cannot take it (docs/Local-Engine-Turns.md 11.6), as that
