@@ -1514,7 +1514,7 @@ pub(crate) fn normalize_named_identifier(
     Ok(normalized.to_string())
 }
 
-fn normalize_optional_identifier(value: Option<&str>, max_len: usize) -> Option<String> {
+pub(crate) fn normalize_optional_identifier(value: Option<&str>, max_len: usize) -> Option<String> {
     let normalized = value.unwrap_or("").trim();
     if normalized.is_empty() {
         return None;

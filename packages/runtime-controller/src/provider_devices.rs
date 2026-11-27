@@ -14,13 +14,15 @@ use uuid::Uuid;
 use crate::auth::{authenticate_request, require_user_session};
 use crate::device_grants::{device_changed, DeviceState};
 use crate::projects::load_project_record;
-use crate::provider_requests::TOOL_NAME_MAX_LEN;
+use crate::provider_requests::{
+    normalize_named_identifier, normalize_optional_identifier, normalize_provider_id,
+    TOOL_NAME_MAX_LEN,
+};
 use crate::{
     bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
     unauthorized, ApiError, AppState,
 };
 
-const PROVIDER_ID_MAX_LEN: usize = 128;
 const PROVIDER_FAMILY_ID_MAX_LEN: usize = 128;
 const DEVICE_ID_MAX_LEN: usize = 256;
 const DEVICE_LABEL_MAX_LEN: usize = 256;
@@ -447,23 +449,6 @@ fn provider_family_from_provider_id(provider_id: &str) -> &str {
     provider_id.split(':').next().unwrap_or(provider_id)
 }
 
-fn normalize_provider_id(raw: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Err(bad_request("providerId is required"));
-    }
-    if normalized.len() > PROVIDER_ID_MAX_LEN {
-        return Err(bad_request("providerId is too long"));
-    }
-    if !normalized
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
-    {
-        return Err(bad_request("providerId contains unsupported characters"));
-    }
-    Ok(normalized)
-}
-
 fn normalize_optional_provider_id(
     raw: Option<&str>,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
@@ -498,30 +483,6 @@ fn normalize_optional_provider_family_id(
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     raw.map(|value| normalize_provider_family_id(Some(value), value))
         .transpose()
-}
-
-fn normalize_named_identifier(
-    raw: &str,
-    field: &str,
-    max_len: usize,
-) -> Result<String, (StatusCode, Json<ApiError>)> {
-    let normalized = raw.trim();
-    if normalized.is_empty() {
-        return Err(bad_request(&format!("{field} is required")));
-    }
-    if normalized.len() > max_len {
-        return Err(bad_request(&format!("{field} is too long")));
-    }
-    Ok(normalized.to_string())
-}
-
-fn normalize_optional_identifier(value: Option<&str>, max_len: usize) -> Option<String> {
-    let normalized = value.unwrap_or("").trim();
-    if normalized.is_empty() {
-        return None;
-    }
-    let truncated = normalized.chars().take(max_len).collect::<String>();
-    Some(truncated)
 }
 
 fn normalize_platform(value: Option<&str>) -> Option<String> {

@@ -23,6 +23,7 @@ use crate::projects::{
 };
 use crate::sign_in_room::{self, OwnerSignIns, SignIn};
 use crate::typed_sql::typed;
+use crate::utils::double_option;
 use crate::{bad_request, forbidden, internal_error, not_found, ApiError, AppState};
 
 const MAX_HANDLE_LEN: usize = 20;
@@ -93,20 +94,6 @@ pub(crate) struct CreateAgentBody {
     /// Its backup AIs, in order (11.20, crate::sign_in_room): absent or null
     /// for none.
     backup_ais: Option<JsonValue>,
-}
-
-/// Distinguish "field absent" (keep) from "field: null" (clear) for PATCH
-/// bodies. A bare `Option<Option<T>>` with `#[serde(default)]` collapses JSON
-/// null into the OUTER None — identical to an absent field — which made every
-/// nullable clear (unpin runtime, reset model/credential to default) a silent
-/// no-op: the `Some(None)` clear branches below were unreachable. With this
-/// deserializer, present-but-null becomes `Some(None)` as the handlers expect.
-fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: serde::Deserializer<'de>,
-{
-    Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
