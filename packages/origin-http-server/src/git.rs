@@ -133,6 +133,11 @@ pub(crate) fn server_git_command() -> Command {
         }
     }
     command
+        // The origin reads git's messages ("Needed a single revision",
+        // "already exists", "Another git process seems to be running"), so
+        // git answers in its own English whatever language the server runs
+        // under. Paths and file contents are bytes to git either way.
+        .env("LC_ALL", "C")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -5322,6 +5327,34 @@ mod tests {
         let config = revert_test_config(&workspace_dir, &remote_dir)?;
         ensure_git_checkout(&config, None)?;
         Ok((workspace_dir, config))
+    }
+
+    /// The origin reads git's messages to tell an unborn branch, a remote
+    /// that exists and a busy repository from real failures, and those words
+    /// are English. A translated git under another language (a terminal with
+    /// `LANG=de_DE.UTF-8` and a git built with its translations) answers
+    /// "Benötigte einen einzelnen Commit", which matched nothing: the first
+    /// save into an empty space failed with "failed to resolve git HEAD".
+    #[test]
+    fn server_git_commands_answer_in_gits_own_english() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let output = server_git_command()
+            .env("LANG", "de_DE.UTF-8")
+            .env("LANGUAGE", "de")
+            .current_dir(sandbox.path())
+            .args(["init", "--quiet", "."])
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+        let output = server_git_command()
+            .env("LANG", "de_DE.UTF-8")
+            .env("LANGUAGE", "de")
+            .current_dir(sandbox.path())
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()?;
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Needed a single revision"), "{stderr}");
+        Ok(())
     }
 
     #[test]
