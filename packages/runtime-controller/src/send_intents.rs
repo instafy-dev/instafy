@@ -627,6 +627,10 @@ pub(crate) async fn apply_steer_send_intent(
     ensure_project_write_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_project_prompt_access(&transaction, &project, &context, conversation.session_id).await?;
     ensure_conversation_access(&transaction, &conversation, &context).await?;
+    // A steer stores a message, adds its sender as a participant and hands
+    // the words to the running turn: a write a review's own conversation
+    // refuses, as it refuses every other.
+    crate::conversations::ensure_not_internal_conversation(&transaction, &conversation_id).await?;
 
     let advisory_lock_key =
         conversation_message_idempotency_lock_key(&conversation_id, &client_send_id);
