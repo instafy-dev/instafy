@@ -2297,7 +2297,12 @@ const MAX_GIT_DIFF_BYTES: usize = 200_000;
 fn truncate_diff(mut diff: String) -> GitDiffOutput {
     let mut truncated = false;
     if diff.len() > MAX_GIT_DIFF_BYTES {
-        diff.truncate(MAX_GIT_DIFF_BYTES);
+        // The cut may fall inside a character, where `String::truncate` panics.
+        let mut end = MAX_GIT_DIFF_BYTES;
+        while !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        diff.truncate(end);
         diff.push_str("\n… (diff truncated)\n");
         truncated = true;
     }
@@ -4118,6 +4123,24 @@ mod tests {
 
         assert_eq!(paths, vec!["README.md"]);
         Ok(())
+    }
+
+    /// A diff is cut at 200,000 bytes. Cut inside a character, as any long
+    /// diff of text with letters outside ASCII may be, `String::truncate`
+    /// panicked and the diff came back as a 500.
+    #[test]
+    fn a_diff_cut_inside_a_character_ends_before_it() {
+        let diff = format!("{}é{}", "a".repeat(MAX_GIT_DIFF_BYTES - 1), "b".repeat(64));
+        let output = truncate_diff(diff);
+        assert!(output.truncated);
+        assert_eq!(
+            output.diff,
+            format!("{}\n… (diff truncated)", "a".repeat(MAX_GIT_DIFF_BYTES - 1))
+        );
+
+        let short = truncate_diff("é".repeat(8));
+        assert!(!short.truncated);
+        assert_eq!(short.diff, "é".repeat(8));
     }
 
     #[test]
