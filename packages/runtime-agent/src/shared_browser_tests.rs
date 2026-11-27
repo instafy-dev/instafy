@@ -1240,7 +1240,15 @@ const makePage = (targetId, opened = null) => {
           nth: (ordinal) => ({ elementHandle: async () => handleAt(ordinal) }),
           elementHandles: async () => controlsFor(targetId).map((_, ordinal) => handleAt(ordinal)),
         },
-    mouse: { wheel: async () => {} },
+    // "scroll-in-pane" records where the pointer was put and what it wheeled.
+    mouse: {
+      move: async (x, y) => {
+        if (mode === "scroll-in-pane" && clickLogPath) fs.appendFileSync(clickLogPath, `move ${x} ${y}\n`);
+      },
+      wheel: async (x, y) => {
+        if (mode === "scroll-in-pane" && clickLogPath) fs.appendFileSync(clickLogPath, `wheel ${x} ${y}\n`);
+      },
+    },
     keyboard: { press: async () => {} },
   };
 };
@@ -14789,6 +14797,34 @@ fn a_covered_click_is_refused_at_once_in_words() {
     assert_eq!(
         std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
         "0\n"
+    );
+}
+
+/// A scroll is a wheel at the pointer, and each command's pointer starts at the view's top-left
+/// corner. On a page that scrolls in a pane of its own, with a pinned side bar or header in that
+/// corner, the wheel went to the bar and scrolled nothing, while the reading still said to scroll
+/// down to read on (seen in a real browser, Nov 27: a 720 px wheel left such a pane at 0). The
+/// pointer is put in the middle of the view first.
+#[test]
+fn a_scroll_wheels_in_the_middle_of_the_view() {
+    let fixture = EmbeddedControllerFixture::new();
+    fixture.routine_snapshot("scroll-in-pane");
+    let output = fixture
+        .command_for_with_timeout(
+            "scroll-in-pane",
+            "page-target",
+            "POST",
+            "/v1/scroll",
+            Some(r#"{"x":0,"y":720}"#),
+            "100",
+        )
+        .output()
+        .expect("scroll");
+    payload_of(&output);
+    // The fake's view is 800 by 600.
+    assert_eq!(
+        std::fs::read_to_string(&fixture.click_log).unwrap_or_default(),
+        "move 400 300\nwheel 0 720\n"
     );
 }
 

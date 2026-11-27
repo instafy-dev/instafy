@@ -9816,8 +9816,18 @@ async function executeOnPage(browser, method, requestPath, body, page, tabs, doc
     assertSameOrigin(page.url(), sourceOrigin);
     const x = Number.isFinite(body.x) ? body.x : 0;
     const y = Number.isFinite(body.y) ? body.y : 0;
+    const { viewportW, viewportH } = await viewport(page);
     assertStepOnTime();
     emitAction({ type: "scroll", label: "Scroll", url: page.url() });
+    // A wheel goes to what is under the pointer, and each command's pointer
+    // starts at the view's top-left corner. Over a page that scrolls in a
+    // pane of its own, with a pinned side bar or header in that corner, the
+    // wheel went to the bar and scrolled nothing, and the reading still said
+    // to scroll down to read on. The pointer is put in the middle of the
+    // view first, over what a person reads.
+    if (viewportW && viewportH) {
+      await page.mouse.move(viewportW / 2, viewportH / 2);
+    }
     await page.mouse.wheel(x, y);
     await page.waitForTimeout(200);
     page = await resolveExpectedPage(browser);
