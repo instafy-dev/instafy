@@ -68,24 +68,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ########################
 FROM ${RUNTIME_BASE} AS runtime
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
-# Explicitly refresh inherited PCRE2, perl-base and apt; installing another package does not upgrade them.
+# Explicitly refresh inherited PCRE2, perl-base, apt and PAM; installing another package does not upgrade them.
 ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
 ARG PERL_BASE_MIN_VERSION=5.36.0-7+deb12u4
 # apt 2.6.2 fixes CVE-2026-109518.
 ARG APT_MIN_VERSION=2.6.2
+# libpam 1.5.2-6+deb12u3 fixes CVE-2025-6020.
+ARG PAM_MIN_VERSION=1.5.2-6+deb12u3
 RUN apt-get update && apt-get install -y --no-install-recommends \
       apt \
       ca-certificates \
       curl \
       libapt-pkg6.0 \
+      libpam-modules \
+      libpam-modules-bin \
+      libpam-runtime \
+      libpam0g \
       libpcre2-8-0 \
       perl-base \
     && test -n "${PCRE2_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
-    && test -n "${APT_MIN_VERSION}" \
+    && test -n "${APT_MIN_VERSION}" && test -n "${PAM_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' perl-base)" ge "${PERL_BASE_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge "${APT_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libapt-pkg6.0)" ge "${APT_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpam-modules)" ge "${PAM_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpam-modules-bin)" ge "${PAM_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpam-runtime)" ge "${PAM_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpam0g)" ge "${PAM_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/openai-proxy-server/target/${BUILD_ARTIFACT_DIR}/proxy /usr/local/bin/openai-proxy

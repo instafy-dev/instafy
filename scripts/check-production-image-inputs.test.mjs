@@ -204,6 +204,10 @@ test("every published Debian service refreshes inherited packages at its release
     ["perl-base", "PERL_BASE_MIN_VERSION", "5.36.0-7+deb12u4"],
     ["apt", "APT_MIN_VERSION", "2.6.2"],
     ["libapt-pkg6.0", "APT_MIN_VERSION", "2.6.2"],
+    ["libpam-modules", "PAM_MIN_VERSION", "1.5.2-6+deb12u3"],
+    ["libpam-modules-bin", "PAM_MIN_VERSION", "1.5.2-6+deb12u3"],
+    ["libpam-runtime", "PAM_MIN_VERSION", "1.5.2-6+deb12u3"],
+    ["libpam0g", "PAM_MIN_VERSION", "1.5.2-6+deb12u3"],
   ];
   const trixiePackages = [
     ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
