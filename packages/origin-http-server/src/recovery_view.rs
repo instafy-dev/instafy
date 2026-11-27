@@ -2094,8 +2094,10 @@ fn identity_date(identity: &str) -> Option<(i64, String)> {
         b'-' => -1,
         _ => return None,
     };
-    let hours: i32 = zone[1..3].parse().ok()?;
-    let minutes: i32 = zone[3..5].parse().ok()?;
+    // Five bytes need not be five ASCII characters: `get` gives none where a
+    // slice would panic inside one.
+    let hours: i32 = zone.get(1..3)?.parse().ok()?;
+    let minutes: i32 = zone.get(3..5)?.parse().ok()?;
     let offset = FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))?;
     let date = offset.timestamp_opt(timestamp, 0).single()?;
     Some((timestamp, date.to_rfc3339_opts(SecondsFormat::Secs, false)))
@@ -4505,5 +4507,24 @@ mod tests {
         assert_eq!(subject_only.subject, "Only a subject: here");
         assert!(subject_only.trailers.is_empty());
         assert_eq!(parse_commit(b"garbage").date, None);
+    }
+
+    /// A committer line's zone is five bytes, which need not be five ASCII
+    /// characters: sliced inside one, the list of unsaved work panicked for as
+    /// long as that commit was there.
+    #[test]
+    fn a_committer_zone_that_is_not_ascii_gives_no_date() {
+        assert_eq!(
+            identity_date("Ada <ada@example.com> 1700000000 +0100"),
+            Some((1_700_000_000, "2023-11-14T23:13:20+01:00".to_string()))
+        );
+        for zone in ["+1é2", "+é12", "é+12", "+12é"] {
+            assert_eq!(zone.len(), 5, "{zone}");
+            assert_eq!(
+                identity_date(&format!("Ada <ada@example.com> 1700000000 {zone}")),
+                None,
+                "{zone}"
+            );
+        }
     }
 }
