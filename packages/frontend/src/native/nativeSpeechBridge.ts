@@ -1,5 +1,7 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
+import { isLoopbackHostname } from "../utils/isLoopbackHostname";
+
 type NativeSpeechHttpResponse = {
   payloadJson?: string | null;
   text?: string | null;
@@ -66,11 +68,6 @@ function parsePayloadJson(payloadJson: string | null | undefined) {
 
 export function nativeSpeechBridgeAvailable() {
   return getNativeSpeechBridgePlugin() !== null;
-}
-
-function isLoopbackHostname(hostname: string) {
-  const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 export function shouldUseNativeSpeechBridgeForUrl(url: string) {

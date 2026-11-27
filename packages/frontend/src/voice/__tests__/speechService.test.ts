@@ -918,6 +918,27 @@ describe("speechService", () => {
     });
   });
 
+  it("describes a speech provider on the IPv6 loopback address as on this machine", () => {
+    // URL.hostname writes it "[::1]"; read without the brackets it counted as a tunnel.
+    expect(
+      describeSpeechServiceConnection({
+        localService: {
+          health: {
+            configured: true,
+            reachable: true,
+            url: "http://[::1]:8796/health",
+          },
+        },
+        transcription: { ready: true },
+        synthesis: { ready: true },
+      }),
+    ).toMatchObject({
+      route: "local",
+      badgeLabel: "Provider reachable",
+      detail: "Speech provider is reachable on this machine and ready for transcription and reply playback.",
+    });
+  });
+
   it("describes a reachable but warming speech provider connection", () => {
     expect(
       describeSpeechServiceConnection({
