@@ -374,6 +374,10 @@ export function useChatSubmitFlow({
     const allowWhileBusy = options?.allowWhileBusy ?? false;
     const requestedIntent = options?.intent ?? "send";
     const automatic = options?.automatic === true;
+    // A programmatic send (an Undo chip, a retry, a site's Ask Octo) carries
+    // its own text and no image: the images in the tray are for the person's
+    // next message, and count for a send from the composer alone.
+    const carriedImageCount = override ? 0 : imageFiles.length;
     const {
       agentSelection,
       browserLaunchMode,
@@ -393,7 +397,7 @@ export function useChatSubmitFlow({
       browserTargetingEnabled: !personalBrowserActive && !automatic,
       browserSessionOpen,
       hasHiddenBrowserSession,
-      imageAttachmentCount: imageFiles.length,
+      imageAttachmentCount: carriedImageCount,
       inputValue,
       override,
       pendingBrowserLaunchMode,
@@ -584,7 +588,7 @@ export function useChatSubmitFlow({
         : requestedIntent;
 
     if (effectiveIntent === "queue" || effectiveIntent === "steer") {
-      if (imageFiles.length > 0) {
+      if (carriedImageCount > 0) {
         showStatus(
           effectiveIntent === "steer"
             ? "Steer currently supports text only. Remove image attachments first."
@@ -762,7 +766,7 @@ export function useChatSubmitFlow({
       activeProjectId,
       allowWhileBusy: allowWhileBusy || participationBypassesBusySerialization,
       appendMessages,
-      attachedImageCount: imageFiles.length,
+      attachedImageCount: carriedImageCount,
       // Clearing is conditional on the composer still holding the text that was
       // queued — the same match performSubmit and the steer path make. Passing
       // the live composer value instead would always match itself and so wipe

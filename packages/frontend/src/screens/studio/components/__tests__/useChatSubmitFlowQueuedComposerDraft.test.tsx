@@ -189,6 +189,36 @@ describe("useChatSubmitFlow queued composer draft", () => {
     expect(clearComposerAfterQueue).toHaveBeenCalledWith("conversation-local", UNDO_REQUEST);
   });
 
+  it("queues a programmatic send behind a busy assistant while an image waits in the tray", async () => {
+    // A programmatic send carries no image: the screenshot the person staged
+    // is for their own next message. Counted as the send's, it was refused
+    // with "Wait for the current reply before sending images." and dropped.
+    const options = createOptions({
+      imageFiles: [new File(["png"], "screenshot.png", { type: "image/png" })],
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => {
+      root.render(<Harness options={options} resultRef={resultRef} />);
+    });
+
+    await act(async () => {
+      await resultRef.current?.submitMessage({
+        message: UNDO_REQUEST,
+        editorState: null,
+        metadata: { undoTargetMessageId: "2ee0ad74-1111-2222-3333-444455556666" },
+      });
+    });
+
+    expect(options.showStatus).not.toHaveBeenCalledWith(
+      "Wait for the current reply before sending images.",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(options.enqueueServerSendQueueItem).toHaveBeenCalledWith(
+      expect.objectContaining({ message: UNDO_REQUEST }),
+    );
+  });
+
   it("still clears the composer when the queued message is the user's own draft", async () => {
     const { composer, clearComposerAfterQueue, clearComposerIfUnchanged } =
       createComposer(TYPED_DRAFT);
