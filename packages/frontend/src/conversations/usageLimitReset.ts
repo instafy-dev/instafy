@@ -9,6 +9,8 @@
  * ("The limit resets at 2026-11-14 23:03 UTC."). Studio says that moment in
  * the clock of whoever reads the chat.
  */
+import { isSameLocalDay } from "../utils/time";
+
 const RESET_IN_UTC_PATTERN = /\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::\d{2})?\s*UTC\b/u;
 
 /** The moment the text names in UTC, as epoch ms; null when it names none. */
@@ -27,14 +29,6 @@ export function readUsageLimitResetAt(rawText: string): number | null {
   return date.getUTCDate() === day ? at : null;
 }
 
-function sameLocalDay(left: Date, right: Date): boolean {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
-}
-
 /**
  * That moment in the reader's own clock: the time alone on the same day
  * ("11:03 PM"), else with its day ("Sun, Nov 15, 12:03 AM"), and its year
@@ -43,7 +37,7 @@ function sameLocalDay(left: Date, right: Date): boolean {
 export function formatUsageLimitResetTime(resetsAt: number, now: number = Date.now()): string {
   const date = new Date(resetsAt);
   const today = new Date(now);
-  if (sameLocalDay(date, today)) {
+  if (isSameLocalDay(date, today)) {
     return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
   }
   return new Intl.DateTimeFormat(undefined, {

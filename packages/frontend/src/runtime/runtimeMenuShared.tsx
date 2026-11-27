@@ -168,6 +168,17 @@ export function formatCpuPct(value: number | null | undefined): string | null {
   return `${Math.round(value)}%`;
 }
 
+export function formatCpuLimitCores(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const rounded = Math.round(value * 10) / 10;
+  if (Number.isInteger(rounded)) {
+    return `${rounded} cores`;
+  }
+  return `${rounded.toFixed(1)} cores`;
+}
+
 export function formatBytesCompact(bytes: number): string {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;

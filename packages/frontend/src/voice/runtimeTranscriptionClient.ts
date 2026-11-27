@@ -30,9 +30,9 @@ type RuntimeTranscriptionEnv = Partial<
   >
 >;
 
-const DIRECT_SPEECH_REQUEST_TIMEOUT_MS = 20_000;
+export const DIRECT_SPEECH_REQUEST_TIMEOUT_MS = 20_000;
 
-function trimEnvValue(value: string | null | undefined): string | null {
+export function trimEnvValue(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -44,7 +44,7 @@ function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
 
-async function withDirectSpeechTimeout<T>(
+export async function withDirectSpeechTimeout<T>(
   label: string,
   task: Promise<T>,
   timeoutMs = DIRECT_SPEECH_REQUEST_TIMEOUT_MS,

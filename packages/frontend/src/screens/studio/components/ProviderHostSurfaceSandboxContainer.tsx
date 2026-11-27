@@ -5,7 +5,7 @@ import type { ProviderHostSurfaceEntry } from "../../../providers/providerHostSu
 import type { SurfaceHostActionBinding } from "./ProviderHostSurfaceActions";
 import type { SurfaceHostBinding } from "./ProviderHostSurfaceControls";
 import type { SurfaceHostSectionBinding } from "./ProviderHostSurfaceCard";
-import { ProviderHostSurfacePolicyNotice } from "./ProviderHostSurfacePolicyNotice";
+import { formatSurfaceLabel, ProviderHostSurfacePolicyNotice } from "./ProviderHostSurfacePolicyNotice";
 import { useProviderHostSurfaceSandboxRuntime } from "./useProviderHostSurfaceSandboxRuntime";
 
 type ProviderHostSurfaceSandboxContainerProps = {
@@ -14,21 +14,6 @@ type ProviderHostSurfaceSandboxContainerProps = {
   hostControlBindings?: Record<string, SurfaceHostBinding>;
   hostSectionBindings?: Record<string, SurfaceHostSectionBinding>;
 };
-
-function formatSurfaceLabel(surface: string) {
-  switch (surface) {
-    case "settings_card":
-      return "Settings card";
-    case "status_card":
-      return "Status card";
-    case "detail_view":
-      return "Detail view";
-    case "extension_tile":
-      return "Extension tile";
-    default:
-      return surface.replace(/[_-]+/g, " ");
-  }
-}
 
 export function ProviderHostSurfaceSandboxContainer({
   entry,

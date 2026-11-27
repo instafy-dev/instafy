@@ -53,3 +53,12 @@ export function formatDurationShort(milliseconds: number): string {
   }
   return `${totalMinutes}m`;
 }
+
+/** Whether two moments fall on the same day of the viewer's calendar. */
+export function isSameLocalDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}

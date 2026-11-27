@@ -1,32 +1,9 @@
 import { getNotificationSession, isNotificationSessionCurrent } from "./notificationSession";
+import { logNotificationDebug } from "./notificationsDebug";
 import {
   type WebPushSubscriptionPayload,
   controllerClient,
 } from "../sdk/instafy";
-
-const DEBUG_KEY = "instafy.notifications.debug";
-
-function notificationsDebugEnabled(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(DEBUG_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function logNotificationDebug(message: string, details?: Record<string, unknown>) {
-  if (!notificationsDebugEnabled()) {
-    return;
-  }
-  if (details) {
-    console.info(`[notifications] ${message}`, details);
-    return;
-  }
-  console.info(`[notifications] ${message}`);
-}
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padded = base64String.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(base64String.length / 4) * 4, "=");

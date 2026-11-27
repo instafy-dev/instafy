@@ -7,7 +7,12 @@ import {
   nativeSpeechBridgeAvailable,
   nativeSpeechBridgeSynthesize,
 } from "../native/nativeSpeechBridge";
-import type { RuntimeSpeechRouteOverride } from "./runtimeTranscriptionClient";
+import {
+  DIRECT_SPEECH_REQUEST_TIMEOUT_MS,
+  trimEnvValue,
+  withDirectSpeechTimeout,
+  type RuntimeSpeechRouteOverride,
+} from "./runtimeTranscriptionClient";
 
 export type RuntimeSpeechSynthesisBackendConfig = {
   url: string;
@@ -38,40 +43,8 @@ type RuntimeSpeechSynthesisEnv = Partial<
   >
 >;
 
-const DIRECT_SPEECH_REQUEST_TIMEOUT_MS = 20_000;
-
-function trimEnvValue(value: string | null | undefined): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
-}
-
-async function withDirectSpeechTimeout<T>(
-  label: string,
-  task: Promise<T>,
-  timeoutMs = DIRECT_SPEECH_REQUEST_TIMEOUT_MS,
-): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      task,
-      new Promise<T>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
 }
 
 function createTimedRequestSignal(options?: {

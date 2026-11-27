@@ -1,4 +1,5 @@
 import type { DesktopUpdatePhase } from "@instafy/ota-contracts";
+import { readStorageValue, writeStorageValue } from "../../utils/trimmedLocalStorage";
 
 const DEVICE_ID_STORAGE_KEY = "instafy.desktop-updates.deviceId";
 const SNAPSHOT_STORAGE_KEY = "instafy.desktop-updates.lastSnapshot";
@@ -19,33 +20,6 @@ export interface StoredDesktopUpdaterSnapshot {
 
 function hasWindow(): boolean {
   return typeof window !== "undefined";
-}
-
-function readStorageValue(key: string): string | null {
-  if (!hasWindow()) {
-    return null;
-  }
-  try {
-    const value = window.localStorage.getItem(key)?.trim() ?? "";
-    return value || null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStorageValue(key: string, value: string | null) {
-  if (!hasWindow()) {
-    return;
-  }
-  try {
-    if (value && value.trim()) {
-      window.localStorage.setItem(key, value.trim());
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // ignore storage failures
-  }
 }
 
 export function getOrCreateDesktopUpdateDeviceId(): string | null {

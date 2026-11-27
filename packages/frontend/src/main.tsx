@@ -16,24 +16,13 @@ import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
 import { installNativeKeyboardAccessory } from "./native/nativeKeyboardAccessory";
 import { NativeStatusBarBackground } from "./native/NativeStatusBarBackground";
+import { notificationsDebugEnabled } from "./notifications/notificationsDebug";
 import { installStudioPerformanceNavigation } from "./telemetry/studioPerformanceNavigation";
 // Installs the visibility and idle gate into React Query's focusManager before
 // any query mounts, so interval queries pause while nobody is looking.
 import "./runtime/pollingGate";
 
-const NOTIFICATIONS_DEBUG_STORAGE_KEY = "instafy.notifications.debug";
 const SW_PUSH_DEBUG_EVENT = "instafy:sw-push-debug";
-
-function notificationsDebugEnabled(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(NOTIFICATIONS_DEBUG_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 
 function installServiceWorkerPushDebugListener() {
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
