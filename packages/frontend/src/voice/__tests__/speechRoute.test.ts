@@ -4,6 +4,7 @@ import {
   createEnvSpeechRoute,
   createSpeechRoute,
   describeSpeechRouteTransport,
+  inferSpeechRouteConnectionTypeFromBaseUrl,
   isSameSpeechRoute,
   selectReachableSpeechRoute,
   selectPreferredSpeechRoute,
@@ -52,6 +53,14 @@ describe("speechRoute", () => {
         })!,
       ),
     ).toBe("desktop_tunnel");
+  });
+
+  it("reads a base URL on this machine as local, the IPv6 loopback address too", () => {
+    for (const baseUrl of ["http://localhost:8796", "http://127.0.0.1:8796", "http://[::1]:8796"]) {
+      expect(inferSpeechRouteConnectionTypeFromBaseUrl(baseUrl), baseUrl).toBe("local");
+    }
+    expect(inferSpeechRouteConnectionTypeFromBaseUrl("https://speech.example.com")).toBe("direct");
+    expect(inferSpeechRouteConnectionTypeFromBaseUrl("not a url")).toBeNull();
   });
 
   it("prefers a future desktop lan route over project and env candidates", () => {

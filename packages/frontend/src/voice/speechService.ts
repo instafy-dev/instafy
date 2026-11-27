@@ -51,6 +51,7 @@ import {
   toSpeechRouteOverride,
   type SpeechRoute,
 } from "./speechRoute";
+import { isLoopbackHostname } from "../utils/isLoopbackHostname";
 
 type SpeechProviderToolAliasKey =
   | "transcribeAudio"
@@ -239,11 +240,6 @@ export function subscribeSpeechPlaybackDebug(
   return () => {
     speechPlaybackDebugListeners.delete(listener);
   };
-}
-
-function isLoopbackHostname(hostname: string) {
-  const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function inferSpeechServiceConnectionRoute(url: string | null | undefined): SpeechServiceConnectionRoute {

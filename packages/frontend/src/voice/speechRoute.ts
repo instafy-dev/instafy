@@ -1,3 +1,5 @@
+import { isLoopbackHostname } from "../utils/isLoopbackHostname";
+
 export type SpeechRouteHostMode = "desktop" | "cli" | "server";
 
 export type SpeechRouteSource = "project" | "env" | "desktop_lan_discovery";
@@ -28,11 +30,6 @@ type ReachableSpeechRouteOptions = {
 type SpeechRouteEnv = Partial<
   Pick<ImportMetaEnv, "VITE_INSTAFY_SPEECH_BASE_URL" | "VITE_INSTAFY_SPEECH_TOKEN">
 >;
-
-function isLoopbackHostname(hostname: string) {
-  const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
-}
 
 export function normalizeSpeechRouteString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
