@@ -37,6 +37,7 @@ impl Fixture {
             .merge(crate::message_search::router())
             .merge(crate::dispatch::router())
             .merge(crate::send_queue::router())
+            .merge(crate::send_intents::router())
             .with_state(state.clone());
         Ok(Self {
             state,
@@ -417,6 +418,17 @@ async fn quiet_space_review_rejects_normal_writes_and_marker_spoofing() -> anyho
         (
             format!("/conversations/{anchor}/participants"),
             json!({"userId":f.user}),
+        ),
+        // A steer is a write too: it stores a message in the conversation,
+        // adds its sender as a participant and hands the words to the turn.
+        (
+            format!("/conversations/{anchor}/send-intents"),
+            json!({
+                "clientSendId": "steer-into-review",
+                "mode": "steer",
+                "expectedActiveJobId": "00000000-0000-4000-8000-000000000001",
+                "message": {"promptText": "inject"},
+            }),
         ),
         (
             format!("/projects/{}/conversations/blank", f.project),
