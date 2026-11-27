@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{SecondsFormat, Utc};
-use origin_http_server::apply::normalize_relative_path;
+use origin_http_server::apply::{normalize_relative_path, portable_key};
 use origin_http_server::paths::is_reserved_path;
 use reqwest::StatusCode;
 use reqwest::Url;
@@ -706,6 +706,7 @@ pub(crate) async fn commit_to_hosted_origin(
         project_id,
         runtime_id,
         lease_id,
+        workspace_dir,
         &uploads,
         &deletes,
         &changed_paths,
@@ -1192,6 +1193,9 @@ async fn release_workspace_lease(
 struct OriginWriteAccess {
     token: OriginAccessTokenResponse,
     endpoint: String,
+    /// The origin is the one this process hosts, which serves the folder the runtime works in,
+    /// whichever endpoint reaches it: what its `/apply` writes or deletes lands in that folder.
+    serves_this_folder: bool,
 }
 
 /// Mint an `fs.write` origin token under `lease_id` and pick the endpoint:
@@ -1249,7 +1253,12 @@ async fn origin_write_access(
             "targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
         );
     }
-    Ok(OriginWriteAccess { token, endpoint })
+    let serves_this_folder = local_origin.is_some_and(|local| local.origin_id == token.origin_id);
+    Ok(OriginWriteAccess {
+        token,
+        endpoint,
+        serves_this_folder,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1346,6 +1355,7 @@ async fn commit_with_lease(
     project_id: Uuid,
     runtime_id: Uuid,
     lease_id: Uuid,
+    workspace_dir: &Path,
     uploads: &[UploadEntry],
     deletes: &[String],
     paths: &[String],
@@ -1354,7 +1364,11 @@ async fn commit_with_lease(
     local_origin: Option<&LocalOriginSync>,
     title: &str,
 ) -> Result<CommitToOriginResult> {
-    let OriginWriteAccess { token, endpoint } = origin_write_access(
+    let OriginWriteAccess {
+        token,
+        endpoint,
+        serves_this_folder,
+    } = origin_write_access(
         client,
         controller_base_url,
         controller_token,
@@ -1365,6 +1379,11 @@ async fn commit_with_lease(
         "workspace apply",
     )
     .await?;
+    let deletes = if serves_this_folder {
+        deletes_the_folder_lacks(workspace_dir, deletes)
+    } else {
+        deletes.to_vec()
+    };
 
     if let Some(sender) = progress_sender.as_ref() {
         let _ = sender.send(JobMessage {
@@ -1393,7 +1412,7 @@ async fn commit_with_lease(
                 encoding: entry.encoding.clone(),
             })
             .collect(),
-        deletes: deletes.to_vec(),
+        deletes,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         expected: None,
     };
@@ -2035,6 +2054,85 @@ async fn send_origin_apply_with_retry(
     unreachable!("bounded origin apply retry loop always returns")
 }
 
+/// The deletions the origin this runtime hosts may carry out: those the folder holds nothing
+/// for, in any spelling. That origin serves the folder the turn ran in, where the turn already
+/// deleted what it deleted, so a deletion the folder still holds is one `git status` reports
+/// for a name the turn kept or reused: a file the turn replaced with a folder (`a`, now the
+/// folder's name), the old name of a case-only rename on a disk that tells case apart
+/// (`Foo.txt` beside the new `foo.txt`, one name to the origin), or a path inside a folder the
+/// turn replaced with a file (`b/x` below the file `b`, which the origin will not reach
+/// through). Carried out, it would delete the turn's new work or fail the save. Left out, it
+/// stays among the save's paths, and the git sync that follows the apply records each as the
+/// folder holds it.
+fn deletes_the_folder_lacks(workspace_dir: &Path, deletes: &[String]) -> Vec<String> {
+    let mut folder = FolderNames::default();
+    let (held, lacked): (Vec<&String>, Vec<&String>) = deletes
+        .iter()
+        .partition(|path| folder.holds(workspace_dir, path));
+    if let Some(first) = held.first() {
+        info!(
+            held = held.len(),
+            first = %first,
+            "the folder still holds deleted paths; leaving them to the git sync"
+        );
+    }
+    lacked.into_iter().cloned().collect()
+}
+
+/// The entries of a folder's directories by their [`portable_key`], each directory read once.
+#[derive(Default)]
+struct FolderNames {
+    /// Each entry as its path and whether it is a directory (a symbolic link is not one).
+    /// `None` for a directory that could not be read.
+    listings: HashMap<PathBuf, Option<HashMap<String, Vec<(PathBuf, bool)>>>>,
+}
+
+impl FolderNames {
+    /// Whether the folder at `root` holds `relative` (a normalized path) in some spelling, or
+    /// something other than a directory where one of its parents would be. A directory that
+    /// cannot be read counts as holding it.
+    fn holds(&mut self, root: &Path, relative: &str) -> bool {
+        let mut parents = vec![root.to_path_buf()];
+        let mut names = relative.split('/').peekable();
+        while let Some(name) = names.next() {
+            let key = portable_key(name);
+            let mut found = Vec::new();
+            for parent in &parents {
+                let Some(entries) = self.entries(parent) else {
+                    return true;
+                };
+                found.extend(entries.get(&key).into_iter().flatten().cloned());
+            }
+            if found.is_empty() {
+                return false;
+            }
+            if names.peek().is_none() || found.iter().any(|(_, is_dir)| !is_dir) {
+                return true;
+            }
+            parents = found.into_iter().map(|(path, _)| path).collect();
+        }
+        false
+    }
+
+    fn entries(&mut self, dir: &Path) -> Option<&HashMap<String, Vec<(PathBuf, bool)>>> {
+        self.listings
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                let mut entries = HashMap::<String, Vec<(PathBuf, bool)>>::new();
+                for entry in std::fs::read_dir(dir).ok()? {
+                    let entry = entry.ok()?;
+                    let is_dir = entry.file_type().ok()?.is_dir();
+                    entries
+                        .entry(portable_key(&entry.file_name().to_string_lossy()))
+                        .or_default()
+                        .push((entry.path(), is_dir));
+                }
+                Some(entries)
+            })
+            .as_ref()
+    }
+}
+
 fn build_zip_archive(files: &[UploadEntry]) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(Vec::new());
     {
@@ -2185,6 +2283,101 @@ mod tests {
             raw: serde_json::json!({ "type": "read" }),
         });
         file
+    }
+
+    fn deleted_file_descriptor(path: &str) -> CodexFileDescriptor {
+        let mut file = changed_file_descriptor(path);
+        file.change = Some(FileChangeDescriptor {
+            kind: FileChangeKind::Deleted,
+            lines: Vec::new(),
+            raw: serde_json::json!({ "type": "deleted" }),
+        });
+        file
+    }
+
+    /// A save whose folder still holds two of its deletions: `Foo.txt` as `foo.txt`, and `b/x`
+    /// below what is now the file `b`. The origin this runtime hosts serves that folder, through
+    /// its own listener or the token's endpoint when it names none, so it is asked to delete only
+    /// `gone.md`; an origin elsewhere serves another folder, which still holds all three, so it
+    /// is asked to delete each. Every save names all four paths.
+    #[tokio::test]
+    async fn only_the_origin_serving_this_folder_is_spared_deletions_the_folder_still_holds()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        std::fs::write(workspace.join("foo.txt"), "renamed\n")?;
+        std::fs::write(workspace.join("b"), "b is a file\n")?;
+        let files = [
+            deleted_file_descriptor("Foo.txt"),
+            deleted_file_descriptor("b/x"),
+            deleted_file_descriptor("gone.md"),
+            changed_file_descriptor("b"),
+        ];
+
+        let apply_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies_for_handler = Arc::clone(&apply_bodies);
+        let app = Router::new().route(
+            "/apply",
+            post(move |body: axum::body::Bytes| {
+                let bodies = Arc::clone(&bodies_for_handler);
+                async move {
+                    bodies.lock().unwrap().push(body.to_vec());
+                    (AxumStatusCode::OK, r#"{"rev":"rev","baseRev":"base"}"#)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let origin_address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let origin_id = Uuid::new_v4();
+        let (controller_address, _) =
+            spawn_stub_controller(origin_id, format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let mut saved_paths = Vec::new();
+        for (local_origin_id, local_endpoint) in [
+            (origin_id, format!("http://{origin_address}")),
+            (origin_id, String::new()),
+            (Uuid::new_v4(), format!("http://{origin_address}")),
+        ] {
+            let saved = commit_to_hosted_origin(
+                &controller,
+                "controller-token",
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                None,
+                &workspace,
+                &files,
+                Some(false),
+                None,
+                Some(LocalOriginSync {
+                    origin_id: local_origin_id,
+                    endpoint: local_endpoint,
+                    read_only_refresh: None,
+                    working_state: None,
+                }),
+                super::DEFAULT_VERSION_TITLE,
+            )
+            .await?
+            .context("expected a commit result")?;
+            saved_paths.push(saved.paths);
+        }
+        server.abort();
+
+        ensure!(
+            saved_paths == [["Foo.txt", "b", "b/x", "gone.md"]; 3],
+            "{saved_paths:?}"
+        );
+        let bodies = apply_bodies.lock().unwrap();
+        ensure!(bodies.len() == 3, "{} applies", bodies.len());
+        let has =
+            |body: &[u8], text: &str| body.windows(text.len()).any(|part| part == text.as_bytes());
+        ensure!(has(&bodies[0], r#""deletes":["gone.md"]"#));
+        ensure!(has(&bodies[1], r#""deletes":["gone.md"]"#));
+        ensure!(has(&bodies[2], r#""deletes":["Foo.txt","b/x","gone.md"]"#));
+        Ok(())
     }
 
     /// Origin stand-in serving /apply and /git/sync, counting apply hits.
@@ -4398,6 +4591,317 @@ mod tests {
             "{}",
             execution.summary
         );
+        Ok(())
+    }
+
+    /// A hosted space as a turn finds it: canonical `main` (a bare repository seeded with
+    /// `files`, ignored ones too), the space's folder checked out the way its origin checks it
+    /// out (its repository is `.instafy/.git`), and that origin's settings. The origin serves
+    /// that same folder, as a hosted runtime's does.
+    struct HostedSpace {
+        _temp: tempfile::TempDir,
+        remote: std::path::PathBuf,
+        workspace: std::path::PathBuf,
+        controller: reqwest::Url,
+        config: origin_http_server::config::ServerConfig,
+    }
+
+    async fn hosted_space(files: &[(&str, &str)]) -> Result<HostedSpace> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed)?;
+        git(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-q", "-b", "main"]);
+        for (path, text) in files {
+            let file = seed.join(path);
+            std::fs::create_dir_all(file.parent().context("seed folder")?)?;
+            std::fs::write(&file, text)?;
+            git(&seed, &["add", "-f", "--", path]);
+        }
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace)?;
+        let origin_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let origin_port = listener.local_addr()?.port();
+        drop(listener);
+        let controller_address = spawn_controller_for_real_origin(
+            project_id,
+            origin_id,
+            format!("http://127.0.0.1:{origin_port}"),
+        )
+        .await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let config = origin_http_server::config::ServerConfig {
+            project_id,
+            origin_id,
+            workspace_root: workspace.clone(),
+            git_remote_url: Some(format!("file://{}", remote.display())),
+            git_remote_base_url: None,
+            git_branch: "main".to_string(),
+            git_remote_name: "origin".to_string(),
+            git_author_name: "Instafy Origin".to_string(),
+            git_author_email: "origin@instafy.dev".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: origin_port,
+            controller_base_url: controller.clone(),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: controller.join("/.well-known/jwks.json")?,
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            max_archive_bytes: 1024 * 1024,
+            staging_base: None,
+            multi_tenant: false,
+            hosted_checkout: true,
+        };
+        origin_http_server::git::ensure_git_checkout(&config, None)
+            .map_err(|error| anyhow::anyhow!("checkout failed: {error:?}"))?;
+        Ok(HostedSpace {
+            _temp: temp,
+            remote,
+            workspace,
+            controller,
+            config,
+        })
+    }
+
+    /// `git` in a hosted space's folder, as a turn's own commands run it there.
+    fn space_git(workspace: &std::path::Path, args: &[&str]) -> String {
+        let git_dir = workspace.join(".instafy/.git");
+        let mut all = vec![
+            "--git-dir",
+            git_dir.to_str().unwrap(),
+            "--work-tree",
+            workspace.to_str().unwrap(),
+        ];
+        all.extend_from_slice(args);
+        git(workspace, &all)
+    }
+
+    /// What a plain-text write turn's checkpoint saves: its receipts (its model reported no
+    /// files, so they come from the folder's `git status`), plus the rest of its status delta.
+    async fn turn_checkpoint_files(
+        workspace: &std::path::Path,
+        before: &std::collections::HashMap<String, super::super::GitStatusEntry>,
+    ) -> Result<Vec<CodexFileDescriptor>> {
+        let mut receipts = Vec::new();
+        super::super::collect_workspace_change_receipts(
+            workspace,
+            &mut receipts,
+            true,
+            Some(before),
+            None,
+            &super::super::space_pages::HeldPages::default(),
+        )
+        .await?;
+        Ok(
+            super::super::checkpoint_files_with_status_delta(workspace, Some(before), &receipts)
+                .await,
+        )
+    }
+
+    /// The turn's checkpoint, through the space's real origin, which this runtime hosts as a
+    /// hosted runtime does: it serves the folder the turn ran in.
+    async fn save_through_the_origin(
+        space: &HostedSpace,
+        files: &[CodexFileDescriptor],
+    ) -> Result<Option<super::CommitToOriginResult>> {
+        let mut server = origin_http_server::server::OriginHttpServer::new(space.config.clone())?;
+        server.start().await?;
+        let saved = commit_to_hosted_origin(
+            &space.controller,
+            "workspace-token",
+            space.config.project_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &space.workspace,
+            files,
+            Some(true),
+            None,
+            Some(LocalOriginSync {
+                origin_id: space.config.origin_id,
+                endpoint: format!("http://127.0.0.1:{}", space.config.bind_port),
+                read_only_refresh: None,
+                working_state: None,
+            }),
+            "The turn's request",
+        )
+        .await;
+        server.stop().await?;
+        saved
+    }
+
+    /// A turn swapped a file for a folder (`a` became `a/x`) and a folder for a file (`b/x`
+    /// became `b`) on a hosted space, and its model reported no files, so its receipts and its
+    /// checkpoint come from the folder's `git status`: ` D a`, `?? a/x`, ` D b/x` and `?? b`.
+    /// The receipts deleted the new folder `a/` and failed on `b/x`. The origin refuses a delete
+    /// of `a` beside a write of `a/x`, and of `b/x` beside a write of `b` (each pair overlaps),
+    /// and its delete of `a` would take the new folder. The folder keeps both now, and the save
+    /// records both swaps.
+    #[tokio::test]
+    async fn a_turns_file_and_folder_swaps_are_saved_through_a_real_origin() -> Result<()> {
+        let space = hosted_space(&[
+            ("README.md", "seed\n"),
+            ("a", "a file\n"),
+            ("b/x", "in b\n"),
+        ])
+        .await?;
+        let ws = &space.workspace;
+        let before = super::super::collect_git_status_porcelain(ws)
+            .await
+            .context("status before the turn")?;
+        std::fs::remove_file(ws.join("a"))?;
+        std::fs::create_dir(ws.join("a"))?;
+        std::fs::write(ws.join("a/x"), "new in a\n")?;
+        std::fs::remove_dir_all(ws.join("b"))?;
+        std::fs::write(ws.join("b"), "b is a file\n")?;
+
+        let files = turn_checkpoint_files(ws, &before).await?;
+        let saved = save_through_the_origin(&space, &files)
+            .await?
+            .context("the checkpoint saved nothing")?;
+
+        ensure!(std::fs::read_to_string(ws.join("a/x"))? == "new in a\n");
+        ensure!(std::fs::read_to_string(ws.join("b"))? == "b is a file\n");
+        ensure!(saved.paths == ["a", "a/x", "b", "b/x"], "{:?}", saved.paths);
+        ensure!(saved.git_sync_error.is_none(), "{:?}", saved.git_sync_error);
+        let tree = git(&space.remote, &["ls-tree", "-r", "--name-only", "main"]);
+        ensure!(
+            tree.lines().collect::<Vec<_>>() == ["README.md", "a/x", "b"],
+            "{tree}"
+        );
+        ensure!(git(&space.remote, &["show", "main:a/x"]) == "new in a");
+        ensure!(git(&space.remote, &["show", "main:b"]) == "b is a file");
+        Ok(())
+    }
+
+    /// A turn replaced the folder `drafts/` with a file `drafts` that `.gitignore` leaves out, so
+    /// `git status` shows only ` D drafts/x`. The origin will not reach `drafts/x` through the
+    /// file, and it has nothing else to write, so the save asks it to apply nothing, and the
+    /// git sync records the deletion.
+    #[tokio::test]
+    async fn a_folder_swapped_for_an_ignored_file_is_saved_through_a_real_origin() -> Result<()> {
+        let space = hosted_space(&[
+            ("README.md", "seed\n"),
+            (".gitignore", "drafts\n"),
+            ("drafts/x", "a draft\n"),
+        ])
+        .await?;
+        let ws = &space.workspace;
+        let before = super::super::collect_git_status_porcelain(ws)
+            .await
+            .context("status before the turn")?;
+        std::fs::remove_dir_all(ws.join("drafts"))?;
+        std::fs::write(ws.join("drafts"), "one file now\n")?;
+
+        let files = turn_checkpoint_files(ws, &before).await?;
+        let saved = save_through_the_origin(&space, &files)
+            .await?
+            .context("the checkpoint saved nothing")?;
+
+        ensure!(std::fs::read_to_string(ws.join("drafts"))? == "one file now\n");
+        ensure!(saved.paths == ["drafts/x"], "{:?}", saved.paths);
+        ensure!(saved.git_sync_error.is_none(), "{:?}", saved.git_sync_error);
+        let tree = git(&space.remote, &["ls-tree", "-r", "--name-only", "main"]);
+        ensure!(
+            tree.lines().collect::<Vec<_>>() == [".gitignore", "README.md"],
+            "{tree}"
+        );
+        Ok(())
+    }
+
+    /// A turn replaced the file `scratch` with a folder that `.gitignore` leaves out, so `git
+    /// status` shows only ` D scratch`. The origin's delete of `scratch` would take the folder
+    /// and all it holds, so the save asks it to apply nothing, and the git sync records the
+    /// file's deletion.
+    #[tokio::test]
+    async fn a_file_swapped_for_an_ignored_folder_is_saved_through_a_real_origin() -> Result<()> {
+        let space = hosted_space(&[
+            ("README.md", "seed\n"),
+            (".gitignore", "scratch/\n"),
+            ("scratch", "a file\n"),
+        ])
+        .await?;
+        let ws = &space.workspace;
+        let before = super::super::collect_git_status_porcelain(ws)
+            .await
+            .context("status before the turn")?;
+        std::fs::remove_file(ws.join("scratch"))?;
+        std::fs::create_dir(ws.join("scratch"))?;
+        std::fs::write(ws.join("scratch/y"), "kept\n")?;
+
+        let files = turn_checkpoint_files(ws, &before).await?;
+        let saved = save_through_the_origin(&space, &files)
+            .await?
+            .context("the checkpoint saved nothing")?;
+
+        ensure!(std::fs::read_to_string(ws.join("scratch/y"))? == "kept\n");
+        ensure!(saved.paths == ["scratch"], "{:?}", saved.paths);
+        ensure!(saved.git_sync_error.is_none(), "{:?}", saved.git_sync_error);
+        let tree = git(&space.remote, &["ls-tree", "-r", "--name-only", "main"]);
+        ensure!(
+            tree.lines().collect::<Vec<_>>() == [".gitignore", "README.md"],
+            "{tree}"
+        );
+        Ok(())
+    }
+
+    /// `git mv Foo.txt foo.txt` and `git rm --cached .env`, with `.env` in `.gitignore`, on a
+    /// hosted space. `.env` stays in the folder, and in the saved version, which a save never
+    /// changes for it. On a disk that ignores case, the receipts deleted the renamed file; it
+    /// stays now, and the save keeps the saved name, which that disk takes for it. On a disk
+    /// that tells case apart, nothing holds `Foo.txt`, and the origin refused its delete beside
+    /// the write of `foo.txt` (the two collide); the save records the rename now.
+    #[tokio::test]
+    async fn a_case_only_rename_and_an_untracked_env_keep_their_files_through_a_real_origin()
+    -> Result<()> {
+        let space = hosted_space(&[
+            ("README.md", "seed\n"),
+            (".gitignore", ".env\n"),
+            (".env", "TOKEN=kept\n"),
+            ("Foo.txt", "renamed\n"),
+        ])
+        .await?;
+        let ws = &space.workspace;
+        let ignores_case = ws.join("FOO.TXT").exists();
+        let before = super::super::collect_git_status_porcelain(ws)
+            .await
+            .context("status before the turn")?;
+        space_git(ws, &["mv", "Foo.txt", "foo.txt"]);
+        space_git(ws, &["rm", "-q", "--cached", ".env"]);
+
+        let files = turn_checkpoint_files(ws, &before).await?;
+        let saved = save_through_the_origin(&space, &files)
+            .await?
+            .context("the checkpoint saved nothing")?;
+
+        ensure!(std::fs::read_to_string(ws.join(".env"))? == "TOKEN=kept\n");
+        ensure!(std::fs::read_to_string(ws.join("foo.txt"))? == "renamed\n");
+        ensure!(saved.git_sync_error.is_none(), "{:?}", saved.git_sync_error);
+        let tree = git(&space.remote, &["ls-tree", "-r", "--name-only", "main"]);
+        let saved_name = if ignores_case { "Foo.txt" } else { "foo.txt" };
+        let mut expected = vec![".env", ".gitignore", "README.md", saved_name];
+        expected.sort();
+        ensure!(tree.lines().collect::<Vec<_>>() == expected, "{tree}");
+        ensure!(git(&space.remote, &["show", &format!("main:{saved_name}")]) == "renamed");
         Ok(())
     }
 }

@@ -195,7 +195,8 @@ impl TurnStart {
         let Some(after) = super::collect_git_status_porcelain(&workspace_dir).await else {
             return Err(error);
         };
-        let mut files = super::status_delta_files_for_checkpoint(&before, &after, &[]);
+        let mut files =
+            super::status_delta_files_for_checkpoint(&workspace_dir, &before, &after, &[]);
         if local_engine {
             let paths = files
                 .iter()

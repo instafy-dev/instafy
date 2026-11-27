@@ -492,7 +492,12 @@ impl JobProcessor {
         } else if saves {
             match collect_git_status_porcelain(&folder).await {
                 Some(after) => {
-                    files = status_delta_files_for_checkpoint(&git_status_before, &after, &[]);
+                    files = status_delta_files_for_checkpoint(
+                        &folder,
+                        &git_status_before,
+                        &after,
+                        &[],
+                    );
                 }
                 None => status_steps.push(status_step(
                     "Claude Code's changes stayed on this computer and weren't saved to the space: Instafy couldn't read what changed in this space's folder.".to_string(),
